@@ -1,0 +1,81 @@
+#include <doctest/doctest.h>
+
+#include <cstdint>
+
+#include <geom/core/arena.hpp>
+#include <geom/core/handle.hpp>
+
+using geom::v1::Handle;
+using geom::v1::HandleAllocator;
+using geom::v1::ScratchArena;
+
+TEST_CASE("Handle packs index and generation") {
+  const Handle h = Handle::make(1234u, 7u);
+  CHECK(h.index() == 1234u);
+  CHECK(h.generation() == 7u);
+  CHECK_FALSE(h.is_null());
+  CHECK(Handle::null().is_null());
+  CHECK(h == Handle::make(1234u, 7u));
+  CHECK_FALSE(h == Handle::make(1235u, 7u));
+}
+
+TEST_CASE("HandleAllocator invalidates stale handles on reuse") {
+  HandleAllocator alloc;
+  const Handle a = alloc.alloc();
+  const Handle b = alloc.alloc();
+  REQUIRE(alloc.alive(a));
+  REQUIRE(alloc.alive(b));
+
+  alloc.release(a);
+  CHECK_FALSE(alloc.alive(a));
+
+  const Handle c = alloc.alloc();
+  CHECK(c.index() == a.index());
+  CHECK(c.generation() != a.generation());
+  CHECK(alloc.alive(c));
+  CHECK_FALSE(alloc.alive(a));
+}
+
+TEST_CASE("ScratchArena allocates aligned arrays and resets") {
+  ScratchArena arena;
+  auto a = arena.alloc_array<double>(100);
+  REQUIRE(a.size() == 100);
+  a[0] = 1.5;
+  a[99] = 2.5;
+  CHECK(a[0] == 1.5);
+
+  arena.reset();
+  auto b = arena.alloc_array<double>(10);
+  REQUIRE(b.size() == 10);
+  b[0] = 7.0;
+  CHECK(b[0] == 7.0);
+}
+
+TEST_CASE("HandleAllocator ignores null and stale releases") {
+  HandleAllocator alloc;
+  CHECK_FALSE(alloc.alive(Handle::null()));
+  alloc.release(Handle::null());  // must be a no-op, not a free-list entry
+
+  const Handle a = alloc.alloc();
+  alloc.release(a);
+  alloc.release(a);  // double release must not enqueue the slot twice
+  const Handle b = alloc.alloc();
+  CHECK(b.index() == a.index());
+  CHECK(alloc.alive(b));
+
+  alloc.release(a);  // stale generation must not free the live slot
+  CHECK(alloc.alive(b));
+}
+
+TEST_CASE("ScratchArena returns distinct, aligned storage") {
+  ScratchArena arena;
+  auto x = arena.alloc_array<double>(8);
+  auto y = arena.alloc_array<double>(8);
+  CHECK(x.data() != y.data());
+  CHECK(reinterpret_cast<std::uintptr_t>(x.data()) % alignof(double) == 0);
+  CHECK(reinterpret_cast<std::uintptr_t>(y.data()) % alignof(double) == 0);
+  x[0] = 1.0;
+  y[0] = 2.0;
+  CHECK(x[0] == 1.0);
+  CHECK(y[0] == 2.0);
+}
