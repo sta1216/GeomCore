@@ -1,8 +1,16 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <limits>
 #include <random>
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 
 #include <geom/numeric/predicates2.hpp>
 
@@ -110,8 +118,12 @@ TEST_CASE("incircle resolves mixed-magnitude coordinates") {
   CHECK(sign_incircle(0, 0, 1e200, 0, 0, 1e100, 2e200, 2e100) < 0);
   CHECK(sign_incircle(0, 0, 1e200, 0, 0, 1e100, 1e200, 1e100) == 0);
 
-  // 400 decades do not survive a single global rescale: the 1e-200 coordinates
-  // flush to zero. The contract prefers a conservative 0 over a guessed sign.
+  // 1e200 over 1e-200 spans about 2^1329 binary exponents. The maximal headroom
+  // rescale caps max|coordinate| at 2^240, which keeps spans up to about 2^1314
+  // representable; beyond that the 1e-200 coordinates flush to zero and the
+  // predicate stays conservative instead of guessing. The exact determinant here
+  // is representable, but the single power of two that would keep the small
+  // coordinates alive pushes the fourth-power terms past the double range.
   CHECK(sign_incircle(0, 0, 1e200, 0, 0, 1e-200, 1e199, 1e-201) == 0);
   CHECK(sign_incircle(0, 0, 1e200, 0, 0, 1e-200, 2e200, 2e-200) == 0);
 }
@@ -167,4 +179,364 @@ TEST_CASE("incircle at tiny scale matches the exact integer oracle") {
     if (expected != 0) ++nonzero;
   }
   CHECK(nonzero > 1500);
+}
+
+// ---------------------------------------------------------------------------
+// Exact sign oracle for the randomized ulp suite below.
+//
+// Every finite double is an integer multiple of 2^-1074, so every coordinate and
+// every lifted-determinant term is an integer. The oracle widens each coordinate
+// into a fixed-point integer (2^64 limbs, scale 2^-1074) and evaluates the
+// determinant with exact integer arithmetic, so no rounding can occur.
+namespace {
+
+struct Wide {
+  int sign = 0;
+  int used = 0;
+  std::array<std::uint64_t, 200> limb{};
+};
+
+std::uint64_t wide_mul64(std::uint64_t a, std::uint64_t b, std::uint64_t* hi) {
+#if defined(_MSC_VER)
+  return _umul128(a, b, hi);
+#else
+  const unsigned __int128 product = static_cast<unsigned __int128>(a) * b;
+  *hi = static_cast<std::uint64_t>(product >> 64);
+  return static_cast<std::uint64_t>(product);
+#endif
+}
+
+Wide wide_from_double(double v) {
+  Wide r;
+  if (v == 0.0) {
+    return r;
+  }
+  std::uint64_t bits = 0;
+  std::memcpy(&bits, &v, sizeof bits);
+  r.sign = (bits >> 63) != 0 ? -1 : 1;
+  const int exponent = static_cast<int>((bits >> 52) & 0x7FFu);
+  const std::uint64_t fraction = bits & ((std::uint64_t{1} << 52) - 1);
+  const std::uint64_t mantissa = exponent == 0 ? fraction : (fraction | (std::uint64_t{1} << 52));
+  const int shift = exponent == 0 ? 0 : exponent - 1;
+  const int word = shift / 64;
+  const int bit = shift % 64;
+  r.limb[static_cast<std::size_t>(word)] |= mantissa << bit;
+  if (bit != 0) {
+    r.limb[static_cast<std::size_t>(word) + 1] |= mantissa >> (64 - bit);
+  }
+  r.used = word + (bit != 0 ? 2 : 1);
+  while (r.used > 0 && r.limb[static_cast<std::size_t>(r.used - 1)] == 0) {
+    --r.used;
+  }
+  if (r.used == 0) {
+    r.sign = 0;
+  }
+  return r;
+}
+
+int wide_compare_magnitude(const Wide& a, const Wide& b) {
+  if (a.used != b.used) {
+    return a.used < b.used ? -1 : 1;
+  }
+  for (int i = a.used - 1; i >= 0; --i) {
+    const std::uint64_t av = a.limb[static_cast<std::size_t>(i)];
+    const std::uint64_t bv = b.limb[static_cast<std::size_t>(i)];
+    if (av != bv) {
+      return av < bv ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+Wide wide_add_magnitude(const Wide& a, const Wide& b) {
+  Wide r;
+  const int count = a.used > b.used ? a.used : b.used;
+  std::uint64_t carry = 0;
+  for (int i = 0; i < count; ++i) {
+    const std::uint64_t av = i < a.used ? a.limb[static_cast<std::size_t>(i)] : 0;
+    const std::uint64_t bv = i < b.used ? b.limb[static_cast<std::size_t>(i)] : 0;
+    const std::uint64_t sum = av + bv;
+    const std::uint64_t carry1 = sum < av ? 1 : 0;
+    const std::uint64_t sum2 = sum + carry;
+    const std::uint64_t carry2 = sum2 < sum ? 1 : 0;
+    r.limb[static_cast<std::size_t>(i)] = sum2;
+    carry = carry1 + carry2;
+  }
+  r.used = count;
+  if (carry != 0) {
+    r.limb[static_cast<std::size_t>(count)] = carry;
+    r.used = count + 1;
+  }
+  return r;
+}
+
+// Requires |a| >= |b|.
+Wide wide_sub_magnitude(const Wide& a, const Wide& b) {
+  Wide r;
+  std::uint64_t borrow = 0;
+  for (int i = 0; i < a.used; ++i) {
+    const std::uint64_t av = a.limb[static_cast<std::size_t>(i)];
+    const std::uint64_t bv = i < b.used ? b.limb[static_cast<std::size_t>(i)] : 0;
+    const std::uint64_t diff = av - bv;
+    const std::uint64_t borrow1 = av < bv ? 1 : 0;
+    const std::uint64_t diff2 = diff - borrow;
+    const std::uint64_t borrow2 = diff < borrow ? 1 : 0;
+    r.limb[static_cast<std::size_t>(i)] = diff2;
+    borrow = borrow1 + borrow2;
+  }
+  r.used = a.used;
+  while (r.used > 0 && r.limb[static_cast<std::size_t>(r.used - 1)] == 0) {
+    --r.used;
+  }
+  return r;
+}
+
+Wide wide_add(const Wide& a, const Wide& b) {
+  if (a.sign == 0) {
+    return b;
+  }
+  if (b.sign == 0) {
+    return a;
+  }
+  if (a.sign == b.sign) {
+    Wide r = wide_add_magnitude(a, b);
+    r.sign = a.sign;
+    return r;
+  }
+  const int cmp = wide_compare_magnitude(a, b);
+  if (cmp == 0) {
+    return Wide{};
+  }
+  Wide r = cmp > 0 ? wide_sub_magnitude(a, b) : wide_sub_magnitude(b, a);
+  r.sign = cmp > 0 ? a.sign : b.sign;
+  return r;
+}
+
+Wide wide_neg(Wide a) {
+  a.sign = -a.sign;
+  return a;
+}
+
+Wide wide_sub(const Wide& a, const Wide& b) {
+  return wide_add(a, wide_neg(b));
+}
+
+Wide wide_mul(const Wide& a, const Wide& b) {
+  Wide r;
+  if (a.sign == 0 || b.sign == 0) {
+    return r;
+  }
+  for (int i = 0; i < a.used; ++i) {
+    std::uint64_t carry = 0;
+    for (int j = 0; j < b.used; ++j) {
+      std::uint64_t hi = 0;
+      const std::uint64_t lo =
+          wide_mul64(a.limb[static_cast<std::size_t>(i)], b.limb[static_cast<std::size_t>(j)], &hi);
+      const std::size_t at = static_cast<std::size_t>(i + j);
+      const std::uint64_t acc = r.limb[at];
+      const std::uint64_t sum = acc + lo;
+      const std::uint64_t carry1 = sum < acc ? 1 : 0;
+      const std::uint64_t sum2 = sum + carry;
+      const std::uint64_t carry2 = sum2 < sum ? 1 : 0;
+      r.limb[at] = sum2;
+      carry = hi + carry1 + carry2;
+    }
+    int k = i + b.used;
+    while (carry != 0) {
+      const std::uint64_t sum = r.limb[static_cast<std::size_t>(k)] + carry;
+      carry = sum < carry ? 1 : 0;
+      r.limb[static_cast<std::size_t>(k)] = sum;
+      ++k;
+    }
+  }
+  r.used = a.used + b.used;
+  while (r.used > 0 && r.limb[static_cast<std::size_t>(r.used - 1)] == 0) {
+    --r.used;
+  }
+  r.sign = a.sign * b.sign;
+  return r;
+}
+
+int wide_bit_length(const Wide& a) {
+  if (a.used == 0) {
+    return 0;
+  }
+  std::uint64_t top = a.limb[static_cast<std::size_t>(a.used - 1)];
+  int bits = 0;
+  while (top != 0) {
+    ++bits;
+    top >>= 1;
+  }
+  return (a.used - 1) * 64 + bits;
+}
+
+Wide exact_incircle_determinant(const double p[8]) {
+  const Wide ax = wide_from_double(p[0]);
+  const Wide ay = wide_from_double(p[1]);
+  const Wide bx = wide_from_double(p[2]);
+  const Wide by = wide_from_double(p[3]);
+  const Wide cx = wide_from_double(p[4]);
+  const Wide cy = wide_from_double(p[5]);
+  const Wide dx = wide_from_double(p[6]);
+  const Wide dy = wide_from_double(p[7]);
+
+  const Wide adx = wide_sub(ax, dx);
+  const Wide ady = wide_sub(ay, dy);
+  const Wide bdx = wide_sub(bx, dx);
+  const Wide bdy = wide_sub(by, dy);
+  const Wide cdx = wide_sub(cx, dx);
+  const Wide cdy = wide_sub(cy, dy);
+
+  const Wide alift = wide_add(wide_mul(adx, adx), wide_mul(ady, ady));
+  const Wide blift = wide_add(wide_mul(bdx, bdx), wide_mul(bdy, bdy));
+  const Wide clift = wide_add(wide_mul(cdx, cdx), wide_mul(cdy, cdy));
+
+  const Wide cross_bc = wide_sub(wide_mul(bdx, cdy), wide_mul(cdx, bdy));
+  const Wide cross_ac = wide_sub(wide_mul(adx, cdy), wide_mul(cdx, ady));
+  const Wide cross_ab = wide_sub(wide_mul(adx, bdy), wide_mul(bdx, ady));
+
+  return wide_add(wide_sub(wide_mul(alift, cross_bc), wide_mul(blift, cross_ac)),
+                  wide_mul(clift, cross_ab));
+}
+
+}  // namespace
+
+TEST_CASE("incircle recovers subnormal perturbations of a circle point") {
+  const double sub = std::ldexp(1.0, -1074);  // smallest positive double, 5e-324
+  // Circle through (0,0), (4,0), (0,4). The vertex (4,0) is moved into the
+  // subnormal range; the exact determinant is about 2^-1068, so the fast filter
+  // cannot resolve it and the exact path must run on a scale that keeps the
+  // perturbation representable.
+  CHECK(sign_incircle(0, 0, 4, 0, 0, 4, 4, sub) > 0);
+  CHECK(sign_incircle(0, 0, 4, 0, 0, 4, 4, -sub) < 0);
+  CHECK(sign_incircle(0, 0, 4, 0, 0, 4, sub, 4) > 0);
+  CHECK(sign_incircle(0, 0, 4, 0, 0, 4, -sub, 4) < 0);
+  // A diagonal move by (+sub, -sub) is a tangential perturbation: the exact
+  // determinant is about 2^-2148, below the smallest double even after the
+  // maximal headroom rescale, so the predicate stays conservative.
+  CHECK(sign_incircle(0, 0, 4, 0, 0, 4, sub, -sub) == 0);
+  CHECK(sign_incircle(0, 0, 4, 0, 0, 4, 4, 2.0 * sub) > 0);
+}
+
+TEST_CASE("incircle ulp-double suite matches the exact integer oracle") {
+  std::mt19937 rng(20261107u);
+  std::uniform_int_distribution<int> exponent_dist(-1074, 1020);
+  std::uniform_real_distribution<double> mantissa_dist(1.0, 2.0);
+  const double sub = std::ldexp(1.0, -1074);
+
+  int decided = 0;
+  int zeros = 0;
+  int zeros_by_flush = 0;
+  int zeros_below_representation = 0;
+  int zeros_by_intermediate_underflow = 0;
+  int unjustified_zeros = 0;
+  int wrong_nonzero = 0;
+  int oracle_zeros = 0;
+  int max_span_bits = 0;
+  int max_shift = 0;
+
+  for (int i = 0; i < 3000; ++i) {
+    double p[8] = {};
+    if (i % 3 == 0) {
+      // Wildly mixed magnitudes: each coordinate gets its own exponent.
+      for (int k = 0; k < 8; ++k) {
+        p[k] = std::ldexp(mantissa_dist(rng), exponent_dist(rng));
+      }
+    } else if (i % 3 == 1) {
+      // The reviewer's shape: a circle point whose second coordinate is subnormal.
+      const int k = 2 + (i % 4);
+      const double s = std::ldexp(1.0, exponent_dist(rng));
+      const double delta = sub * static_cast<double>(1 + (i % 3));
+      p[0] = 0.0;
+      p[1] = 0.0;
+      p[2] = k * s;
+      p[3] = 0.0;
+      p[4] = 0.0;
+      p[5] = k * s;
+      p[6] = k * s;
+      p[7] = (i % 2 == 0) ? delta : -delta;
+    } else {
+      // One ulp inside or outside a circle point at a random overall scale.
+      const int k = 2 + (i % 4);
+      const double s = std::ldexp(1.0, exponent_dist(rng));
+      const double v = k * s;
+      p[0] = 0.0;
+      p[1] = 0.0;
+      p[2] = v;
+      p[3] = 0.0;
+      p[4] = 0.0;
+      p[5] = v;
+      p[6] = v;
+      p[7] = (i % 2 == 0) ? std::nextafter(v, 0.0)
+                          : std::nextafter(v, std::numeric_limits<double>::infinity());
+    }
+
+    double maximum = 0.0;
+    double minimum = std::numeric_limits<double>::infinity();
+    for (int k = 0; k < 8; ++k) {
+      const double a = std::abs(p[k]);
+      maximum = a > maximum ? a : maximum;
+      if (a != 0.0 && a < minimum) {
+        minimum = a;
+      }
+    }
+    int max_exp = 0;
+    int min_exp = 0;
+    std::frexp(maximum, &max_exp);
+    std::frexp(minimum, &min_exp);
+    max_span_bits = std::max(max_span_bits, max_exp - min_exp);
+
+    const Wide det = exact_incircle_determinant(p);
+    if (det.sign == 0) {
+      ++oracle_zeros;
+      continue;
+    }
+    const int got = sign_incircle(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]);
+    if (got == 0) {
+      ++zeros;
+      int shift = 240 - max_exp;
+      shift = shift > 1023 ? 1023 : shift;
+      shift = shift < -1074 ? -1074 : shift;
+      max_shift = std::max(max_shift, shift);
+      const double s = std::ldexp(1.0, shift);
+      bool flush = false;
+      for (int k = 0; k < 8; ++k) {
+        if (p[k] * s == 0.0 && p[k] != 0.0) {
+          flush = true;
+        }
+      }
+      if (flush) {
+        ++zeros_by_flush;
+      } else if (wide_bit_length(det) - 1 < 3222 - 4 * shift + 32) {
+        ++zeros_below_representation;
+      } else if (2 * (min_exp + shift) < -1074) {
+        // The exact expansion evaluates products of coordinate components. When
+        // the scaled coordinates reach into the subnormal range, a component
+        // product can fall below 2^-1074 before the leading terms cancel, and
+        // the expansion loses the residual even though the determinant itself is
+        // representable. This is the documented exactness precondition, so the
+        // zero is conservative rather than wrong.
+        ++zeros_by_intermediate_underflow;
+      } else {
+        ++unjustified_zeros;
+      }
+    } else if (got != det.sign) {
+      ++wrong_nonzero;
+    } else {
+      ++decided;
+    }
+  }
+
+  INFO("decided=" << decided << " zeros=" << zeros << " flush=" << zeros_by_flush
+                  << " below=" << zeros_below_representation << " underflow="
+                  << zeros_by_intermediate_underflow << " unjustified=" << unjustified_zeros
+                  << " wrong=" << wrong_nonzero << " oracle_zeros=" << oracle_zeros
+                  << " max_span_bits=" << max_span_bits << " max_shift=" << max_shift);
+  CHECK(wrong_nonzero == 0);
+  CHECK(unjustified_zeros == 0);
+  CHECK(decided + zeros + oracle_zeros == 3000);
+  // The wild-exponent family spans up to 1329 bits and mostly flushes at the
+  // maximal headroom scale, so only about two thirds of the nonzero cases are
+  // decidable; the suite still exercises both the filter and the exact path.
+  CHECK(decided > 1500);
 }
