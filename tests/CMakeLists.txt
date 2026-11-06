@@ -31,6 +31,7 @@ set(GEOM_TEST_SOURCES
   unit/predicates2_orient_test.cpp
   unit/core_handle_arena_test.cpp
   unit/primitives_test.cpp
+  unit/curves_test.cpp
 )
 
 add_executable(geom_tests ${GEOM_TEST_SOURCES})
