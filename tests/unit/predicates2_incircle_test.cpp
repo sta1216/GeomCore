@@ -130,3 +130,41 @@ TEST_CASE("incircle exact path decides near-cocircular points") {
   const double m = 9007199254740994.0;  // 2^53 + 2
   CHECK(sign_incircle(0, 0, k, m, k + 1.0, m + 2.0, 0.5, 0.5) < 0);
 }
+
+// ---------------------------------------------------------------------------
+// Cases appended after the fix round 1 review: at 2^-270 the fourth-power
+// determinant lands on the smallest subnormal double while the permanent is
+// itself subnormal, so kIncircleErrBoundA * permanent underflows to zero. The
+// filter must not trust such a determinant; the expected signs are the exact
+// integer determinants of the same coordinates divided by 2^-270.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("incircle rescales when the filter error bound is subnormal") {
+  const double s = std::ldexp(1.0, -270);
+  CHECK(sign_incircle(-26 * s, 17 * s, 3 * s, -4 * s, -13 * s, 20 * s, -5 * s, -15 * s) < 0);
+  CHECK(sign_incircle(13 * s, -13 * s, 14 * s, -13 * s, 31 * s, -18 * s, 2 * s, -15 * s) > 0);
+  CHECK(sign_incircle(-2 * s, -17 * s, 30 * s, -6 * s, 1 * s, -27 * s, 27 * s, -3 * s) < 0);
+  CHECK(sign_incircle(36 * s, 3 * s, 38 * s, 5 * s, 9 * s, 0.0, -2 * s, 28 * s) < 0);
+  CHECK(sign_incircle(-8 * s, 16 * s, 0.0, -12 * s, -5 * s, 14 * s, -38 * s, -5 * s) > 0);
+  // Exactly cocircular at the same scale: the rounded determinant is meaningless,
+  // the answer must still be 0.
+  CHECK(sign_incircle(0.0, 0.0, s, 0.0, 0.0, s, s, s) == 0);
+}
+
+TEST_CASE("incircle at tiny scale matches the exact integer oracle") {
+  const double s = std::ldexp(1.0, -270);
+  std::mt19937 rng(20261107u);
+  std::uniform_int_distribution<int> dist(-40, 40);
+  int nonzero = 0;
+  for (int i = 0; i < 3000; ++i) {
+    const int ax = dist(rng), ay = dist(rng);
+    const int bx = dist(rng), by = dist(rng);
+    const int cx = dist(rng), cy = dist(rng);
+    const int dx = dist(rng), dy = dist(rng);
+    const int expected = incircle_oracle(ax, ay, bx, by, cx, cy, dx, dy);
+    const int got = sign_incircle(ax * s, ay * s, bx * s, by * s, cx * s, cy * s, dx * s, dy * s);
+    REQUIRE(got == expected);
+    if (expected != 0) ++nonzero;
+  }
+  CHECK(nonzero > 1500);
+}

@@ -148,7 +148,7 @@ inline int incircle_exact(double ax, double ay, double bx, double by, double cx,
 }
 
 // 在给定尺度上的分类结果，语义与 OrientDecision 相同：rescale 表示 double 过滤本身
-// 已经不可用——升降项上溢，或全部下溢为 0。
+// 已经不可用——升降项上溢、全部下溢为 0，或误差界下溢到非正规区。
 enum class IncircleDecision { pos, neg, exact, rescale };
 
 inline IncircleDecision classify_incircle(double ax, double ay, double bx, double by, double cx,
@@ -168,6 +168,10 @@ inline IncircleDecision classify_incircle(double ax, double ay, double bx, doubl
   if (!std::isfinite(det) || !std::isfinite(permanent)) return IncircleDecision::rescale;
   if (permanent == 0.0) return IncircleDecision::rescale;  // 全部下溢为 0
   const double errbound = kIncircleErrBoundA * permanent;
+  // 误差界必须是正规 double。permanent 落在次正规区时 errbound 会下溢为 0，而此时的 det
+  // 本身也已是次正规数，舍入误差与它同量级，任何非零比较都可能给出错误符号。这种情形
+  // 必须换一个尺度，不能当作精确判定。
+  if (!(errbound >= std::numeric_limits<double>::min())) return IncircleDecision::rescale;
   if (det > errbound) return IncircleDecision::pos;
   if (-det > errbound) return IncircleDecision::neg;
   return IncircleDecision::exact;
@@ -178,13 +182,20 @@ inline IncircleDecision classify_incircle(double ax, double ay, double bx, doubl
 // incircle 符号：返回 -1/0/1。正号表示 d 在以 a,b,c 为顶点的圆内（a,b,c 逆时针）。
 // 八个坐标中任意一个非有限（NaN 或 ±inf）都返回 0，与它出现在第几个参数无关。
 //
-// 精确性前提：对有限输入，只要缩放后的行列式不低于约 2^-1074（展开后的每个分量仍是
-// 有限 double），结果就是精确的。行列式是 4 次齐次的，可表示范围比 orient2d 窄得多，
-// 所以本函数不会返回错误的非零符号：当坐标的动态范围超过一次全局 2 的幂缩放所能表示的
-// 范围（缩放时小坐标被冲成 0）或展开后下溢时，返回保守的 0，而不是猜测符号。
+// 数值前提：过滤把 det 的舍入误差限制在 kIncircleErrBoundA * permanent 之内，前提是
+// permanent 是正规 double，从而误差界本身也是正规数。行列式关于坐标是 4 次齐次的，
+// 可表示范围比 orient2d 窄得多（约 300 个十进制的全局动态范围）。
 //
-// 先按原始尺度分类，仅当产物上溢或全部下溢为 0 时才按 2 的幂重缩放。未缩放优先是必要的：
-// 1e200 与 1e100 这类混合量级一旦直接缩放，小坐标就会下溢，未缩放时过滤仍能给出符号。
+// 返回 0 的三种情况，都只表示“未知/退化”，绝不是错误符号：
+//   (a) 未缩放与缩放后的行列式都无法表示（两轮分类都退回 rescale，或展开后下溢）；
+//   (b) 缩放把某个非零坐标冲成 0，缩放后的构型已经不是输入构型；
+//   (c) 坐标的全局动态范围超过上面那段上限。
+// 在支持的范围内，有限输入总是得到精确符号；范围之外返回 0 而不是猜测的符号，
+// 因此本函数在任何情况下都不会返回错误的非零符号。
+//
+// 先按原始尺度分类，仅当产物上溢、全部下溢为 0 或误差界不是正规数时才按 2 的幂重缩放。
+// 未缩放优先是必要的：1e200 与 1e100 这类混合量级一旦直接缩放，小坐标就会下溢，未缩放时
+// 过滤仍能给出符号。
 inline int sign_incircle(double ax, double ay, double bx, double by, double cx, double cy,
                          double dx, double dy) noexcept {
   if (!(std::isfinite(ax) && std::isfinite(ay) && std::isfinite(bx) && std::isfinite(by) &&
@@ -207,7 +218,8 @@ inline int sign_incircle(double ax, double ay, double bx, double by, double cx, 
   }
 
   // 行列式关于坐标是 4 次齐次的，按统一的 2 的幂缩放不改变符号。夹紧 shift 是下溢安全
-  // 的关键：次正规输入的 exp2 约 -1074，直接取 -exp2 会让 ldexp 得到 +inf。
+  // 的关键：次正规输入的 exp2 约 -1074，直接取 -exp2 会让 ldexp 得到 +inf。输入极小时
+  // shift 为正（向上放大，不会冲掉任何非零坐标），输入极大时 shift 为负。
   int exp2 = 0;
   std::frexp(m, &exp2);
   int shift = -exp2;
