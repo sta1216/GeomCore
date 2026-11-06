@@ -26,8 +26,13 @@ endif()
 set(GEOM_TEST_SOURCES
   support/test_main.cpp
   unit/test_smoke.cpp
+  unit/core_result_test.cpp
 )
 
 add_executable(geom_tests ${GEOM_TEST_SOURCES})
 target_link_libraries(geom_tests PRIVATE geom_core doctest::doctest)
+# doctest forward-declares std::ostream by default; MSVC then fails to compile
+# CHECK on std::string_view (its operator<< needs the real <ostream>). Ask
+# doctest to include the standard headers instead of forward-declaring them.
+target_compile_definitions(geom_tests PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
 add_test(NAME geom_tests COMMAND geom_tests)
