@@ -28,6 +28,7 @@ set(GEOM_TEST_SOURCES
   unit/test_smoke.cpp
   unit/core_result_test.cpp
   unit/numeric_expansion_test.cpp
+  unit/predicates2_orient_test.cpp
 )
 
 add_executable(geom_tests ${GEOM_TEST_SOURCES})
