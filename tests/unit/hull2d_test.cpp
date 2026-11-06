@@ -84,3 +84,13 @@ TEST_CASE("hull classifies near-collinear points exactly") {
   std::vector<Point2d> flat{{0, 0}, {1, 1}, {2, 2}};
   CHECK(convex_hull2d(flat).size() == 2);
 }
+
+TEST_CASE("hull accepts finite coordinates across the full double range") {
+  // Finite coordinates are the documented precondition; extreme but finite
+  // magnitudes must still produce an exact hull (sign_orient2d sees the wide span).
+  std::vector<Point2d> wide{
+      {0, 0}, {1e200, 0}, {1e200, 1e-200}, {0, 1e200}, {1e199, 1e-199}};
+  const auto h = convex_hull2d(wide);
+  REQUIRE(h.size() == 4);
+  CHECK((h[0] == 0 && h[1] == 1 && h[2] == 2 && h[3] == 3));
+}

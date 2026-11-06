@@ -1,6 +1,8 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -26,9 +28,23 @@ inline namespace v1 {
 // Collinearity is decided by sign_orient2d, never by a floating-point cross
 // product, so near-collinear configurations are classified exactly.
 //
-// The returned indices are std::uint32_t, so the input may hold at most
-// 2^32 - 1 points.
+// Preconditions (documented, checked by assert in debug builds):
+//   - every coordinate is finite. A NaN coordinate violates the strict weak
+//     ordering the sort comparator relies on, and sign_orient2d would classify
+//     the affected orientation as 0.
+//   - pts.size() <= 2^32 - 1, because indices are std::uint32_t. Larger inputs
+//     are unsupported and would silently wrap their indices; the assert makes
+//     that a debug-build failure instead of a wrong hull.
+// Both are caller errors: this function has no Result return and does not try
+// to repair its input, so neither check changes the answer in release builds.
 inline std::vector<std::uint32_t> convex_hull2d(std::span<const Point2d> pts) {
+  assert(pts.size() <= (std::size_t{1} << 32) - 1);
+#ifndef NDEBUG
+  for (const Point2d& p : pts) {
+    assert(std::isfinite(p[0]) && std::isfinite(p[1]));
+  }
+#endif
+
   std::vector<std::uint32_t> idx(pts.size());
   for (std::uint32_t i = 0; i < pts.size(); ++i) idx[i] = i;
   std::sort(idx.begin(), idx.end(), [&](std::uint32_t a, std::uint32_t b) {
