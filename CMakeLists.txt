@@ -10,6 +10,9 @@ option(GEOM_BUILD_TESTS "Build unit tests" ON)
 option(GEOM_BUILD_BENCH "Build benchmarks" OFF)
 option(GEOM_WERROR "Treat warnings as errors" OFF)
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
 include(cmake/GeomWarnings.cmake)
 
 # Coverage instrumentation comes from GCC/Clang's --coverage runtime, which
@@ -27,8 +30,36 @@ endif()
 add_library(geom_core INTERFACE)
 add_library(GeomCore::core ALIAS geom_core)
 target_include_directories(geom_core INTERFACE
-  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>)
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+# Export the language level so installed consumers compile the headers with
+# C++20 instead of the compiler default.
+target_compile_features(geom_core INTERFACE cxx_std_20)
 target_link_libraries(geom_core INTERFACE geom_warnings)
+
+# Installed package: headers plus the geom_core/geom_warnings interface targets.
+# doctest is a test-only dependency and must never reach the install tree.
+set_target_properties(geom_core PROPERTIES EXPORT_NAME core)
+set_target_properties(geom_warnings PROPERTIES EXPORT_NAME warnings)
+
+install(TARGETS geom_core geom_warnings EXPORT geomTargets)
+install(DIRECTORY include/ DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
+install(EXPORT geomTargets
+  FILE geomTargets.cmake
+  NAMESPACE GeomCore::
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/GeomCore")
+configure_package_config_file(
+  cmake/GeomCoreConfig.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/GeomCoreConfig.cmake"
+  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/GeomCore")
+write_basic_package_version_file(
+  "${CMAKE_CURRENT_BINARY_DIR}/GeomCoreConfigVersion.cmake"
+  VERSION "${PROJECT_VERSION}"
+  COMPATIBILITY SameMajorVersion)
+install(FILES
+  "${CMAKE_CURRENT_BINARY_DIR}/GeomCoreConfig.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/GeomCoreConfigVersion.cmake"
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/GeomCore")
 
 if(GEOM_BUILD_TESTS)
   enable_testing()

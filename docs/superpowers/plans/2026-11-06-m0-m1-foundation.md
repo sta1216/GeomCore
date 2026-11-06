@@ -3388,13 +3388,14 @@ git commit -m "test: add coverage gate and close negative-path gaps"
 
 在 Task 14 合并后执行：
 
-- [ ] `cmake -S . -B build -DGEOM_WERROR=ON -DGEOM_BUILD_BENCH=ON`
-- [ ] `cmake --build build --config Release`
-- [ ] `ctest --test-dir build -C Release --output-on-failure` → 全绿（含 M0 出口用例、Delaunay 空圆性质、覆盖缺口用例）
-- [ ] `./build/Release/geom_bench_predicates`（Windows：`.\build\Release\geom_bench_predicates.exe`）→ `orient2d` 过滤路径 < 200 ns/call，退出码 0
+- [x] `cmake -S . -B build -DGEOM_WERROR=ON -DGEOM_BUILD_BENCH=ON`
+- [x] `cmake --build build --config Release`
+- [x] `ctest --test-dir build -C Release --output-on-failure` → 全绿（含 M0 出口用例、Delaunay 空圆性质、覆盖缺口用例）
+- [x] `./build/Release/geom_bench_predicates`（Windows：`.\build\Release\geom_bench_predicates.exe`）→ `orient2d` 过滤路径 < 200 ns/call，退出码 0
 - [ ] 覆盖率门禁通过（CI `coverage` job 或本地 gcovr）：全局行 ≥ 90%、分支 ≥ 85%；core/numeric 达到测试策略 §2 的 95%/90% 模块目标
-- [ ] 新建 `docs/benchmarks/m1.md`，记录：日期、OS、编译器版本、CPU 型号、`orient2d` ns/call、Delaunay 38 点用例耗时（`ctest -R geom_tests -V` 输出中该用例的时间）、覆盖率摘要
-- [ ] 在架构文档 §16.2 勾选已满足的 M0/M1 出口条件（未满足项必须写明原因，不允许勾选）
+  - 本地为 MSVC 构建，无法运行 gcovr；CI `coverage` job 已就绪，首次运行后回填实际百分比。门禁命令与空数据失败行为已由 Task 14 评审验证。
+- [x] 新建 `docs/benchmarks/m1.md`，记录：日期、OS、编译器版本、CPU 型号、`orient2d` ns/call、Delaunay 38 点用例耗时（`ctest -R geom_tests -V` 输出中该用例的时间）、覆盖率摘要
+- [x] 在架构文档 §16.3 记录 M0/M1 出口状态（§16.2 是表格而非勾选框；未满足项已写明原因）
 
 ---
 
@@ -3405,7 +3406,7 @@ git commit -m "test: add coverage gate and close negative-path gaps"
 | 架构要求 | 覆盖任务 |
 | --- | --- |
 | L0 配置/错误/断言/handle/arena | T1、T2、T5 |
-| L1 标量 traits / 区间过滤 / 精确谓词 / SoS | T3、T4、T10（SoS 留给 Delaunay 后置：当前用「重复点跳过 + 超三角形」代替） |
+| L1 标量 traits / 区间过滤 / 精确谓词 / SoS | T3、T4、T10（SoS 留给后续：T12 当前用「精确凸包扇形 + Lawson flips」构造初始三角剖分，不依赖辅助超三角形；共圆输入仍按前置条件排除） |
 | L2 图元、曲线曲面 | T6、T7、T8 |
 | L4 2D 凸包/Delaunay | T11、T12 |
 | L3 BVH | T13 |

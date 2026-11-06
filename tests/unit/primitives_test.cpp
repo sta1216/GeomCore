@@ -99,6 +99,15 @@ TEST_CASE("box merge and containment") {
   CHECK(m.diagonal().v[2] == doctest::Approx(6.0));
   CHECK(m.contains(Point3d{0.5, 1.5, 2.0}));
   CHECK_FALSE(m.contains(Point3d{0.5, 5.0, 2.0}));
+
+  // NaN fails both comparisons and must not be reported as contained.
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  CHECK_FALSE(m.contains(Point3d{nan, 1.5, 2.0}));
+  CHECK_FALSE(m.contains(Point3d{0.5, nan, 2.0}));
+  CHECK_FALSE(m.contains(Point3d{0.5, 1.5, nan}));
+  CHECK_FALSE(m.contains(Point3d{inf, 1.5, 2.0}));
+  CHECK_FALSE(m.contains(Point3d{-inf, 1.5, 2.0}));
 }
 
 TEST_CASE("degenerate segment collapses to its point") {

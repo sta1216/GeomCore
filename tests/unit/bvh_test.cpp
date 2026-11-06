@@ -22,14 +22,13 @@ bool ray_tri(const Ray3d& r, const Triangle3d& t, double& tout) {
   const Vec3d pv = geom::v1::cross(r.dir, e2);
   const double det = geom::v1::dot(e1, pv);
   if (std::abs(det) < 1e-14) return false;
-  const double inv = 1.0 / det;
   const Vec3d tv{r.origin[0] - t.a[0], r.origin[1] - t.a[1], r.origin[2] - t.a[2]};
-  const double u = geom::v1::dot(tv, pv) * inv;
+  const double u = geom::v1::dot(tv, pv) / det;
   if (u < 0.0 || u > 1.0) return false;
   const Vec3d qv = geom::v1::cross(tv, e1);
-  const double v = geom::v1::dot(r.dir, qv) * inv;
+  const double v = geom::v1::dot(r.dir, qv) / det;
   if (v < 0.0 || u + v > 1.0) return false;
-  const double tt = geom::v1::dot(e2, qv) * inv;
+  const double tt = geom::v1::dot(e2, qv) / det;
   if (tt <= 0.0) return false;
   tout = tt;
   return true;
@@ -406,6 +405,27 @@ TEST_CASE("BVH raycast includes a hit exactly at tmax") {
 
   // A budget just above the hit still reports the same t.
   CHECK(bvh.raycast(ray, std::nextafter(1.0, 2.0), hit));
+  CHECK(hit.t == 1.0);
+}
+
+TEST_CASE("BVH raycast keeps an exact t = 1 hit exact") {
+  // Regression: tt = num * (1/det) rounded num == det to 0x1.fffffffffffffp-1.
+  // The six literals are exact hex floats; the hit point is constructed at
+  // t = 1 by origin = p - dir.
+  const Triangle3d tri{
+      Point3d{-0x1.97516e455b738p+0, 0x1.6edbddb7820bap+0, -0x1.4b6b2cd729280p-3},
+      Point3d{0x1.d5400339b7474p+0, 0x1.db1788b645f04p-1, 0x1.30a65e6874de0p-2},
+      Point3d{-0x1.2ab1c98db2b68p-2, 0x1.7d3114c3d6edcp-1, -0x1.07ce2d175799ap+0}};
+  std::vector<Triangle3d> tris{tri};
+  Bvh bvh;
+  bvh.build(tris);
+  const Ray3d ray{
+      Point3d{-0x1.cbc66c5d49575p-1, 0x1.f5244fde8fbc8p-3, 0x1.41a2b266eaa0ep-1},
+      Vec3d{0x1.4634d534141f2p-1, 0x1.cca0934339b4ep-1, -0x1.9c7d031b3f67ep-1}};
+
+  Bvh::Hit hit;
+  REQUIRE(bvh.raycast(ray, 2.0, hit));
+  CHECK(hit.prim == 0u);
   CHECK(hit.t == 1.0);
 }
 

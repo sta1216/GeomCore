@@ -427,14 +427,16 @@ class Bvh {
     const double scale =
         std::sqrt(dot(e1, e1)) * std::sqrt(dot(e2, e2)) * std::sqrt(dot(r.dir, r.dir));
     if (!(std::abs(det) > 1e-14 * scale)) return false;
-    const double inv = 1.0 / det;
     const Vec3d tv{r.origin[0] - t.a[0], r.origin[1] - t.a[1], r.origin[2] - t.a[2]};
-    const double u = dot(tv, pv) * inv;
+    // Divide by det instead of multiplying by 1/det: the reciprocal is
+    // rounded once, so num * (1/det) can land one ulp off even when num == det
+    // (t = 1). Division rounds the quotient directly and returns exactly 1.
+    const double u = dot(tv, pv) / det;
     if (u < 0.0 || u > 1.0) return false;
     const Vec3d qv = cross(tv, e1);
-    const double v = dot(r.dir, qv) * inv;
+    const double v = dot(r.dir, qv) / det;
     if (v < 0.0 || u + v > 1.0) return false;
-    const double tt = dot(e2, qv) * inv;
+    const double tt = dot(e2, qv) / det;
     if (tt <= 0.0) return false;
     tout = tt;
     return true;

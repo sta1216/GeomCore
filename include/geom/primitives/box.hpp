@@ -42,9 +42,12 @@ struct Box {
     }
   }
 
+  // A point is contained only if every coordinate compares inside the box in
+  // both directions. Written as a positive conjunction so NaN (which fails
+  // both comparisons) is rejected instead of slipping through.
   constexpr bool contains(Point<T, D> p) const noexcept {
     for (int i = 0; i < D; ++i) {
-      if (p[i] < lo[i] || p[i] > hi[i]) return false;
+      if (!(p[i] >= lo[i] && p[i] <= hi[i])) return false;
     }
     return true;
   }
