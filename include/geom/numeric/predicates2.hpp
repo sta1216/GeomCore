@@ -109,5 +109,135 @@ inline int sign_orient2d(double ax, double ay, double bx, double by, double cx,
   return 0;
 }
 
+namespace detail {
+
+constexpr double kIncircleErrBoundA = (10.0 + 96.0 * kEpsilon) * kEpsilon;
+
+// 精确符号：d 相对过 a,b,c 的圆的位置，a,b,c 逆时针时圆内为正。
+//
+// 精确性前提：与 orient2d_exact 相同，只有所有中间量都保持有限、既不上溢也不下溢时才
+// 精确。行列式是 4 次齐次的，可表示范围比 orient2d 窄得多：|坐标| 到 1e75 量级时升降项
+// 已经接近 1e300。若展开后的分量落到次正规区之外，结果可能被保守地报告为 0。
+inline int incircle_exact(double ax, double ay, double bx, double by, double cx, double cy,
+                          double dx, double dy) noexcept {
+  const Expansion adx = Expansion::difference(ax, dx);
+  const Expansion ady = Expansion::difference(ay, dy);
+  const Expansion bdx = Expansion::difference(bx, dx);
+  const Expansion bdy = Expansion::difference(by, dy);
+  const Expansion cdx = Expansion::difference(cx, dx);
+  const Expansion cdy = Expansion::difference(cy, dy);
+
+  Expansion alift = Expansion::mul(adx, adx);
+  alift.add(Expansion::mul(ady, ady));
+  Expansion blift = Expansion::mul(bdx, bdx);
+  blift.add(Expansion::mul(bdy, bdy));
+  Expansion clift = Expansion::mul(cdx, cdx);
+  clift.add(Expansion::mul(cdy, cdy));
+
+  Expansion cross_bc = Expansion::mul(bdx, cdy);
+  cross_bc.add_scaled(Expansion::mul(cdx, bdy), -1.0);
+  Expansion cross_ac = Expansion::mul(adx, cdy);
+  cross_ac.add_scaled(Expansion::mul(cdx, ady), -1.0);
+  Expansion cross_ab = Expansion::mul(adx, bdy);
+  cross_ab.add_scaled(Expansion::mul(bdx, ady), -1.0);
+
+  Expansion det = Expansion::mul(alift, cross_bc);
+  det.add_scaled(Expansion::mul(blift, cross_ac), -1.0);
+  det.add_scaled(Expansion::mul(clift, cross_ab), 1.0);
+  return det.sign();
+}
+
+// 在给定尺度上的分类结果，语义与 OrientDecision 相同：rescale 表示 double 过滤本身
+// 已经不可用——升降项上溢，或全部下溢为 0。
+enum class IncircleDecision { pos, neg, exact, rescale };
+
+inline IncircleDecision classify_incircle(double ax, double ay, double bx, double by, double cx,
+                                          double cy, double dx, double dy) noexcept {
+  const double adx = ax - dx, ady = ay - dy;
+  const double bdx = bx - dx, bdy = by - dy;
+  const double cdx = cx - dx, cdy = cy - dy;
+  const double alift = adx * adx + ady * ady;
+  const double blift = bdx * bdx + bdy * bdy;
+  const double clift = cdx * cdx + cdy * cdy;
+  const double det = alift * (bdx * cdy - cdx * bdy) - blift * (adx * cdy - cdx * ady) +
+                     clift * (adx * bdy - bdx * ady);
+  const double permanent =
+      (std::abs(bdx * cdy) + std::abs(cdx * bdy)) * alift +
+      (std::abs(adx * cdy) + std::abs(cdx * ady)) * blift +
+      (std::abs(adx * bdy) + std::abs(bdx * ady)) * clift;
+  if (!std::isfinite(det) || !std::isfinite(permanent)) return IncircleDecision::rescale;
+  if (permanent == 0.0) return IncircleDecision::rescale;  // 全部下溢为 0
+  const double errbound = kIncircleErrBoundA * permanent;
+  if (det > errbound) return IncircleDecision::pos;
+  if (-det > errbound) return IncircleDecision::neg;
+  return IncircleDecision::exact;
+}
+
+}  // namespace detail
+
+// incircle 符号：返回 -1/0/1。正号表示 d 在以 a,b,c 为顶点的圆内（a,b,c 逆时针）。
+// 八个坐标中任意一个非有限（NaN 或 ±inf）都返回 0，与它出现在第几个参数无关。
+//
+// 精确性前提：对有限输入，只要缩放后的行列式不低于约 2^-1074（展开后的每个分量仍是
+// 有限 double），结果就是精确的。行列式是 4 次齐次的，可表示范围比 orient2d 窄得多，
+// 所以本函数不会返回错误的非零符号：当坐标的动态范围超过一次全局 2 的幂缩放所能表示的
+// 范围（缩放时小坐标被冲成 0）或展开后下溢时，返回保守的 0，而不是猜测符号。
+//
+// 先按原始尺度分类，仅当产物上溢或全部下溢为 0 时才按 2 的幂重缩放。未缩放优先是必要的：
+// 1e200 与 1e100 这类混合量级一旦直接缩放，小坐标就会下溢，未缩放时过滤仍能给出符号。
+inline int sign_incircle(double ax, double ay, double bx, double by, double cx, double cy,
+                         double dx, double dy) noexcept {
+  if (!(std::isfinite(ax) && std::isfinite(ay) && std::isfinite(bx) && std::isfinite(by) &&
+        std::isfinite(cx) && std::isfinite(cy) && std::isfinite(dx) && std::isfinite(dy))) {
+    return 0;
+  }
+  const double m = std::max({std::abs(ax), std::abs(ay), std::abs(bx), std::abs(by),
+                             std::abs(cx), std::abs(cy), std::abs(dx), std::abs(dy)});
+  if (m == 0.0) return 0;
+
+  switch (detail::classify_incircle(ax, ay, bx, by, cx, cy, dx, dy)) {
+    case detail::IncircleDecision::pos:
+      return 1;
+    case detail::IncircleDecision::neg:
+      return -1;
+    case detail::IncircleDecision::exact:
+      return detail::incircle_exact(ax, ay, bx, by, cx, cy, dx, dy);
+    case detail::IncircleDecision::rescale:
+      break;
+  }
+
+  // 行列式关于坐标是 4 次齐次的，按统一的 2 的幂缩放不改变符号。夹紧 shift 是下溢安全
+  // 的关键：次正规输入的 exp2 约 -1074，直接取 -exp2 会让 ldexp 得到 +inf。
+  int exp2 = 0;
+  std::frexp(m, &exp2);
+  int shift = -exp2;
+  if (shift > 1023) shift = 1023;
+  const double s = std::ldexp(1.0, shift);
+
+  const double sax = ax * s, say = ay * s;
+  const double sbx = bx * s, sby = by * s;
+  const double scx = cx * s, scy = cy * s;
+  const double sdx = dx * s, sdy = dy * s;
+
+  // 缩放把某个非零坐标冲成 0 时，缩放后的构型已经不是输入构型，任何非零结论都不可信；
+  // 返回保守的 0，而不是让被裁剪过的构型决定符号。
+  if ((sax == 0.0 && ax != 0.0) || (say == 0.0 && ay != 0.0) || (sbx == 0.0 && bx != 0.0) ||
+      (sby == 0.0 && by != 0.0) || (scx == 0.0 && cx != 0.0) || (scy == 0.0 && cy != 0.0) ||
+      (sdx == 0.0 && dx != 0.0) || (sdy == 0.0 && dy != 0.0)) {
+    return 0;
+  }
+
+  switch (detail::classify_incircle(sax, say, sbx, sby, scx, scy, sdx, sdy)) {
+    case detail::IncircleDecision::pos:
+      return 1;
+    case detail::IncircleDecision::neg:
+      return -1;
+    case detail::IncircleDecision::exact:
+    case detail::IncircleDecision::rescale:
+      return detail::incircle_exact(sax, say, sbx, sby, scx, scy, sdx, sdy);
+  }
+  return 0;
+}
+
 }  // namespace v1
 }  // namespace geom

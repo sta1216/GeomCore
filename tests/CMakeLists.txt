@@ -29,6 +29,7 @@ set(GEOM_TEST_SOURCES
   unit/core_result_test.cpp
   unit/numeric_expansion_test.cpp
   unit/predicates2_orient_test.cpp
+  unit/predicates2_incircle_test.cpp
   unit/core_handle_arena_test.cpp
   unit/primitives_test.cpp
   unit/curves_test.cpp
