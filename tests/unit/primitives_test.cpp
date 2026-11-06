@@ -13,6 +13,17 @@ using geom::v1::Affine;
 using geom::v1::Box3d;
 using geom::v1::Point3d;
 using geom::v1::Segment3d;
+
+namespace {
+
+// contains() must stay usable in constant expressions (C++20): no isfinite().
+constexpr Box3d kUnitBox{Point3d{0.0, 0.0, 0.0}, Point3d{1.0, 1.0, 1.0}};
+static_assert(kUnitBox.contains(Point3d{0.5, 0.5, 0.5}));
+static_assert(!kUnitBox.contains(Point3d{2.0, 0.5, 0.5}));
+static_assert(!kUnitBox.contains(Point3d{std::numeric_limits<double>::infinity(), 0.5, 0.5}));
+static_assert(!kUnitBox.contains(Point3d{std::numeric_limits<double>::quiet_NaN(), 0.5, 0.5}));
+
+}  // namespace
 using geom::v1::Vec3d;
 
 TEST_CASE("point and vector affine algebra") {

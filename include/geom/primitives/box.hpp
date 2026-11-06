@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cmath>
 #include <limits>
 #include <type_traits>
 
@@ -45,13 +44,15 @@ struct Box {
   }
 
   // A point is contained only if it is finite and every coordinate compares
-  // inside the box in both directions. NaN fails the comparisons; an explicit
-  // finite check also rejects +/-inf, which would otherwise be "inside" a box
-  // with infinite bounds.
+  // inside the box in both directions. NaN fails the comparisons; the explicit
+  // check also rejects +/-inf, which would otherwise be "inside" a box with
+  // infinite bounds. Written with comparisons (not std::isfinite) so the
+  // function stays usable in constant expressions under C++20.
   constexpr bool contains(Point<T, D> p) const noexcept {
     for (int i = 0; i < D; ++i) {
       if constexpr (std::is_floating_point_v<T>) {
-        if (!std::isfinite(p[i])) return false;
+        const T inf = std::numeric_limits<T>::infinity();
+        if (p[i] != p[i] || p[i] == inf || p[i] == -inf) return false;
       }
       if (!(p[i] >= lo[i] && p[i] <= hi[i])) return false;
     }
