@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cmath>
 #include <limits>
+#include <type_traits>
 
 #include <geom/primitives/point.hpp>
 
@@ -42,11 +44,15 @@ struct Box {
     }
   }
 
-  // A point is contained only if every coordinate compares inside the box in
-  // both directions. Written as a positive conjunction so NaN (which fails
-  // both comparisons) is rejected instead of slipping through.
+  // A point is contained only if it is finite and every coordinate compares
+  // inside the box in both directions. NaN fails the comparisons; an explicit
+  // finite check also rejects +/-inf, which would otherwise be "inside" a box
+  // with infinite bounds.
   constexpr bool contains(Point<T, D> p) const noexcept {
     for (int i = 0; i < D; ++i) {
+      if constexpr (std::is_floating_point_v<T>) {
+        if (!std::isfinite(p[i])) return false;
+      }
       if (!(p[i] >= lo[i] && p[i] <= hi[i])) return false;
     }
     return true;

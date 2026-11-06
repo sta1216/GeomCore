@@ -1122,13 +1122,16 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
 
 **M0 地基：已满足。** 谓词以独立整数/Fraction oracle 对拍（1e6 随机 + 共线、1 ulp、
 抵消、1e±200、次正规语料），NURBS 求值与导数对解析解校验，三平台 CI 矩阵已配置；
-`orient2d` 过滤路径实测约 50–58 ns/call（预算 200 ns），见 `docs/benchmarks/m1.md`。
+`orient2d` 过滤路径实测约 48–76 ns/call（不同批次；预算 200 ns），见
+`docs/benchmarks/m1.md`。
 
 **M1 按两段验收，避免把未实现项算作达标：**
 
-- **M1a（已完成，可声称）**：`hull2d`、`delaunay2`（一般位置前置）、`Bvh`
-  （raycast/nearest）及其性质与暴力差分测试；安装包与 consumer 工程验证；覆盖率
-  门禁（CI `coverage` job，首次运行后回填百分比）。对应实施计划 T11–T14。
+- **M1a（代码与测试完成；验收待覆盖率门禁）**：`hull2d`、`delaunay2`（一般位置
+  前置）、`Bvh`（raycast/nearest）及其性质与暴力差分测试；安装包与 consumer 工程
+  验证。对应实施计划 T11–T14。**覆盖率尚未在 CI 运行**：本地为 MSVC,无法产出
+  gcovr 数据,`docs/benchmarks/m1.md` 只记录了门禁定义,实际百分比待首次 CI
+  `coverage` job 通过后回填;在回填前不声称 M1a 验收完成。
 - **M1b（延期，未声称）**：CDT、多边形三角剖分、多边形布尔、KD 树，以及
   QA-1（10 万顶点布尔）、QA-2（4 线程 TSan）、QA-4（100 万三角形 BVH 预算）。
   这些能力进入 M2 前置计划，不得据 §16.2 的 M1 行声称已达标。

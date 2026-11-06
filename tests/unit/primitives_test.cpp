@@ -108,6 +108,15 @@ TEST_CASE("box merge and containment") {
   CHECK_FALSE(m.contains(Point3d{0.5, 1.5, nan}));
   CHECK_FALSE(m.contains(Point3d{inf, 1.5, 2.0}));
   CHECK_FALSE(m.contains(Point3d{-inf, 1.5, 2.0}));
+
+  // A box with infinite bounds is a valid "universe" box, but infinite points
+  // are still not contained.
+  const Box3d unbounded{Point3d{-inf, -inf, -inf}, Point3d{inf, inf, inf}};
+  CHECK(unbounded.contains(Point3d{1e300, -1e300, 0.0}));
+  CHECK_FALSE(unbounded.contains(Point3d{inf, 0.0, 0.0}));
+  CHECK_FALSE(unbounded.contains(Point3d{-inf, 0.0, 0.0}));
+  CHECK_FALSE(unbounded.contains(Point3d{nan, 0.0, 0.0}));
+  CHECK_FALSE(Box3d::empty().contains(Point3d{inf, 0.0, 0.0}));
 }
 
 TEST_CASE("degenerate segment collapses to its point") {

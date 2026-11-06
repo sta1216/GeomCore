@@ -21,7 +21,10 @@ bool ray_tri(const Ray3d& r, const Triangle3d& t, double& tout) {
   const Vec3d e2 = t.c - t.a;
   const Vec3d pv = geom::v1::cross(r.dir, e2);
   const double det = geom::v1::dot(e1, pv);
-  if (std::abs(det) < 1e-14) return false;
+  const double scale = std::sqrt(geom::v1::dot(e1, e1)) *
+                       std::sqrt(geom::v1::dot(e2, e2)) *
+                       std::sqrt(geom::v1::dot(r.dir, r.dir));
+  if (!(std::abs(det) > 1e-14 * scale)) return false;
   const Vec3d tv{r.origin[0] - t.a[0], r.origin[1] - t.a[1], r.origin[2] - t.a[2]};
   const double u = geom::v1::dot(tv, pv) / det;
   if (u < 0.0 || u > 1.0) return false;
