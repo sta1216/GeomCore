@@ -118,12 +118,11 @@ TEST_CASE("incircle resolves mixed-magnitude coordinates") {
   CHECK(sign_incircle(0, 0, 1e200, 0, 0, 1e100, 2e200, 2e100) < 0);
   CHECK(sign_incircle(0, 0, 1e200, 0, 0, 1e100, 1e200, 1e100) == 0);
 
-  // 1e200 over 1e-200 spans about 2^1329 binary exponents. The maximal headroom
-  // rescale caps max|coordinate| at 2^240, which keeps spans up to about 2^1314
-  // representable; beyond that the 1e-200 coordinates flush to zero and the
-  // predicate stays conservative instead of guessing. The exact determinant here
-  // is representable, but the single power of two that would keep the small
-  // coordinates alive pushes the fourth-power terms past the double range.
+  // 1e200 over 1e-200 spans about 2^1330 binary exponents. The exact determinants
+  // here are about 2^1325 and 2^1330, both far above DBL_MAX, so neither evaluation
+  // frame can represent the result and the predicate returns a conservative zero;
+  // the 1e-200 coordinates flushing under the maximal headroom rescale is a second,
+  // independent reason.
   CHECK(sign_incircle(0, 0, 1e200, 0, 0, 1e-200, 1e199, 1e-201) == 0);
   CHECK(sign_incircle(0, 0, 1e200, 0, 0, 1e-200, 2e200, 2e-200) == 0);
 }
@@ -412,10 +411,29 @@ TEST_CASE("incircle recovers subnormal perturbations of a circle point") {
   CHECK(sign_incircle(0, 0, 4, 0, 0, 4, sub, 4) > 0);
   CHECK(sign_incircle(0, 0, 4, 0, 0, 4, -sub, 4) < 0);
   // A diagonal move by (+sub, -sub) is a tangential perturbation: the exact
-  // determinant is about 2^-2148, below the smallest double even after the
+  // determinant is about 2^-2143, below the smallest double even after the
   // maximal headroom rescale, so the predicate stays conservative.
   CHECK(sign_incircle(0, 0, 4, 0, 0, 4, sub, -sub) == 0);
   CHECK(sign_incircle(0, 0, 4, 0, 0, 4, 4, 2.0 * sub) > 0);
+}
+
+TEST_CASE("incircle falls back to the distributed product for deep cancellation") {
+  // Two wild-exponent configurations from the randomized suite. In the scaled
+  // frame the grouped form computes cross_ab first and that intermediate cancels
+  // below 2^-1074, losing the determinant; distributing the lift into the product
+  // (clift*adx)*bdy keeps the same value as three chained exact products and
+  // recovers it. The unscaled frame cannot help here: its lift products overflow
+  // (the Expansion fills with inf/inf = NaN, and sign() would read NaN as -1).
+  // Signs come from an exact rational determinant.
+  const double p[8] = {0x1.de8a08ef0603dp+162, 0x1.54caa94adeae7p-181, 0x1.23dc67ad237c2p+108,
+                       0x1.cb90cceb66074p-81,  0x1.ae03803c9de2cp+152, 0x1.393c3471a2641p+971,
+                       0x1.670d258a5599fp+358,  0x1.d67baed6c1e4ep+155};
+  CHECK(sign_incircle(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]) < 0);
+
+  const double q[8] = {0x1.07f677ed8fef2p-373, 0x1.3d42b170871dbp-282, 0x1.f383a3ef05caap-272,
+                       0x1.f53195bf09cb0p+608, 0x1.6a2f3e15ad717p-562, 0x1.02bf204c2dc22p-423,
+                       0x1.22e43ff675baep-675, 0x1.19d381e7dcbd8p-281};
+  CHECK(sign_incircle(q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7]) > 0);
 }
 
 TEST_CASE("incircle ulp-double suite matches the exact integer oracle") {
@@ -428,8 +446,7 @@ TEST_CASE("incircle ulp-double suite matches the exact integer oracle") {
   int zeros = 0;
   int zeros_by_flush = 0;
   int zeros_below_representation = 0;
-  int zeros_by_intermediate_underflow = 0;
-  int unjustified_zeros = 0;
+  int zeros_unresolved = 0;
   int wrong_nonzero = 0;
   int oracle_zeros = 0;
   int max_span_bits = 0;
@@ -509,16 +526,11 @@ TEST_CASE("incircle ulp-double suite matches the exact integer oracle") {
         ++zeros_by_flush;
       } else if (wide_bit_length(det) - 1 < 3222 - 4 * shift + 32) {
         ++zeros_below_representation;
-      } else if (2 * (min_exp + shift) < -1074) {
-        // The exact expansion evaluates products of coordinate components. When
-        // the scaled coordinates reach into the subnormal range, a component
-        // product can fall below 2^-1074 before the leading terms cancel, and
-        // the expansion loses the residual even though the determinant itself is
-        // representable. This is the documented exactness precondition, so the
-        // zero is conservative rather than wrong.
-        ++zeros_by_intermediate_underflow;
       } else {
-        ++unjustified_zeros;
+        // The determinant is representable and no coordinate flushed, yet both
+        // the scaled and the unscaled exact frame returned zero. The dual-frame
+        // rule exists to prevent this, so any case here is a real gap.
+        ++zeros_unresolved;
       }
     } else if (got != det.sign) {
       ++wrong_nonzero;
@@ -528,15 +540,14 @@ TEST_CASE("incircle ulp-double suite matches the exact integer oracle") {
   }
 
   INFO("decided=" << decided << " zeros=" << zeros << " flush=" << zeros_by_flush
-                  << " below=" << zeros_below_representation << " underflow="
-                  << zeros_by_intermediate_underflow << " unjustified=" << unjustified_zeros
+                  << " below=" << zeros_below_representation << " unresolved=" << zeros_unresolved
                   << " wrong=" << wrong_nonzero << " oracle_zeros=" << oracle_zeros
                   << " max_span_bits=" << max_span_bits << " max_shift=" << max_shift);
   CHECK(wrong_nonzero == 0);
-  CHECK(unjustified_zeros == 0);
+  CHECK(zeros_unresolved == 0);
   CHECK(decided + zeros + oracle_zeros == 3000);
-  // The wild-exponent family spans up to 1329 bits and mostly flushes at the
-  // maximal headroom scale, so only about two thirds of the nonzero cases are
-  // decidable; the suite still exercises both the filter and the exact path.
-  CHECK(decided > 1500);
+  // Every case that survives the rescale without flushing a coordinate must be
+  // decided: the dual-frame rule leaves only flush zeros. In this suite that is
+  // 1068 of the 3000 cases (span up to 2084 bits), so 1932 are decided.
+  CHECK(zeros == zeros_by_flush + zeros_below_representation);
 }

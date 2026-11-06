@@ -104,6 +104,16 @@ class Expansion {
     return s;
   }
 
+  // An expansion that saw an inf or a NaN in an intermediate does not represent
+  // the exact value any more; callers that fall back to a second evaluation
+  // frame must not trust such a result.
+  bool all_finite() const noexcept {
+    for (double x : v_) {
+      if (!std::isfinite(x)) return false;
+    }
+    return true;
+  }
+
   std::size_t size() const noexcept { return v_.size(); }
   double operator[](std::size_t i) const noexcept { return v_[i]; }
   bool empty() const noexcept { return v_.empty(); }
