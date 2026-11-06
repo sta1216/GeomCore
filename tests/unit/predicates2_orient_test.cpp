@@ -69,3 +69,22 @@ TEST_CASE("orient2d handles mixed-magnitude input") {
   // of 1e100 / 1e-100, so the exact path must return 0 without underflow.
   CHECK(sign_orient2d(0.0, 0.0, 1e100, 1e-100, 2e100, 2e-100) == 0);
 }
+
+TEST_CASE("orient2d handles extreme magnitude spans without rescaling loss") {
+  // det = 1 with coordinates 400 (resp. 616) decades apart: only an unscaled
+  // classification can see the determinant, since scaling by 2^k would push
+  // the small coordinate out of the double range.
+  CHECK(sign_orient2d(0.0, 0.0, 1e200, 0.0, 0.0, 1e-200) > 0);
+  CHECK(sign_orient2d(0.0, 0.0, 1e308, 0.0, 0.0, 1e-308) > 0);
+  // Just above the old 1e150 rescale threshold: no discontinuity.
+  CHECK(sign_orient2d(0.0, 0.0, std::nextafter(1e150, INFINITY), 0.0, 0.0, 1e-200) > 0);
+}
+
+TEST_CASE("orient2d handles subnormal coordinates") {
+  // 2^-1063 and 2^-1074 coordinates: the determinant underflows to zero in
+  // doubles, so only a clamped (finite) rescale can classify the triangle.
+  CHECK(sign_orient2d(0.0, 0.0, 1e-320, 0.0, 0.0, 1e-320) > 0);
+  CHECK(sign_orient2d(0.0, 0.0, 5e-324, 0.0, 0.0, 5e-324) > 0);
+  CHECK(sign_orient2d(0.0, 0.0, 1e-320, 0.0, 2e-320, 0.0) == 0);
+}
+

@@ -15,11 +15,11 @@ constexpr double kCcwErrBoundA = (3.0 + 16.0 * kEpsilon) * kEpsilon;
 
 // 精确符号：det = (ax-cx)*(by-cy) - (ay-cy)*(bx-cx)，用 Expansion 计算。
 //
-// 精确性前提：本路径只在没有任何中间量上溢/下溢时才是精确的。Expansion 的
-// 每一项都必须是有限 double；若某个乘积（或展开后的分量）落到次正规区之外，
-// 精确性即失效。行列式量级低于约 2^-1074 或因乘积下溢而丢失全部有效位时，
-// 结果可能被报告为 0（保守的“退化”判定），而不是抛错。快速过滤路径则保持
-// 其通常的误差界（kCcwErrBoundA * detsum），只在过滤无法判定时才进入这里。
+// 精确性前提：本路径只在没有任何中间量上溢/下溢时才是精确的。Expansion 的每一项
+// 都必须是有限 double；若某个乘积（或展开后的分量）落到次正规区之外，精确性即失效。
+// 行列式量级低于约 2^-1074，或因乘积下溢而丢失全部有效位时，结果可能被报告为 0
+// （保守的“退化”判定），而不是抛错。快速过滤路径则保持其通常的误差界
+// （kCcwErrBoundA * detsum），只在过滤无法判定时才进入这里。
 inline int orient2d_exact(double ax, double ay, double bx, double by, double cx, double cy) noexcept {
   const Expansion acx = Expansion::difference(ax, cx);
   const Expansion acy = Expansion::difference(ay, cy);
@@ -31,14 +31,37 @@ inline int orient2d_exact(double ax, double ay, double bx, double by, double cx,
   return det.sign();
 }
 
+// 在给定尺度上的分类结果。rescale 表示 double 过滤本身已不可用：乘积上溢，或两个
+// 乘积都下溢为 0；此时只能换个尺度重新分类。
+enum class OrientDecision { pos, neg, exact, rescale };
+
+// 浮点过滤：det > errbound 时符号可信（pos/neg），否则 exact 交给精确路径；
+// 过滤本身失效（上溢/全下溢）时返回 rescale，表示“当前尺度不可用”。
+inline OrientDecision classify_orient2d(double ax, double ay, double bx, double by,
+                                        double cx, double cy) noexcept {
+  const double detleft = (ax - cx) * (by - cy);
+  const double detright = (ay - cy) * (bx - cx);
+  const double det = detleft - detright;
+  const double detsum = std::abs(detleft) + std::abs(detright);
+  if (!std::isfinite(det) || !std::isfinite(detsum)) return OrientDecision::rescale;
+  if (detsum == 0.0) return OrientDecision::rescale;  // 两个乘积都下溢了
+  const double errbound = kCcwErrBoundA * detsum;
+  if (det > errbound) return OrientDecision::pos;
+  if (-det > errbound) return OrientDecision::neg;
+  return OrientDecision::exact;
+}
+
 }  // namespace detail
 
 // 符号函数：返回 -1/0/1。调用方保证有限输入；非有限输入返回 0。
 //
-// 精确性前提（与 detail::orient2d_exact 相同）：仅当所有中间量都不上溢/下溢时
-// 精确。量级低于约 2^-1074 或乘积下溢的行列式可能被报告为 0；不会静默给出
-// 错误的非零符号。过滤路径保持通常误差界，仅在无法判定时才回退到精确路径，
-// 因此“接近退化”的输入也按精确符号分类。
+// 精确性前提：对有限输入，只要缩放后的行列式不低于约 2^-1074（即展开后的每个分量
+// 仍是有限 double），结果就是精确的。本函数不会返回错误的非零符号：当下溢使行列式
+// 无法表示时，最坏情况是保守地返回 0。
+//
+// 先按原始尺度分类，仅当 double 过滤上溢、或两个乘积都下溢为 0 时才按 2 的幂重缩放。
+// 未缩放优先是必要的：坐标量级跨度超过 300 个十进位的输入，一旦缩放就会把小坐标
+// 推下溢，而未缩放时过滤依然能给出正确的符号。
 inline int sign_orient2d(double ax, double ay, double bx, double by, double cx,
                          double cy) noexcept {
   const double m = std::max({std::abs(ax), std::abs(ay), std::abs(bx), std::abs(by),
@@ -46,26 +69,38 @@ inline int sign_orient2d(double ax, double ay, double bx, double by, double cx,
   if (!std::isfinite(m)) return 0;
   if (m == 0.0) return 0;
 
-  // 保持尺度在安全区间内：按 2 的幂缩放不改变行列式符号（齐次 3 次）。
-  constexpr double kMaxSafe = 1e150;
-  constexpr double kMinSafe = 1e-150;
-  double scale = 1.0;
-  if (m > kMaxSafe || m < kMinSafe) {
-    int exp2 = 0;
-    std::frexp(m, &exp2);
-    scale = std::ldexp(1.0, -exp2);
+  switch (detail::classify_orient2d(ax, ay, bx, by, cx, cy)) {
+    case detail::OrientDecision::pos:
+      return 1;
+    case detail::OrientDecision::neg:
+      return -1;
+    case detail::OrientDecision::exact:
+      return detail::orient2d_exact(ax, ay, bx, by, cx, cy);
+    case detail::OrientDecision::rescale:
+      break;
   }
-  ax *= scale; ay *= scale; bx *= scale; by *= scale; cx *= scale; cy *= scale;
 
-  const double detleft = (ax - cx) * (by - cy);
-  const double detright = (ay - cy) * (bx - cx);
-  const double det = detleft - detright;
-  const double detsum = std::abs(detleft) + std::abs(detright);
-  const double errbound = detail::kCcwErrBoundA * detsum;
+  // 行列式关于坐标是 2 次齐次的，所以按 2 的幂缩放不改变符号。
+  // 夹紧 shift 是下溢安全的关键：次正规输入（exp2 <= -1024）若直接取 -exp2，
+  // ldexp(1.0, -exp2) 会得到 +inf，坐标随即变成 NaN/0，符号就全错了。
+  int exp2 = 0;
+  std::frexp(m, &exp2);
+  int shift = -exp2;
+  if (shift > 1023) shift = 1023;  // 保证 s 有限，ldexp 绝不上溢
+  const double s = std::ldexp(1.0, shift);
 
-  if (det > errbound) return 1;
-  if (-det > errbound) return -1;
-  return detail::orient2d_exact(ax, ay, bx, by, cx, cy);
+  ax *= s; ay *= s; bx *= s; by *= s; cx *= s; cy *= s;
+
+  switch (detail::classify_orient2d(ax, ay, bx, by, cx, cy)) {
+    case detail::OrientDecision::pos:
+      return 1;
+    case detail::OrientDecision::neg:
+      return -1;
+    case detail::OrientDecision::exact:
+    case detail::OrientDecision::rescale:
+      return detail::orient2d_exact(ax, ay, bx, by, cx, cy);
+  }
+  return 0;
 }
 
 }  // namespace v1
