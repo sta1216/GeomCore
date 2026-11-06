@@ -191,3 +191,40 @@ TEST_CASE("plane projection and side for tilted and on-plane points") {
   CHECK(tilted.side(on_plane) == 0);
   CHECK(tilted.project(on_plane).v[1] == doctest::Approx(-2.0));
 }
+
+TEST_CASE("plane queries are normal-scale invariant") {
+  // Same geometric plane as 2y = 4, expressed with three different normals.
+  const Point3d p{0, 4, 0};
+  const Plane3 scaled{geom::v1::Vec3d{0, 2, 0}, 4.0};
+  CHECK(scaled.signed_distance(p) == doctest::Approx(2.0));
+  CHECK(scaled.side(p) == 1);
+  const Point3d projected = scaled.project(p);
+  CHECK(projected.v[0] == doctest::Approx(0.0));
+  CHECK(projected.v[1] == doctest::Approx(2.0));
+  CHECK(projected.v[2] == doctest::Approx(0.0));
+  CHECK(scaled.signed_distance(projected) == doctest::Approx(0.0).epsilon(1e-15));
+
+  const Plane3 shrunk{geom::v1::Vec3d{0, 0.5, 0}, 1.0};
+  CHECK(shrunk.signed_distance(p) == doctest::Approx(2.0));
+  CHECK(shrunk.project(p).v[1] == doctest::Approx(2.0));
+  CHECK(shrunk.side(p) == 1);
+
+  // Flipping the normal flips the orientation but not the projected point.
+  const Plane3 flipped{geom::v1::Vec3d{0, -2, 0}, 4.0};
+  CHECK(flipped.signed_distance(p) == doctest::Approx(-6.0));
+  CHECK(flipped.side(p) == -1);
+  CHECK(flipped.project(p).v[1] == doctest::Approx(-2.0));
+  CHECK(flipped.signed_distance(flipped.project(p)) == doctest::Approx(0.0).epsilon(1e-15));
+
+  // On-plane query with a non-unit, non-axis-aligned normal: 3x = 6, i.e. x = 2.
+  const Plane3 oblique{geom::v1::Vec3d{3, 0, 0}, 6.0};
+  const Point3d on{2, 5, 7};
+  CHECK(oblique.signed_distance(on) == doctest::Approx(0.0));
+  CHECK(oblique.side(on) == 0);
+  const Point3d kept = oblique.project(on);
+  CHECK(kept.v[0] == doctest::Approx(2.0));
+  CHECK(kept.v[1] == doctest::Approx(5.0));
+  CHECK(kept.v[2] == doctest::Approx(7.0));
+  CHECK(oblique.signed_distance(Point3d{5, 0, 0}) == doctest::Approx(3.0));
+  CHECK(oblique.project(Point3d{5, 0, 0}).v[0] == doctest::Approx(2.0));
+}

@@ -20,9 +20,13 @@ inline namespace v1 {
 // Validity rules mirror NurbsCurve and apply to both directions: finite
 // knots, finite control coordinates, finite positive weights, a nondegenerate
 // domain, knot multiplicity <= degree + 1, and degree in 1..kMaxCurveDegree.
-// is_valid() gates eval(), du() and dv(); parameters outside the domain are
-// clamped to it. Evaluation allocates scratch vectors, so the noexcept
-// markers are conservative for the M0 scope.
+//
+// Precondition: eval(), du() and dv() require is_valid(). Calling them on an
+// invalid surface (degree above kMaxCurveDegree, mismatched control/weight
+// sizes, non-finite data, degenerate domain, ...) is undefined behaviour, not
+// a reported error. Parameters outside the domain are clamped to it.
+// Evaluation allocates scratch vectors, so the noexcept markers are
+// conservative for the M0 scope.
 class NurbsSurface {
  public:
   NurbsSurface(int pu, int pv, std::vector<double> ku, std::vector<double> kv,
