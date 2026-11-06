@@ -9,9 +9,16 @@ namespace geom {
 inline namespace v1 {
 
 // Plane n . x = offset. The normal is stored as supplied and is never
-// normalized: all queries divide by |n| (or |n|^2 for projection), so they are
-// correct for any nonzero normal, and scaling the normal together with the
-// offset leaves the plane unchanged.
+// normalized: every query reduces the plane to its unit form (unit = n / |n|,
+// c = offset / |n|) so results are independent of the normal's scale, and
+// scaling the normal and the offset together leaves the plane unchanged.
+//
+// |n| is computed with the three-argument std::hypot, which is scale-safe and
+// therefore avoids intermediate underflow (dot(n, n) can flush subnormal
+// normals to zero) and overflow (dot(n, n) can exceed the double range) for
+// extreme but representable normals. offset / |n| can overflow only when the
+// true distance magnitude exceeds the double range, in which case an infinite
+// distance is the honest result.
 //
 // Precondition: |normal| != 0. Plane3 does not validate the normal, and a zero
 // normal makes the queries divide by zero (sign and projected point are then
@@ -21,8 +28,9 @@ struct Plane3 {
   double offset = 0.0;  // n . x = offset
 
   double signed_distance(Point3d p) const noexcept {
-    const double n2 = dot(normal, normal);
-    return (dot(normal, Vec3d{p[0], p[1], p[2]}) - offset) / std::sqrt(n2);
+    const double h = length();
+    const Vec3d unit{normal[0] / h, normal[1] / h, normal[2] / h};
+    return dot(unit, Vec3d{p[0], p[1], p[2]}) - offset / h;
   }
 
   int side(Point3d p) const noexcept {
@@ -30,12 +38,17 @@ struct Plane3 {
     return d > 0.0 ? 1 : (d < 0.0 ? -1 : 0);
   }
 
-  // p - ((n . p - offset) / |n|^2) n, i.e. the closest point on the plane.
+  // p - (dot(unit, p) - offset / |n|) * unit, i.e. the closest point on the
+  // plane for any nonzero normal.
   Point3d project(Point3d p) const noexcept {
-    const double n2 = dot(normal, normal);
-    const double t = (dot(normal, Vec3d{p[0], p[1], p[2]}) - offset) / n2;
-    return Point3d{p[0] - t * normal[0], p[1] - t * normal[1], p[2] - t * normal[2]};
+    const double h = length();
+    const Vec3d unit{normal[0] / h, normal[1] / h, normal[2] / h};
+    const double t = dot(unit, Vec3d{p[0], p[1], p[2]}) - offset / h;
+    return Point3d{p[0] - t * unit[0], p[1] - t * unit[1], p[2] - t * unit[2]};
   }
+
+ private:
+  double length() const noexcept { return std::hypot(normal[0], normal[1], normal[2]); }
 };
 
 }  // namespace v1

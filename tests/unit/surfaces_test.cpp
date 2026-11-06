@@ -209,11 +209,12 @@ TEST_CASE("plane queries are normal-scale invariant") {
   CHECK(shrunk.project(p).v[1] == doctest::Approx(2.0));
   CHECK(shrunk.side(p) == 1);
 
-  // Flipping the normal flips the orientation but not the projected point.
-  const Plane3 flipped{geom::v1::Vec3d{0, -2, 0}, 4.0};
-  CHECK(flipped.signed_distance(p) == doctest::Approx(-6.0));
+  // Flipping the normal and the offset together keeps the plane y = 2 but
+  // reverses the orientation, so the distance becomes negative.
+  const Plane3 flipped{geom::v1::Vec3d{0, -2, 0}, -4.0};
+  CHECK(flipped.signed_distance(p) == doctest::Approx(-2.0));
   CHECK(flipped.side(p) == -1);
-  CHECK(flipped.project(p).v[1] == doctest::Approx(-2.0));
+  CHECK(flipped.project(p).v[1] == doctest::Approx(2.0));
   CHECK(flipped.signed_distance(flipped.project(p)) == doctest::Approx(0.0).epsilon(1e-15));
 
   // On-plane query with a non-unit, non-axis-aligned normal: 3x = 6, i.e. x = 2.
@@ -227,4 +228,38 @@ TEST_CASE("plane queries are normal-scale invariant") {
   CHECK(kept.v[2] == doctest::Approx(7.0));
   CHECK(oblique.signed_distance(Point3d{5, 0, 0}) == doctest::Approx(3.0));
   CHECK(oblique.project(Point3d{5, 0, 0}).v[0] == doctest::Approx(2.0));
+}
+
+TEST_CASE("plane queries survive extreme normal magnitudes") {
+  // Same plane y = 2 with a normal whose squared length underflows to zero.
+  const Point3d p{0, 4, 0};
+  const Plane3 tiny{geom::v1::Vec3d{0, 1e-200, 0}, 2e-200};
+  CHECK(tiny.signed_distance(p) == doctest::Approx(2.0));
+  CHECK(tiny.side(p) == 1);
+  const Point3d tiny_projected = tiny.project(p);
+  CHECK(tiny_projected.v[0] == doctest::Approx(0.0));
+  CHECK(tiny_projected.v[1] == doctest::Approx(2.0));
+  CHECK(tiny_projected.v[2] == doctest::Approx(0.0));
+
+  // Same plane with a normal whose squared length overflows to infinity.
+  const Point3d q{0, 4, 0};
+  const Plane3 huge{geom::v1::Vec3d{0, 1e200, 0}, 2e200};
+  CHECK(huge.signed_distance(q) == doctest::Approx(2.0));
+  CHECK(huge.side(q) == 1);
+  const Point3d huge_projected = huge.project(q);
+  CHECK(huge_projected.v[0] == doctest::Approx(0.0));
+  CHECK(huge_projected.v[1] == doctest::Approx(2.0));
+  CHECK(huge_projected.v[2] == doctest::Approx(0.0));
+
+  // Diagonal extreme normal: the plane through the origin with n = (1,1,0),
+  // where dot(n, n) overflows but |n| does not.
+  const Plane3 diagonal{geom::v1::Vec3d{1e200, 1e200, 0}, 0.0};
+  const Point3d off_plane{1, 1, 0};
+  const double root2 = std::sqrt(2.0);
+  CHECK(diagonal.signed_distance(off_plane) == doctest::Approx(root2).epsilon(1e-15));
+  const Point3d diagonal_projected = diagonal.project(off_plane);
+  CHECK(diagonal_projected.v[0] == doctest::Approx(0.0));
+  CHECK(diagonal_projected.v[1] == doctest::Approx(0.0));
+  CHECK(diagonal.signed_distance(Point3d{1, -1, 0}) == doctest::Approx(0.0));
+  CHECK(diagonal.side(Point3d{1, -1, 0}) == 0);
 }
