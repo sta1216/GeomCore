@@ -59,3 +59,29 @@ TEST_CASE("Expansion sign scans the most significant component") {
   CHECK(e.sign() < 0);
   CHECK(Expansion(0.0).sign() == 0);
 }
+
+TEST_CASE("Expansion add is well-defined when the argument is itself") {
+  Expansion e = Expansion::difference(1.0e16, 1.0);  // exact 1e16 - 1
+  const Expansion original = e;
+  Expansion expected = e;
+  expected.add(original);  // non-aliased reference behaviour
+  e.add(e);                // self-aliasing
+  REQUIRE(expected.size() >= 2);
+  CHECK(e.size() == expected.size());
+  CHECK(e.approx() == expected.approx());
+  CHECK(e.sign() == expected.sign());
+  CHECK(e.approx() == 2.0e16);  // exact value is 2e16 - 2
+}
+
+TEST_CASE("Expansion add_scaled is well-defined when the argument is itself") {
+  Expansion e = Expansion::difference(1.0e16, 1.0);  // exact 1e16 - 1
+  const Expansion original = e;
+  Expansion expected = e;
+  expected.add_scaled(original, 2.0);  // non-aliased reference behaviour
+  e.add_scaled(e, 2.0);                // self-aliasing
+  REQUIRE(expected.size() >= 2);
+  CHECK(e.size() == expected.size());
+  CHECK(e.approx() == expected.approx());
+  CHECK(e.sign() == expected.sign());
+  CHECK(e.approx() == 3.0e16 - 4.0);  // exact 3e16 - 3 rounds down (ulp = 4)
+}

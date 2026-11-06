@@ -61,9 +61,21 @@ class Expansion {
     v_.swap(h);
   }
 
-  void add(const Expansion& e) { for (double x : e.v_) add_term(x); }
+  void add(const Expansion& e) {
+    if (&e == this) {
+      const Expansion copy(e);
+      add(copy);
+      return;
+    }
+    for (double x : e.v_) add_term(x);
+  }
 
   void add_scaled(const Expansion& e, double s) {
+    if (&e == this) {
+      const Expansion copy(e);
+      add_scaled(copy, s);
+      return;
+    }
     for (double x : e.v_) {
       double p = 0.0, err = 0.0;
       two_product(x, s, p, err);
