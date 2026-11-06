@@ -1,6 +1,8 @@
 #include <doctest/doctest.h>
 
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 
 #include <geom/core/arena.hpp>
 #include <geom/core/handle.hpp>
@@ -79,3 +81,58 @@ TEST_CASE("ScratchArena returns distinct, aligned storage") {
   CHECK(x[0] == 1.0);
   CHECK(y[0] == 2.0);
 }
+
+TEST_CASE("Handle::make rejects out-of-range indices") {
+  // 0xFFFFFF is the reserved null index: make must canonicalize, not hand back
+  // a handle that merely shares the index bits.
+  CHECK(Handle::make(0xFFFFFFu, 1u) == Handle::null());
+  // 0x1000000 would shift out of the index field and truncate to index 0.
+  CHECK(Handle::make(0x1000000u, 3u).is_null());
+  CHECK(Handle::make(0xFFFFFFFFu, 0u).is_null());
+  // The largest usable index still packs both fields.
+  const Handle edge = Handle::make(0xFFFFFEu, 7u);
+  CHECK(edge.index() == 0xFFFFFEu);
+  CHECK(edge.generation() == 7u);
+  CHECK_FALSE(edge.is_null());
+}
+
+TEST_CASE("ScratchArena rejects overflowing array requests") {
+  ScratchArena arena;
+  const std::size_t count = (std::numeric_limits<std::size_t>::max)() / sizeof(double) + 2;
+  CHECK_THROWS_AS(arena.alloc_array<double>(count), std::length_error);
+
+  auto empty = arena.alloc_array<double>(0);
+  CHECK(empty.empty());
+  CHECK(empty.size() == 0);
+
+  // A rejected request must not poison the arena.
+  auto ok = arena.alloc_array<double>(4);
+  CHECK(ok.size() == 4);
+  ok[3] = 3.0;
+  CHECK(ok[3] == 3.0);
+}
+
+TEST_CASE("HandleAllocator generation lifecycle is unchanged") {
+  HandleAllocator alloc;
+  const Handle first = alloc.alloc();
+  std::uint8_t previous = first.generation();
+  Handle h = first;
+
+  for (int cycle = 0; cycle < 8; ++cycle) {
+    alloc.release(h);
+    CHECK_FALSE(alloc.alive(h));
+    h = alloc.alloc();
+    REQUIRE(h.index() == first.index());
+    CHECK(h.generation() != previous);
+    previous = h.generation();
+  }
+
+  // The 8-bit generation wraps after 255 releases; the slot must stay reusable.
+  for (int cycle = 0; cycle < 300; ++cycle) {
+    alloc.release(h);
+    h = alloc.alloc();
+    REQUIRE(h.index() == first.index());
+    REQUIRE(alloc.alive(h));
+  }
+}
+

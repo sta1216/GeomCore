@@ -6,17 +6,25 @@
 namespace geom {
 inline namespace v1 {
 
-// 32-bit packed handle: 24-bit index + 8-bit generation. Index 0xFFFFFF is
-// reserved as the null handle.
+// 32-bit packed handle: 24-bit index + 8-bit generation. Index 0xFFFFFF is the
+// reserved null index and is never a valid live index.
+//
+// The generation counter is 8-bit and is bumped on every release, wrapping
+// 0xFF -> 1. A handle that is 255 (or more) releases old can therefore compare
+// alive again (ABA). Accepted for M0; widening the generation field is deferred.
 class Handle {
  public:
   static constexpr std::uint32_t kIndexBits = 24;
+  static constexpr std::uint32_t kNullIndex = 0xFFFFFFu;
   static constexpr std::uint32_t kIndexMask = (1u << kIndexBits) - 1u;
   static constexpr std::uint8_t kGenerationMask = 0xFFu;
 
   constexpr Handle() noexcept = default;
 
+  // Precondition: index < kNullIndex. Out-of-range requests (including the
+  // reserved null index) return null(); the index is never truncated.
   static constexpr Handle make(std::uint32_t index, std::uint8_t generation) noexcept {
+    if (index >= kNullIndex) return null();
     return Handle((index << 8) | generation);
   }
   static constexpr Handle null() noexcept { return Handle(kIndexMask << 8); }
@@ -25,7 +33,7 @@ class Handle {
   constexpr std::uint8_t generation() const noexcept {
     return static_cast<std::uint8_t>(packed_ & kGenerationMask);
   }
-  constexpr bool is_null() const noexcept { return index() == kIndexMask; }
+  constexpr bool is_null() const noexcept { return index() == kNullIndex; }
 
   friend constexpr bool operator==(Handle a, Handle b) noexcept { return a.packed_ == b.packed_; }
   friend constexpr bool operator!=(Handle a, Handle b) noexcept { return !(a == b); }
@@ -37,13 +45,14 @@ class Handle {
 
 class HandleAllocator {
  public:
+  // Returns Handle::null() when all kNullIndex usable slots are in use.
   Handle alloc() {
     if (!free_.empty()) {
       const std::uint32_t index = free_.back();
       free_.pop_back();
       return Handle::make(index, generations_[index]);
     }
-    if (generations_.size() >= Handle::kIndexMask) return Handle::null();
+    if (generations_.size() >= Handle::kNullIndex) return Handle::null();
     const std::uint32_t index = static_cast<std::uint32_t>(generations_.size());
     generations_.push_back(1u);
     return Handle::make(index, 1u);
@@ -51,8 +60,12 @@ class HandleAllocator {
 
   void release(Handle h) {
     if (h.is_null() || !alive(h)) return;
-    generations_[h.index()] = next_generation(h.index());
-    free_.push_back(h.index());
+    const std::uint32_t index = h.index();
+    const std::uint8_t next = next_generation(index);
+    // Enqueue before bumping: push_back can throw bad_alloc, and a slot that
+    // was bumped but never enqueued would be leaked as permanently alive.
+    free_.push_back(index);
+    generations_[index] = next;
   }
 
   bool alive(Handle h) const noexcept {
