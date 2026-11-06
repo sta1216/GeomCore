@@ -53,7 +53,8 @@ inline OrientDecision classify_orient2d(double ax, double ay, double bx, double 
 
 }  // namespace detail
 
-// 符号函数：返回 -1/0/1。调用方保证有限输入；非有限输入返回 0。
+// 符号函数：返回 -1/0/1。六个坐标中任意一个非有限（NaN 或 ±inf）都返回 0，与它
+// 出现在第几个参数无关。
 //
 // 精确性前提：对有限输入，只要缩放后的行列式不低于约 2^-1074（即展开后的每个分量
 // 仍是有限 double），结果就是精确的。本函数不会返回错误的非零符号：当下溢使行列式
@@ -64,9 +65,14 @@ inline OrientDecision classify_orient2d(double ax, double ay, double bx, double 
 // 推下溢，而未缩放时过滤依然能给出正确的符号。
 inline int sign_orient2d(double ax, double ay, double bx, double by, double cx,
                          double cy) noexcept {
+  // 逐个坐标检查：std::max({...}) 对 NaN 只保留首个元素，NaN 出现在后面的位置时
+  // 会被静默跳过，随后 Expansion 会把 NaN 当成负项符号化。
+  if (!(std::isfinite(ax) && std::isfinite(ay) && std::isfinite(bx) && std::isfinite(by) &&
+        std::isfinite(cx) && std::isfinite(cy))) {
+    return 0;
+  }
   const double m = std::max({std::abs(ax), std::abs(ay), std::abs(bx), std::abs(by),
                              std::abs(cx), std::abs(cy)});
-  if (!std::isfinite(m)) return 0;
   if (m == 0.0) return 0;
 
   switch (detail::classify_orient2d(ax, ay, bx, by, cx, cy)) {

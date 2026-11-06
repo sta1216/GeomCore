@@ -88,3 +88,21 @@ TEST_CASE("orient2d handles subnormal coordinates") {
   CHECK(sign_orient2d(0.0, 0.0, 1e-320, 0.0, 2e-320, 0.0) == 0);
 }
 
+TEST_CASE("orient2d rejects non-finite input in every argument position") {
+  const double nan = std::nan("");
+  const double inf = std::numeric_limits<double>::infinity();
+  // NaN anywhere must be degenerate, not signed by whichever comparison sees it.
+  CHECK(sign_orient2d(0.0, nan, 1.0, 0.0, 0.0, 1.0) == 0);
+  CHECK(sign_orient2d(0.0, 0.0, nan, 0.0, 0.0, 1.0) == 0);
+  CHECK(sign_orient2d(0.0, 0.0, 1.0, nan, 0.0, 1.0) == 0);
+  CHECK(sign_orient2d(0.0, 0.0, 1.0, 0.0, nan, 1.0) == 0);
+  CHECK(sign_orient2d(0.0, 0.0, 1.0, 0.0, 0.0, nan) == 0);
+  // Infinities are covered by the same rule, in either sign and position.
+  CHECK(sign_orient2d(0.0, 0.0, inf, 0.0, 0.0, 1.0) == 0);
+  CHECK(sign_orient2d(0.0, 0.0, -inf, 0.0, 0.0, 1.0) == 0);
+  CHECK(sign_orient2d(0.0, 0.0, 1.0, 0.0, inf, 1.0) == 0);
+  CHECK(sign_orient2d(0.0, 0.0, 1.0, 0.0, 0.0, -inf) == 0);
+  CHECK(sign_orient2d(inf, 0.0, 1.0, 0.0, 0.0, 1.0) == 0);
+}
+
+
