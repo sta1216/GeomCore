@@ -15,6 +15,11 @@ else()
     GIT_REPOSITORY https://github.com/doctest/doctest.git
     GIT_TAG v2.4.11
     GIT_SHALLOW TRUE)
+  # Test-only dependency: keep doctest's install() rules out of GeomCore's
+  # install tree. This must be a CACHE entry with FORCE because doctest's own
+  # cmake_minimum_required(VERSION 3.0) resets CMP0077, so its option() call
+  # would ignore a plain variable and re-default DOCTEST_NO_INSTALL to OFF.
+  set(DOCTEST_NO_INSTALL ON CACHE BOOL "Skip installing the fetched doctest" FORCE)
   FetchContent_MakeAvailable(doctest)
 endif()
 
