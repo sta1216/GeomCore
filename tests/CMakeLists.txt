@@ -35,6 +35,8 @@ set(GEOM_TEST_SOURCES
   unit/surfaces_test.cpp
 )
 
+list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)
+
 add_executable(geom_tests ${GEOM_TEST_SOURCES})
 target_link_libraries(geom_tests PRIVATE geom_core doctest::doctest)
 # doctest forward-declares std::ostream by default; MSVC then fails to compile

@@ -22,3 +22,11 @@ if(GEOM_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+# Benchmarks are opt-in (GEOM_BUILD_BENCH=OFF by default) and are not
+# registered with ctest: they measure and report, they are not pass/fail gates
+# on shared CI. Run the executable manually to reproduce the numbers.
+if(GEOM_BUILD_BENCH)
+  add_executable(geom_bench_predicates bench/bench_predicates.cpp)
+  target_link_libraries(geom_bench_predicates PRIVATE geom_core)
+endif()
