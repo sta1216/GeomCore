@@ -34,6 +34,7 @@ set(GEOM_TEST_SOURCES
   unit/primitives_test.cpp
   unit/curves_test.cpp
   unit/surfaces_test.cpp
+  unit/hull2d_test.cpp
 )
 
 list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)
