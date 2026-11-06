@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <utility>
 #include <vector>
@@ -65,17 +66,46 @@ class NurbsCurve {
              std::vector<double> weights)
       : p_(degree), U_(std::move(knots)), P_(std::move(control)), W_(std::move(weights)) {}
 
+  // Supported degree range: 1..detail::kMaxCurveDegree (degree 0 is deliberately
+  // unsupported). A valid curve has:
+  //  - a nondegenerate parameter domain, U[p] < U[m-p-1];
+  //  - nondecreasing finite knots whose multiplicity never exceeds p+1;
+  //  - finite control points (x, y, z) and strictly positive finite weights.
+  // is_valid() is the gate for eval() and derivative(); calling those on invalid
+  // data is a precondition violation.
   bool is_valid() const noexcept {
-    if (p_ < 1 || P_.empty()) return false;
-    if (p_ > detail::kMaxCurveDegree) return false;
+    if (p_ < 1 || p_ > detail::kMaxCurveDegree) return false;
+    if (P_.empty()) return false;
     if (P_.size() <= static_cast<std::size_t>(p_)) return false;
     if (W_.size() != P_.size()) return false;
     if (U_.size() != P_.size() + static_cast<std::size_t>(p_) + 1) return false;
+
+    for (double u : U_) {
+      if (!std::isfinite(u)) return false;
+    }
     for (std::size_t i = 1; i < U_.size(); ++i) {
       if (!(U_[i] >= U_[i - 1])) return false;
     }
+    // Sorted knots: equal neighbours form one multiplicity run.
+    int run = 1;
+    for (std::size_t i = 1; i < U_.size(); ++i) {
+      if (U_[i] == U_[i - 1]) {
+        ++run;
+        if (run > p_ + 1) return false;
+      } else {
+        run = 1;
+      }
+    }
+    if (!(U_[static_cast<std::size_t>(p_)] <
+          U_[U_.size() - static_cast<std::size_t>(p_) - 1])) {
+      return false;
+    }
+
+    for (const Point3d& pt : P_) {
+      if (!std::isfinite(pt[0]) || !std::isfinite(pt[1]) || !std::isfinite(pt[2])) return false;
+    }
     for (double w : W_) {
-      if (!(w > 0.0)) return false;
+      if (!(w > 0.0) || !std::isfinite(w)) return false;
     }
     return true;
   }

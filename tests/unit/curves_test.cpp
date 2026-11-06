@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include <geom/curves/bezier.hpp>
@@ -188,4 +189,56 @@ TEST_CASE("NURBS validity rejects degenerate and unsafe data") {
   const NurbsCurve max_degree(16, knots16, pts16, std::vector<double>(17, 1.0));
   CHECK(max_degree.is_valid());
   CHECK(max_degree.eval(0.5).v[0] == 0.0);
+}
+
+TEST_CASE("NURBS validity rejects non-finite data") {
+  const std::vector<Point3d> pts{Point3d{0, 0, 0}, Point3d{1, 0, 0}, Point3d{2, 0, 0}};
+  const std::vector<double> knots{0.0, 0.0, 0.0, 1.0, 1.0, 1.0};
+  const std::vector<double> w{1.0, 1.0, 1.0};
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+
+  const NurbsCurve inf_knot(2, {0.0, 0.0, 0.0, 1.0, inf, inf}, pts, w);
+  CHECK_FALSE(inf_knot.is_valid());
+
+  const NurbsCurve nan_knot(2, {0.0, 0.0, 0.0, 1.0, nan, 1.0}, pts, w);
+  CHECK_FALSE(nan_knot.is_valid());
+
+  const NurbsCurve inf_weight(2, knots, pts, {1.0, inf, 1.0});
+  CHECK_FALSE(inf_weight.is_valid());
+
+  const NurbsCurve nan_weight(2, knots, pts, {1.0, nan, 1.0});
+  CHECK_FALSE(nan_weight.is_valid());
+
+  const NurbsCurve inf_control(2, knots,
+                               {Point3d{0, 0, 0}, Point3d{inf, 0, 0}, Point3d{2, 0, 0}}, w);
+  CHECK_FALSE(inf_control.is_valid());
+
+  const NurbsCurve nan_control(2, knots,
+                               {Point3d{0, 0, 0}, Point3d{nan, 0, 0}, Point3d{2, 0, 0}}, w);
+  CHECK_FALSE(nan_control.is_valid());
+}
+
+TEST_CASE("NURBS validity rejects degenerate parameter domains") {
+  const std::vector<double> w{1.0, 1.0, 1.0};
+  const std::vector<Point3d> pts{Point3d{0, 0, 0}, Point3d{1, 0, 0}, Point3d{2, 0, 0}};
+
+  // All-equal knots: the domain collapses to a single point.
+  const NurbsCurve flat(2, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0}, pts, w);
+  CHECK_FALSE(flat.is_valid());
+  CHECK(flat.domain().first == 0.0);
+  CHECK(flat.domain().second == 0.0);
+
+  // Interior multiplicity p + 2 = 4 exceeds the maximal p + 1.
+  const std::vector<double> six_w{1.0, 1.0, 1.0, 1.0, 1.0, 1.0};
+  const std::vector<Point3d> six_pts{Point3d{0, 0, 0}, Point3d{1, 0, 0}, Point3d{2, 0, 0},
+                                     Point3d{3, 0, 0}, Point3d{4, 0, 0}, Point3d{5, 0, 0}};
+  const NurbsCurve repeated(2, {0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 0.5, 1.0, 1.0}, six_pts, six_w);
+  CHECK_FALSE(repeated.is_valid());
+
+  // Multiplicity p + 1 = 3 and a nondegenerate domain stay valid.
+  const NurbsCurve clamped(2, {0.0, 0.0, 0.0, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0}, six_pts, six_w);
+  CHECK(clamped.is_valid());
+  CHECK(clamped.domain().first == 0.0);
+  CHECK(clamped.domain().second == 1.0);
 }
