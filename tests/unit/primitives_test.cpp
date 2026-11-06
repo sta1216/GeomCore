@@ -1,5 +1,8 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
+#include <limits>
+
 #include <geom/primitives/box.hpp>
 #include <geom/primitives/point.hpp>
 #include <geom/primitives/segment.hpp>
@@ -137,4 +140,120 @@ TEST_CASE("affine failure and vector paths") {
   const auto inv2 = overflow.inverse();
   CHECK_FALSE(inv2.has_value());
   CHECK(inv2.error().code == geom::v1::Errc::degenerate);
+}
+
+TEST_CASE("affine inverse rejects non-finite entries in every slot") {
+  using geom::v1::Errc;
+  const double nan_v = std::numeric_limits<double>::quiet_NaN();
+  const double inf_v = std::numeric_limits<double>::infinity();
+
+  auto expect_non_finite = [](const Affine& a) {
+    const auto inv = a.inverse();
+    CHECK_FALSE(inv.has_value());
+    if (inv.has_value()) return;
+    CHECK(inv.error().code == Errc::non_finite);
+  };
+
+  // Translation column slots.
+  for (int row = 0; row < 3; ++row) {
+    Affine a{};
+    a.m[row][3] = inf_v;
+    expect_non_finite(a);
+    Affine b{};
+    b.m[row][3] = nan_v;
+    expect_non_finite(b);
+  }
+  // Diagonal slots.
+  for (int row = 0; row < 3; ++row) {
+    Affine a{};
+    a.m[row][row] = -inf_v;
+    expect_non_finite(a);
+  }
+  // Off-diagonal (rotation) slots.
+  Affine rotation{};
+  rotation.m[0][1] = nan_v;
+  expect_non_finite(rotation);
+  Affine rotation2{};
+  rotation2.m[2][0] = inf_v;
+  expect_non_finite(rotation2);
+}
+
+TEST_CASE("affine inverse finite-output contract") {
+  using geom::v1::Errc;
+
+  // A subnormal determinant makes 1/det overflow: rejected, never a NaN matrix.
+  Affine subnormal{};
+  subnormal.m[0][0] = 1e-320;
+  const auto inv_sub = subnormal.inverse();
+  REQUIRE_FALSE(inv_sub.has_value());
+  CHECK(inv_sub.error().code == Errc::degenerate);
+
+  // Determinant products that underflow to 0 or overflow to inf are conservative
+  // rejects even though the exact inverse would be representable.
+  Affine underflow{};
+  underflow.m[0][0] = 1e-200;
+  underflow.m[1][1] = 1e-200;
+  underflow.m[2][2] = 1e-200;
+  const auto inv_under = underflow.inverse();
+  REQUIRE_FALSE(inv_under.has_value());
+  CHECK(inv_under.error().code == Errc::degenerate);
+
+  Affine overflow{};
+  overflow.m[0][0] = 1e300;
+  overflow.m[1][1] = 1e300;
+  overflow.m[2][2] = 1e300;
+  const auto inv_over = overflow.inverse();
+  REQUIRE_FALSE(inv_over.has_value());
+  CHECK(inv_over.error().code == Errc::degenerate);
+
+  // A finite determinant can still yield an unrepresentable cofactor ratio.
+  Affine mixed{};
+  mixed.m[0][0] = 1e-300;
+  mixed.m[0][1] = 1e300;
+  mixed.m[1][1] = 1.0;
+  mixed.m[2][0] = 1.0;
+  mixed.m[2][2] = 1.0;
+  const auto inv_mixed = mixed.inverse();
+  REQUIRE_FALSE(inv_mixed.has_value());
+  CHECK(inv_mixed.error().code == Errc::degenerate);
+
+  // One extreme-but-finite scale factor keeps unit determinant: still invertible.
+  Affine small_scale{};
+  small_scale.m[0][0] = 1e-200;
+  const auto inv_small = small_scale.inverse();
+  REQUIRE(inv_small.has_value());
+  CHECK(std::isfinite(inv_small.value().m[0][0]));
+  CHECK(inv_small.value().m[1][1] == doctest::Approx(1.0));
+
+  Affine big_scale{};
+  big_scale.m[0][0] = 1e300;
+  const auto inv_big = big_scale.inverse();
+  REQUIRE(inv_big.has_value());
+  CHECK(std::isfinite(inv_big.value().m[0][0]));
+  CHECK(inv_big.value().m[0][0] == doctest::Approx(1e-300));
+}
+
+TEST_CASE("affine rotation and scale inverse round-trips") {
+  Affine a{};
+  a.m[0][0] = 0.0;
+  a.m[0][1] = -2.0;
+  a.m[0][3] = 5.0;
+  a.m[1][0] = 2.0;
+  a.m[1][1] = 0.0;
+  a.m[1][3] = -3.0;
+  a.m[2][2] = 1.0;
+  a.m[2][3] = 2.0;
+
+  const auto inv = a.inverse();
+  REQUIRE(inv.has_value());
+  const Point3d p{1.0, 2.0, 3.0};
+  const Point3d q = a.transform(p);
+  const Point3d back = inv.value().transform(q);
+  CHECK(back.v[0] == doctest::Approx(p.v[0]).epsilon(1e-12));
+  CHECK(back.v[1] == doctest::Approx(p.v[1]).epsilon(1e-12));
+  CHECK(back.v[2] == doctest::Approx(p.v[2]).epsilon(1e-12));
+
+  const Vec3d v = a.transform_vector(Vec3d{1.0, 0.0, 0.0});
+  CHECK(v.v[0] == 0.0);
+  CHECK(v.v[1] == doctest::Approx(2.0));
 }
