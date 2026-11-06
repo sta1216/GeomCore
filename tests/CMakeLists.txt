@@ -37,6 +37,7 @@ set(GEOM_TEST_SOURCES
   unit/hull2d_test.cpp
   unit/delaunay2_test.cpp
   unit/bvh_test.cpp
+  unit/coverage_gaps_test.cpp
 )
 
 list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)

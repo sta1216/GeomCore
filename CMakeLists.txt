@@ -12,6 +12,18 @@ option(GEOM_WERROR "Treat warnings as errors" OFF)
 
 include(cmake/GeomWarnings.cmake)
 
+# Coverage instrumentation comes from GCC/Clang's --coverage runtime, which
+# MSVC does not provide. Reject the option loudly on MSVC instead of building
+# an uninstrumented binary that silently reports 0% coverage.
+option(GEOM_COVERAGE "Enable coverage instrumentation (GCC/Clang)" OFF)
+if(GEOM_COVERAGE)
+  if(MSVC)
+    message(FATAL_ERROR "GEOM_COVERAGE requires GCC or Clang")
+  endif()
+  target_compile_options(geom_warnings INTERFACE --coverage -O0 -g)
+  target_link_options(geom_warnings INTERFACE --coverage)
+endif()
+
 add_library(geom_core INTERFACE)
 add_library(GeomCore::core ALIAS geom_core)
 target_include_directories(geom_core INTERFACE

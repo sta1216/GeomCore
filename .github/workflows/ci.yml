@@ -16,3 +16,32 @@ jobs:
         run: cmake --build build --config RelWithDebInfo -j 4
       - name: Test
         run: ctest --test-dir build -C RelWithDebInfo --output-on-failure
+
+  # Coverage is measured on Linux with GCC's gcov runtime and gcovr. Thresholds
+  # follow docs/quality/testing-strategy.md section 2: global line 90 / branch
+  # 85, and line 95 / branch 90 for core|numeric|primitives|curves|surfaces.
+  # tests/, third_party/ and the coverage build tree are excluded so the gate
+  # only scores library code.
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install gcovr
+        run: sudo apt-get update && sudo apt-get install -y gcovr
+      - name: Configure
+        run: cmake -S . -B build-cov -DGEOM_COVERAGE=ON -DGEOM_WERROR=ON -DCMAKE_BUILD_TYPE=Debug
+      - name: Build
+        run: cmake --build build-cov -j 4
+      - name: Test
+        run: ctest --test-dir build-cov --output-on-failure
+      - name: Coverage gate (global)
+        run: |
+          gcovr -r . --fail-under-line 90 --fail-under-branch 85 \
+                --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
+                --print-summary
+      - name: Coverage gate (core modules)
+        run: |
+          gcovr -r . --filter 'include/geom/(core|numeric|primitives|curves|surfaces)/' \
+                --fail-under-line 95 --fail-under-branch 90 \
+                --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
+                --print-summary
