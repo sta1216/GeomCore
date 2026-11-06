@@ -41,18 +41,44 @@ inline namespace v1 {
 //     yet) and trips a debug assert where it is cheap to detect. Duplicate
 //     points are skipped, keeping the first occurrence.
 //   - finite coordinates; input.size() <= 2^32 - 1 so indices fit uint32_t.
+//   - supported numeric span: exp2(max|coord|) - exp2(min nonzero |coord|) <=
+//     1314, the same exponent span sign_incircle can resolve (see
+//     predicates2.hpp). Non-finite coordinates and wider spans are outside the
+//     supported range and return an empty vector instead of a partial or
+//     garbage triangulation; the guard runs in every build.
 //
 // Output triangles are CCW (verified with sign_orient2d, never a floating cross
 // product), index into the input, are strictly non-degenerate, and the list is
-// sorted by (a, b, c) so results are deterministic and byte-stable. Fewer than
-// three distinct points, or all points collinear, yield an empty result.
+// sorted by (a, b, c). The sort makes the geometric result canonical for a
+// given point set; the index lists themselves follow the input point order, so
+// the same points supplied in a different order yield permuted indices rather
+// than identical vectors. Fewer than three distinct points, or all points
+// collinear, yield an empty result.
 inline std::vector<std::array<std::uint32_t, 3>> delaunay2(std::span<const Point2d> input) {
   assert(input.size() <= 0xFFFFFFFFull);
-#if !defined(NDEBUG)
+
+  // Reject unsupported input in every build, so the guard is testable in Debug.
+  constexpr int kMaxSpan = 1314;
+  int max_exp = 0;
+  int min_exp = 0;
+  bool have_exp = false;
   for (const Point2d& q : input) {
-    assert(std::isfinite(q[0]) && std::isfinite(q[1]));
+    for (const double c : {q[0], q[1]}) {
+      if (!std::isfinite(c)) return {};
+      if (c == 0.0) continue;
+      int e = 0;
+      std::frexp(std::fabs(c), &e);
+      if (!have_exp) {
+        max_exp = e;
+        min_exp = e;
+        have_exp = true;
+      } else {
+        if (e > max_exp) max_exp = e;
+        if (e < min_exp) min_exp = e;
+      }
+    }
   }
-#endif
+  if (have_exp && max_exp - min_exp > kMaxSpan) return {};
 
   // Drop exact duplicates, keeping the first occurrence of each point.
   std::vector<std::uint32_t> unique;

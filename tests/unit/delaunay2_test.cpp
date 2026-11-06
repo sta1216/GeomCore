@@ -9,6 +9,7 @@
 #include <geom/numeric/predicates2.hpp>
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <utility>
 
@@ -148,4 +149,40 @@ TEST_CASE("Delaunay returns empty for degenerate input") {
   CHECK(delaunay2(std::vector<Point2d>{{0, 0}, {1, 1}, {2, 2}, {3, 3}}).empty());
   // Duplicates only reduce to a single point.
   CHECK(delaunay2(std::vector<Point2d>{{5, 5}, {5, 5}, {5, 5}}).empty());
+}
+
+TEST_CASE("Delaunay rejects input outside the supported numeric span") {
+  // A 6x6 perturbed grid scaled x by 1e200 and y by 1e-200 spans about 1334
+  // binary exponents. sign_incircle resolves at most ~2^1314 (see
+  // predicates2.hpp), so the triangulation is refused instead of computed
+  // partially or from garbage incircle signs.
+  const auto grid = perturbed_grid(6);
+  std::vector<Point2d> wide;
+  wide.reserve(grid.size());
+  for (const auto& q : grid) wide.push_back(Point2d{q[0] * 1e200, q[1] * 1e-200});
+  CHECK(delaunay2(wide).empty());
+
+  // Non-finite coordinates are rejected in every build, not only in assert
+  // builds, so an unsupported point set cannot produce a partial result.
+  const double nan = std::nan("");
+  const double inf = std::numeric_limits<double>::infinity();
+  CHECK(delaunay2(std::vector<Point2d>{{0, 0}, {1, 0}, {0, 1}, {0.5, nan}}).empty());
+  CHECK(delaunay2(std::vector<Point2d>{{0, 0}, {1, 0}, {inf, 1}, {0.5, 0.5}}).empty());
+}
+
+TEST_CASE("Delaunay accepts a wide but supported numeric span") {
+  // The same grid with x scaled by 1e100 and y by 1e-100 spans about 665
+  // exponents, inside the 1314 limit, so it must triangulate normally.
+  const auto grid = perturbed_grid(6);
+  std::vector<Point2d> wide;
+  wide.reserve(grid.size());
+  for (const auto& q : grid) wide.push_back(Point2d{q[0] * 1e100, q[1] * 1e-100});
+  const auto tris = delaunay2(wide);
+  REQUIRE_FALSE(tris.empty());
+  const auto hull = convex_hull2d(wide);
+  CHECK(tris.size() == 2 * wide.size() - 2 - hull.size());
+  for (const auto& t : tris) {
+    CHECK(geom::v1::sign_orient2d(wide[t[0]][0], wide[t[0]][1], wide[t[1]][0], wide[t[1]][1],
+                                  wide[t[2]][0], wide[t[2]][1]) > 0);
+  }
 }
