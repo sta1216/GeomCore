@@ -17,7 +17,7 @@
 - 依赖：核心零第三方依赖；doctest 只允许出现在 `tests/`。
 - 命名空间：`geom::v1`（`namespace geom { inline namespace v1 { ... } }`）；头文件 `#pragma once`；宏前缀 `GEOM_`。
 - 公开头文件必须自包含、可单独编译；每个文件单一职责，目标 ≤ 400 行。
-- 错误：可失败操作返回 `Result<T, Error>`，禁止用异常做控制流；`noexcept` 只加在确实不失败的函数上。
+- 错误：可失败操作返回 `Result<T>`，禁止用异常做控制流；`noexcept` 只加在确实不失败的函数上。
 - 测试：doctest；每次提交前 `ctest` 必须全绿；CI 用 `-Werror`（`GEOM_WERROR=ON`）。
 - 新增测试文件必须追加到 `tests/CMakeLists.txt` 的 `GEOM_TEST_SOURCES`（相对路径，如 `unit/foo_test.cpp`）。
 - 覆盖门槛（每个任务都必须满足，见测试策略 §2）：新增代码 diff 覆盖 100%；core/numeric 行覆盖 ≥ 95%、分支 ≥ 90%；cgeom/index 行覆盖 ≥ 90%、分支 ≥ 85%；每个 `Errc` 至少一个触发用例；每条公开 API 至少有正例、边界、失败路径。
@@ -224,7 +224,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2022, macos-13]
+        os: [ubuntu-24.04, windows-2022, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -3338,7 +3338,7 @@ endif()
 
 ```yaml
   coverage:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: Install gcovr

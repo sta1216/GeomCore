@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -90,7 +91,14 @@ class Expansion {
     return r;
   }
 
+  // Precondition: every component is finite. Once an intermediate overflowed or
+  // produced a NaN the components no longer represent the exact value, and the
+  // sign returned here is meaningless (a NaN compares false against zero and is
+  // reported as negative). Callers that can reach such a state must check
+  // all_finite() first; the predicates do so before trusting a fallback frame.
+  // Debug-only: release builds keep the old behaviour and pay nothing.
   int sign() const noexcept {
+    assert(all_finite());
     for (std::size_t i = v_.size(); i > 0; --i) {
       const double x = v_[i - 1];
       if (x != 0.0) return x > 0.0 ? 1 : -1;

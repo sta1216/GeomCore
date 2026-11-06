@@ -300,6 +300,7 @@ inline int sign_incircle(double ax, double ay, double bx, double by, double cx, 
       // 非零符号都是精确符号：
       //   1. 缩放帧的分组展开（最快）；
       //   2. 缩放帧的分布式展开——cross 项不再先相消，单个三项乘积能保住符号；
+      //      只有全部分量有限时才可信。
       //   3. 未缩放帧（检查全部有限，避免把溢出的 NaN 当成负号）。
       // 三层都为 0 才返回保守的 0。
       const detail::Expansion scaled =
@@ -309,8 +310,10 @@ inline int sign_incircle(double ax, double ay, double bx, double by, double cx, 
 
       const detail::Expansion distributed =
           detail::incircle_det_distributed(sax, say, sbx, sby, scx, scy, sdx, sdy);
-      const int distributed_sign = distributed.sign();
-      if (distributed_sign != 0) return distributed_sign;
+      if (distributed.all_finite()) {
+        const int distributed_sign = distributed.sign();
+        if (distributed_sign != 0) return distributed_sign;
+      }
 
       const detail::Expansion unscaled = detail::incircle_det(ax, ay, bx, by, cx, cy, dx, dy);
       return unscaled.all_finite() ? unscaled.sign() : 0;

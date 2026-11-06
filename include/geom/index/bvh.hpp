@@ -197,7 +197,10 @@ class Bvh {
 
   // Returns the index of the nearest primitive and writes its squared distance;
   // equal distances resolve to the smallest primitive index. An empty tree
-  // returns 0xFFFFFFFF and an infinite distance.
+  // returns 0xFFFFFFFF and an infinite distance. The squared intermediates
+  // (dx*dx + dy*dy + dz*dz) must stay finite: with coordinates around 1e200 the
+  // sum overflows to infinity and any distance involving a NaN coordinate is
+  // NaN, which is outside the supported coordinate range.
   std::uint32_t nearest(const Point3d& p, double& best_d2) const {
     if (nodes_.empty()) {
       best_d2 = std::numeric_limits<double>::infinity();
@@ -413,9 +416,9 @@ class Bvh {
   // |det| <= 1e-14 * |e1| * |e2| * |dir| rejects only genuinely near-parallel
   // rays and sliver triangles, independent of the coordinate scale of the
   // triangle. It is a floating-point guard, not an exact predicate; the product
-  // is computed in double, so it saturates (and rejects) once the triangle edge
-  // lengths exceed ~1e100, beyond which the squared sliver measure itself
-  // overflows.
+  // is computed in double, so it saturates once |e1| * |e2| * |dir| exceeds
+  // DBL_MAX (~1e308). Past that point the guard rejects every ray rather than
+  // misclassifying one, and the sliver measure itself has already overflowed.
   static bool intersect_tri(const Ray3d& r, const Triangle3d& t, double& tout) noexcept {
     const Vec3d e1 = t.b - t.a;
     const Vec3d e2 = t.c - t.a;

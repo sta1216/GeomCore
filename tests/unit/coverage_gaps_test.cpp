@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <vector>
 
 #include <geom/cgeom/delaunay2.hpp>
@@ -57,6 +58,7 @@ TEST_CASE("empty BVH answers queries safely") {
   CHECK_FALSE(b.raycast(Ray3d{Point3d{0, 0, 0}, Vec3d{0, 0, 1}}, 1e9, hit));
   double d2 = -1.0;
   CHECK(b.nearest(Point3d{0, 0, 0}, d2) == 0xFFFFFFFFu);
+  CHECK(std::isinf(d2));
   CHECK(b.bounds().is_empty());
 }
 
