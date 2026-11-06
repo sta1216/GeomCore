@@ -36,43 +36,62 @@ inline Box3d triangle_box(const Triangle3d& t) noexcept {
   return b;
 }
 
-// Closest point on a triangle (Ericson, Real-Time Collision Detection 5.1.5),
-// squared so callers can compare distances without a square root. Uses
+// Squared distance from a point to the closest point of a segment. A
+// zero-length segment degenerates to the point itself.
+inline double squared_distance_segment(Point3d p, Point3d a, Point3d b) noexcept {
+  const Vec3d ab = b - a;
+  const double len2 = dot(ab, ab);
+  if (len2 == 0.0) {
+    const Vec3d d = p - a;
+    return dot(d, d);
+  }
+  const Vec3d ap = p - a;
+  double t = dot(ap, ab) / len2;
+  t = std::clamp(t, 0.0, 1.0);
+  const Vec3d q = a + ab * t - p;
+  return dot(q, q);
+}
+
+// Squared distance from a point to the closest point on a triangle. Uses
 // floating point, not the exact predicates: it is a distance query, not a
 // degenerate-input decision.
+//
+// A degenerate triangle (repeated vertex, or exactly collinear) has no plane
+// to project onto, so the result is the minimum over its three edges, which is
+// zero-length-safe. A non-degenerate triangle projects the point onto its
+// plane and uses the plane distance when the projection lies inside the
+// triangle (barycentric u, v >= 0 and u + v <= 1); otherwise the closest point
+// lies on the boundary and the minimum edge distance is used. The result is
+// always finite for finite inputs and finite squared intermediates.
 inline double squared_distance(Point3d p, const Triangle3d& t) noexcept {
-  const Vec3d ab = t.b - t.a, ac = t.c - t.a, ap = p - t.a;
-  const double d1 = dot(ab, ap), d2 = dot(ac, ap);
-  if (d1 <= 0.0 && d2 <= 0.0) return dot(ap, ap);
-  const Vec3d bp = p - t.b;
-  const double d3 = dot(ab, bp), d4 = dot(ac, bp);
-  if (d3 >= 0.0 && d4 <= d3) return dot(bp, bp);
-  const double vc = d1 * d4 - d3 * d2;
-  if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
-    const double v = d1 / (d1 - d3);
-    const Vec3d q = ab * v - ap;
-    return dot(q, q);
+  const Vec3d e1 = t.b - t.a;
+  const Vec3d e2 = t.c - t.a;
+  const Vec3d n = cross(e1, e2);
+  // Exactly degenerate: no plane. Edge distances also cover a == b or a == c.
+  const auto edge_min = [&p, &t]() noexcept {
+    return std::min({squared_distance_segment(p, t.a, t.b), squared_distance_segment(p, t.b, t.c),
+                     squared_distance_segment(p, t.c, t.a)});
+  };
+  if (n[0] == 0.0 && n[1] == 0.0 && n[2] == 0.0) return edge_min();
+  const Vec3d ap = p - t.a;
+  const double nn = dot(n, n);
+  // A non-degenerate triangle has nn > 0, but the squared cross can underflow
+  // or overflow for extreme coordinates; fall back to the edges then.
+  if (!(nn > 0.0) || !std::isfinite(nn)) return edge_min();
+  const double s = dot(ap, n) / nn;
+  const Point3d q{p[0] - n[0] * s, p[1] - n[1] * s, p[2] - n[2] * s};
+  const Vec3d aq = q - t.a;
+  const double d00 = dot(e1, e1), d01 = dot(e1, e2), d11 = dot(e2, e2);
+  const double den = d00 * d11 - d01 * d01;
+  if (!(den > 0.0) || !std::isfinite(den)) return edge_min();
+  const double d20 = dot(aq, e1), d21 = dot(aq, e2);
+  const double u = (d11 * d20 - d01 * d21) / den;
+  const double v = (d00 * d21 - d01 * d20) / den;
+  if (u >= 0.0 && v >= 0.0 && u + v <= 1.0) {
+    const Vec3d d = p - q;
+    return dot(d, d);
   }
-  const Vec3d cp = p - t.c;
-  const double d5 = dot(ab, cp), d6 = dot(ac, cp);
-  if (d6 >= 0.0 && d5 <= d6) return dot(cp, cp);
-  const double vb = d5 * d2 - d1 * d6;
-  if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
-    const double w = d2 / (d2 - d6);
-    const Vec3d q = ac * w - ap;
-    return dot(q, q);
-  }
-  const double va = d3 * d6 - d5 * d4;
-  if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
-    const double w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-    const Vec3d q = (t.c - t.b) * w - bp;
-    return dot(q, q);
-  }
-  const double denom = 1.0 / (va + vb + vc);
-  const double v = vb * denom;
-  const double w = vc * denom;
-  const Vec3d q = ab * v + ac * w - ap;
-  return dot(q, q);
+  return edge_min();
 }
 
 // Bounding volume hierarchy over triangles, built with a 12-bin surface area
@@ -99,9 +118,10 @@ inline double squared_distance(Point3d p, const Triangle3d& t) noexcept {
 // primitive boxes. An empty tree has no node at all and returns an empty box.
 //
 // Ray contract: `dir` is expected to be finite and non-zero; t is measured in
-// units of |dir|, so a non-normalised direction is fine. Hits with t <= 0 are
-// behind the origin and are ignored; hits must satisfy t < tmax. Equal t ties
-// resolve to the smallest primitive index.
+// units of |dir|, so a non-normalised direction is fine. The accepted interval
+// is (0, tmax]: hits with t <= 0 are behind the origin and are ignored, and a
+// hit exactly at t == tmax is accepted. Equal t ties resolve to the smallest
+// primitive index.
 class Bvh {
  public:
   struct Hit {
@@ -154,7 +174,10 @@ class Bvh {
           const std::uint32_t prim = order_[i];
           double t = 0.0;
           if (!intersect_tri(ray, prims_[prim].tri, t)) continue;
-          if (t < best || (t == best && found && prim < best_prim)) {
+          // The interval is (0, tmax]: a hit exactly at tmax is included, so the
+          // slab pruning limit above also keeps equality.
+          const bool better = !found || t < best || (t == best && prim < best_prim);
+          if (t <= best && better) {
             best = t;
             best_prim = prim;
             found = true;
@@ -386,15 +409,21 @@ class Bvh {
     return true;
   }
 
-  // Möller-Trumbore. The 1e-14 determinant cutoff is a deliberate
-  // floating-point guard (parallel rays and sliver triangles), not an exact
-  // predicate; the BVH is an index, not a decision structure.
+  // Möller-Trumbore. The determinant guard is relative:
+  // |det| <= 1e-14 * |e1| * |e2| * |dir| rejects only genuinely near-parallel
+  // rays and sliver triangles, independent of the coordinate scale of the
+  // triangle. It is a floating-point guard, not an exact predicate; the product
+  // is computed in double, so it saturates (and rejects) once the triangle edge
+  // lengths exceed ~1e100, beyond which the squared sliver measure itself
+  // overflows.
   static bool intersect_tri(const Ray3d& r, const Triangle3d& t, double& tout) noexcept {
     const Vec3d e1 = t.b - t.a;
     const Vec3d e2 = t.c - t.a;
     const Vec3d pv = cross(r.dir, e2);
     const double det = dot(e1, pv);
-    if (std::abs(det) < 1e-14) return false;
+    const double scale =
+        std::sqrt(dot(e1, e1)) * std::sqrt(dot(e2, e2)) * std::sqrt(dot(r.dir, r.dir));
+    if (!(std::abs(det) > 1e-14 * scale)) return false;
     const double inv = 1.0 / det;
     const Vec3d tv{r.origin[0] - t.a[0], r.origin[1] - t.a[1], r.origin[2] - t.a[2]};
     const double u = dot(tv, pv) * inv;

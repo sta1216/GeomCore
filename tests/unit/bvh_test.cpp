@@ -356,3 +356,76 @@ TEST_CASE("BVH builds many coincident-centroid primitives without degenerating")
   CHECK(bvh.nearest(Point3d{0.25, 0.25, 2.0}, d2) == 0u);
   CHECK(d2 == 1.0);
 }
+// ---------------------------------------------------------------------------
+// Fix round: degenerate distance, the inclusive tmax boundary, and tiny
+// triangles. Expected values are hand-computed, independent of the brief's
+// ray_tri helper.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BVH nearest handles degenerate triangles without NaN") {
+  // a == b: no plane exists, so the distance is the minimum over the edges.
+  const Triangle3d collapsed{Point3d{0, 0, 0}, Point3d{0, 0, 0}, Point3d{1, 0, 0}};
+  CHECK(squared_distance(Point3d{0.5, 0, 0}, collapsed) == 0.0);
+  CHECK(squared_distance(Point3d{0.5, 1, 0}, collapsed) == 1.0);
+  CHECK(squared_distance(Point3d{-1, 0, 0}, collapsed) == 1.0);
+
+  // Exactly collinear vertices: the point is 5 away from the segment on x.
+  const Triangle3d collinear{Point3d{0, 0, 0}, Point3d{2, 0, 0}, Point3d{1, 0, 0}};
+  CHECK(squared_distance(Point3d{1, 5, 0}, collinear) == 25.0);
+  CHECK(squared_distance(Point3d{0.5, 0, 3}, collinear) == 9.0);
+
+  // Fully collapsed triangle: a point.
+  const Triangle3d point{Point3d{0, 0, 0}, Point3d{0, 0, 0}, Point3d{0, 0, 0}};
+  CHECK(squared_distance(Point3d{1, 2, 2}, point) == 9.0);
+
+  std::vector<Triangle3d> tris{collapsed};
+  Bvh bvh;
+  bvh.build(tris);
+  double d2 = -1.0;
+  CHECK(bvh.nearest(Point3d{0.5, 0, 0}, d2) == 0u);
+  CHECK(d2 == 0.0);
+  CHECK(bvh.nearest(Point3d{0.5, 1, 0}, d2) == 0u);
+  CHECK(d2 == 1.0);
+}
+
+TEST_CASE("BVH raycast includes a hit exactly at tmax") {
+  const Triangle3d tri{Point3d{0, 0, 0}, Point3d{1, 0, 0}, Point3d{0, 1, 0}};
+  std::vector<Triangle3d> tris{tri};
+  Bvh bvh;
+  bvh.build(tris);
+  const Ray3d ray{Point3d{0.25, 0.25, 1.0}, Vec3d{0, 0, -1}};
+
+  Bvh::Hit hit;
+  CHECK(bvh.raycast(ray, 1.0, hit));
+  CHECK(hit.prim == 0u);
+  CHECK(hit.t == 1.0);
+
+  // One ulp below the hit distance is a miss, and so is any smaller budget.
+  CHECK_FALSE(bvh.raycast(ray, std::nextafter(1.0, 0.0), hit));
+  CHECK_FALSE(bvh.raycast(ray, 0.5, hit));
+
+  // A budget just above the hit still reports the same t.
+  CHECK(bvh.raycast(ray, std::nextafter(1.0, 2.0), hit));
+  CHECK(hit.t == 1.0);
+}
+
+TEST_CASE("BVH raycast and nearest are scale-invariant for tiny triangles") {
+  for (const double s : {1e-8, 1e-7, 1e-6}) {
+    CAPTURE(s);
+    const Triangle3d tri{Point3d{0, 0, 0}, Point3d{s, 0, 0}, Point3d{0, s, 0}};
+    std::vector<Triangle3d> tris{tri};
+    Bvh bvh;
+    bvh.build(tris);
+
+    const Ray3d ray{Point3d{0.25 * s, 0.25 * s, 1.0}, Vec3d{0, 0, -1}};
+    Bvh::Hit hit;
+    CHECK(bvh.raycast(ray, 2.0, hit));
+    CHECK(hit.prim == 0u);
+    CHECK(hit.t == doctest::Approx(1.0));
+
+    double d2 = -1.0;
+    CHECK(bvh.nearest(Point3d{0.25 * s, 0.25 * s, 1.0}, d2) == 0u);
+    CHECK(d2 == 1.0);
+    CHECK(squared_distance(Point3d{s, s, 1.0}, tri) == doctest::Approx(1.0));
+  }
+}
