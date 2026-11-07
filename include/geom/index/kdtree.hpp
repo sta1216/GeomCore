@@ -30,7 +30,12 @@ inline namespace v1 {
 // `(coordinate[axis], index)`, which makes the tree deterministic for duplicate
 // coordinates. Rebuilding clears the previous tree.
 //
-// Queries use an explicit stack (the depth guard bounds it at 64 entries) and
+// Preconditions: coordinates must be finite. NaN coordinates make the median
+// comparator non-transitive and can leave `nearest` returning the 0xFFFFFFFF
+// sentinel with an infinite distance. Indices are `uint32_t`, so `build`
+// supports at most `UINT32_MAX` points; a larger input is silently truncated.
+//
+// Queries use an explicit stack (the depth guard bounds it at 65 entries) and
 // prune by the squared distance from the query point to a node box. Ties in
 // `nearest` and `nearest_k` resolve to the smallest point index: a node whose
 // box is exactly at the current k-th distance is still visited, because a
