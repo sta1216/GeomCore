@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <utility>
 
 using geom::v1::ArrangementSegment;
 using geom::v1::Point2d;
@@ -19,6 +21,31 @@ int count_with_source(const SplitResult& r, std::uint32_t source) {
   return n;
 }
 
+// Same normalized perpendicular-distance definition as the header, but written
+// independently so the test does not simply re-run the implementation.
+long double perpendicular_distance(const Point2d& p, const Point2d& a, const Point2d& b) {
+  long double dx = static_cast<long double>(b[0]) - static_cast<long double>(a[0]);
+  long double dy = static_cast<long double>(b[1]) - static_cast<long double>(a[1]);
+  const long double dm = std::max(std::fabs(dx), std::fabs(dy));
+  if (!(dm > 0.0L)) return std::numeric_limits<long double>::infinity();
+  dx /= dm;
+  dy /= dm;
+  long double px = static_cast<long double>(p[0]) - static_cast<long double>(a[0]);
+  long double py = static_cast<long double>(p[1]) - static_cast<long double>(a[1]);
+  const long double pm = std::max(std::fabs(px), std::fabs(py));
+  if (pm == 0.0L) return 0.0L;
+  px /= pm;
+  py /= pm;
+  return std::fabs(dx * py - dy * px) / std::hypot(dx, dy) * pm;
+}
+
+void check_pairs_sorted(const SplitResult& r) {
+  for (std::size_t i = 0; i < r.input_pairs.size(); ++i) {
+    CHECK(r.input_pairs[i].first < r.input_pairs[i].second);
+    if (i > 0) CHECK(r.input_pairs[i - 1] < r.input_pairs[i]);
+  }
+}
+
 }  // namespace
 
 TEST_CASE("split: crossing X splits both segments") {
@@ -31,6 +58,7 @@ TEST_CASE("split: crossing X splits both segments") {
   CHECK(count_with_source(r, 0) == 2);
   CHECK(count_with_source(r, 1) == 2);
   CHECK(r.input_pairs.size() == 1);
+  check_pairs_sorted(r);
   CHECK(r.max_residual <= 1e-12);
 }
 
@@ -50,6 +78,10 @@ TEST_CASE("split: collinear overlap and T junction") {
   const SplitResult rt = split_segments(t);
   CHECK(rt.segments.size() == 3);
   CHECK(rt.input_pairs.size() == 1);
+  CHECK(rt.input_pairs[0] == std::make_pair(0u, 1u));
+  check_pairs_sorted(rt);
+  // The contact is the exact endpoint (1, 0), so the T has no residual.
+  CHECK(rt.max_residual == 0.0);
 }
 
 TEST_CASE("split: triple point and duplicate segments") {
@@ -87,4 +119,91 @@ TEST_CASE("split: disjoint and vertical segments") {
       {Point2d{0, 1}, Point2d{2, 1}, 1},
   };
   CHECK(split_segments(cross).segments.size() == 4);
+}
+
+TEST_CASE("split: near-parallel crossing uses exact determinants") {
+  // Both direction products are about 2^60 and cancel to a determinant of 2.
+  // A floating denominator test sees 0 here; the exact orientation signs are
+  // strict (-, +, +, -), so the pair must still be split.
+  const double k = 1073741824.0;  // 2^30
+  const ArrangementSegment segs[2] = {
+      {Point2d{0, 0}, Point2d{k, k - 1}, 0},
+      {Point2d{-1, -1}, Point2d{k + 1, k}, 1},
+  };
+  const SplitResult r = split_segments(segs);
+  REQUIRE(r.segments.size() == 4);
+  REQUIRE(r.input_pairs.size() == 1);
+  CHECK(r.input_pairs[0] == std::make_pair(0u, 1u));
+  check_pairs_sorted(r);
+
+  const Point2d expected{k / 2.0, k / 2.0 - 0.5};
+  const Point2d splits[4] = {
+      r.segments[0].b, r.segments[1].a, r.segments[2].b, r.segments[3].a};
+  for (const Point2d& p : splits) {
+    CHECK(std::fabs(p[0] - expected[0]) <= 1e-9);
+    CHECK(std::fabs(p[1] - expected[1]) <= 1e-9);
+    CHECK(perpendicular_distance(p, segs[0].a, segs[0].b) <= 1e-9);
+    CHECK(perpendicular_distance(p, segs[1].a, segs[1].b) <= 1e-9);
+  }
+  CHECK(r.max_residual <= 1e-9);
+}
+
+TEST_CASE("split: residual captures an off-line contact") {
+  // A long segment crossed by a vertical one at a coordinate where double
+  // rounding moves the contact off the vertical supporting line.
+  const ArrangementSegment segs[2] = {
+      {Point2d{0, 0}, Point2d{2.0e15, 2.0e15 + 1.0}, 0},
+      {Point2d{1.0e15 + 0.125, 0}, Point2d{1.0e15 + 0.125, 2.0e15}, 1},
+  };
+  const SplitResult r = split_segments(segs);
+  REQUIRE(r.segments.size() == 4);
+  REQUIRE(r.input_pairs.size() == 1);
+  CHECK(r.max_residual > 0.0);
+  CHECK(r.max_residual <= 0.5);
+
+  const Point2d splits[4] = {
+      r.segments[0].b, r.segments[1].a, r.segments[2].b, r.segments[3].a};
+  for (const Point2d& p : splits) {
+    CHECK(perpendicular_distance(p, segs[0].a, segs[0].b) <= r.max_residual + 1e-12);
+    CHECK(perpendicular_distance(p, segs[1].a, segs[1].b) <= r.max_residual + 1e-12);
+  }
+}
+
+TEST_CASE("split: uniform 1e200 and 1e-200 scaling") {
+  const double scales[2] = {1e200, 1e-200};
+  for (const double s : scales) {
+    const ArrangementSegment segs[2] = {
+        {Point2d{0, 0}, Point2d{2 * s, 2 * s}, 0},
+        {Point2d{0, 2 * s}, Point2d{2 * s, 0}, 1},
+    };
+    const SplitResult r = split_segments(segs);
+    REQUIRE(r.segments.size() == 4);
+    REQUIRE(r.input_pairs.size() == 1);
+    CHECK(std::isfinite(r.max_residual));
+    check_pairs_sorted(r);
+
+    const Point2d expected{s, s};
+    const Point2d splits[4] = {
+        r.segments[0].b, r.segments[1].a, r.segments[2].b, r.segments[3].a};
+    for (const Point2d& p : splits) {
+      CHECK(std::fabs(p[0] - expected[0]) <= 1e-9 * s);
+      CHECK(std::fabs(p[1] - expected[1]) <= 1e-9 * s);
+    }
+  }
+}
+
+TEST_CASE("split: zero-length input is filtered without renumbering outputs") {
+  const ArrangementSegment segs[3] = {
+      {Point2d{5, 5}, Point2d{5, 5}, 9},  // dropped
+      {Point2d{0, 0}, Point2d{2, 2}, 0},
+      {Point2d{0, 2}, Point2d{2, 0}, 1},
+  };
+  const SplitResult r = split_segments(segs);
+  REQUIRE(r.segments.size() == 4);
+  REQUIRE(r.input_pairs.size() == 1);
+  CHECK(r.input_pairs[0] == std::make_pair(1u, 2u));
+  check_pairs_sorted(r);
+  for (const auto& piece : r.segments) {
+    CHECK(piece.source != 9);
+  }
 }
