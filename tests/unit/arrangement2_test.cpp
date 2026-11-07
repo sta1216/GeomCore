@@ -1,11 +1,13 @@
 #include <doctest/doctest.h>
 
 #include <geom/cgeom/arrangement2.hpp>
+#include <geom/cgeom/polygon2.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <utility>
+#include <vector>
 
 using geom::v1::ArrangementSegment;
 using geom::v1::Point2d;
@@ -351,4 +353,71 @@ TEST_CASE("split: zero-length input is filtered without renumbering outputs") {
   for (const auto& piece : r.segments) {
     CHECK(piece.source != 9);
   }
+}
+
+using geom::v1::Arrangement2;
+using geom::v1::Polygon2d;
+
+namespace {
+
+Polygon2d square(double x0, double y0, double x1, double y1) {
+  Polygon2d p;
+  p.vertices = {{x0, y0}, {x1, y0}, {x1, y1}, {x0, y1}};
+  p.ring_starts = {0, 4};
+  return p;
+}
+
+std::vector<ArrangementSegment> ring_segments(const Polygon2d& p, std::uint32_t source) {
+  std::vector<ArrangementSegment> out;
+  const auto r = p.ring(0);
+  for (std::uint32_t i = 0; i < r.size(); ++i) {
+    out.push_back({r[i], r[(i + 1) % r.size()], source});
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST_CASE("arrangement: single square") {
+  const Polygon2d p = square(0, 0, 1, 1);
+  const auto segs = ring_segments(p, 0);
+  const Arrangement2 arr = Arrangement2::build(segs);
+  CHECK(arr.vertex_count() == 4);
+  CHECK(arr.edge_count() == 4);
+  CHECK(arr.face_count() == 2);
+  CHECK(arr.source_count() == 1);
+  CHECK(arr.winding(arr.locate(Point2d{0.5, 0.5}), 0) == 1);
+  CHECK(arr.locate(Point2d{2, 2}) == 0xFFFFFFFFu);
+  CHECK(arr.max_residual() == 0.0);
+}
+
+TEST_CASE("arrangement: two overlapping squares") {
+  std::vector<ArrangementSegment> segs = ring_segments(square(0, 0, 1, 1), 0);
+  for (auto s : ring_segments(square(0.5, 0.5, 1.5, 1.5), 1)) segs.push_back(s);
+  const Arrangement2 arr = Arrangement2::build(segs);
+  CHECK(arr.vertex_count() == 10);
+  CHECK(arr.edge_count() == 12);
+  CHECK(arr.face_count() == 4);
+  CHECK(arr.winding(arr.locate(Point2d{0.25, 0.75}), 0) == 1);
+  CHECK(arr.winding(arr.locate(Point2d{0.75, 0.75}), 0) == 2);
+  CHECK(arr.winding(arr.locate(Point2d{1.25, 0.75}), 1) == 1);
+  CHECK(arr.locate(Point2d{2, 2}) == 0xFFFFFFFFu);
+}
+
+TEST_CASE("arrangement: shared edge keeps equal winding on both sides") {
+  std::vector<ArrangementSegment> segs = ring_segments(square(0, 0, 1, 1), 0);
+  for (auto s : ring_segments(square(1, 0, 2, 1), 1)) segs.push_back(s);
+  const Arrangement2 arr = Arrangement2::build(segs);
+  CHECK(arr.vertex_count() == 6);
+  CHECK(arr.edge_count() == 7);
+  CHECK(arr.face_count() == 3);
+  CHECK(arr.winding(arr.locate(Point2d{0.5, 0.5}), 0) == 1);
+  CHECK(arr.winding(arr.locate(Point2d{1.5, 0.5}), 1) == 1);
+}
+
+TEST_CASE("arrangement: vertical chain and point locate on boundary") {
+  const Polygon2d p = square(-1, -1, 1, 1);
+  const Arrangement2 arr = Arrangement2::build(ring_segments(p, 0));
+  CHECK(arr.winding(arr.locate(Point2d{0, 0}), 0) == 1);
+  CHECK(arr.locate(Point2d{1, 0}) == 0xFFFFFFFFu);  // boundary has no unique face
 }
