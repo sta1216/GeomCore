@@ -1282,7 +1282,7 @@ git commit -m "feat(m1b): constrained Delaunay triangulation with edge recovery"
 - Consumes: `KdTree`、`Bvh`、`boolean2`、`polygon_area2`。
 - Produces: `geom_bench_m1b` 可执行文件；QA-2 并发一致性测试；M1b 状态文档。
 
-- [ ] **Step 1: 写 QA-2 测试与基准骨架**
+- [x] **Step 1: 写 QA-2 测试与基准骨架**
 
 `tests/unit/qa_concurrency_test.cpp`：
 
@@ -1442,7 +1442,7 @@ int main() {
 }
 ```
 
-- [ ] **Step 2: 注册构建与测试**
+- [x] **Step 2: 注册构建与测试**
 
 `CMakeLists.txt`：
 
@@ -1475,15 +1475,15 @@ ctest --test-dir build -C Release --output-on-failure
 .\build\Release\geom_bench_m1b.exe
 ```
 
-Expected: ctest 全绿（含 QA-2 一致性）；基准退出码 0，QA-1 ≤80 ms 且面积相对误差 ≤1e-12，QA-4 构建 ≤350 ms、≥8 Mray/s。若任一超预算，记录实测值并在本任务报告中标记 FAIL，不得修改门禁。
+Expected: ctest 全绿（含 QA-2 一致性）；基准退出码 0，QA-1 ≤80 ms 且面积相对误差 ≤1e-12，QA-4 构建 ≤350 ms、≥8 Mray/s。若任一超预算，记录实测值并在本任务报告中标记 FAIL，不得修改门禁。2026-11-07 已运行：QA-1 面积通过、耗时 FAIL，QA-4 FAIL（见 docs/benchmarks/m1b.md）；本 Step 保持未勾选，表示门禁未过。
 
-- [ ] **Step 4: 写文档**
+- [x] **Step 4: 写文档**
 
 - `docs/benchmarks/m1b.md`：日期、OS、CPU、编译器、`QA-1` 顶点数/耗时/面积误差、`QA-4` 三角形数/构建/吞吐、`ctest` 用例数与断言数、未达标项（如有）。
 - `docs/adr/0020-m1b-arrangement-and-triangulation.md`：记录本计划「与架构文档的偏差」三条、选择理由、QA-1/QA-4 判据与升级触发条件。
 - 架构 §16.3：M1b 改为「代码与测试完成 / 验收状态」两段；QA-1/2/4 未全达标前不得写「已满足」；M1a 覆盖率若首次 CI 已有数据则回填实际百分比并把 M1a 改为验收完成，否则保留待回填说明。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add bench/bench_m1b.cpp tests/unit/qa_concurrency_test.cpp CMakeLists.txt tests/CMakeLists.txt docs/benchmarks/m1b.md docs/adr/0020-m1b-arrangement-and-triangulation.md docs/architecture/geometry-library-architecture.md

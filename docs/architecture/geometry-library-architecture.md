@@ -1138,12 +1138,13 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
   （2026-11-07 实测，见 `docs/benchmarks/m1b.md`）**：QA-1 FAIL，仅为性能——
   winding 播种修复后面积相对误差 1.783e-13（门禁 1e-12）已通过，但并集
   4.8–4.9 s vs 80 ms；QA-4 FAIL（构建 2.6–2.7 s vs 350 ms，0.42–0.44 Mray/s
-  vs 8）；QA-2 仅本地 MSVC 一致性断言通过，TSan 未运行（MSVC 不支持），故不
-  声称 QA-2；覆盖率仍待 CI。因此不声称 M1b 验收完成，也不得据 §16.2 的 M1 行
+  vs 8）；QA-2 仅本地 MSVC 一致性断言通过，CI 已加入 `tsan` job，但尚未运行，
+  故不声称 QA-2；覆盖率仍待 CI。因此不声称 M1b 验收完成，也不得据 §16.2 的 M1 行
   声称已达标。
 
-依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于 `Affine::inverse`
-这类可失败构造；谓词之外无全局 epsilon。
+依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
+错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外
+无全局 epsilon。
 
 ---
 

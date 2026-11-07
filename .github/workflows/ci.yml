@@ -45,3 +45,23 @@ jobs:
                 --fail-under-line 95 --fail-under-branch 90 \
                 --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
                 --print-summary
+      - name: Coverage gate (cgeom and index)
+        run: |
+          gcovr -r . --filter 'include/geom/(cgeom|index)/' \
+                --fail-under-line 90 --fail-under-branch 85 \
+                --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
+                --print-summary
+
+  # QA-2: the read-only query paths (BVH/KD) must be race-free. The local MSVC
+  # build can only run the serial-vs-parallel consistency assertion; TSan needs
+  # a GCC/Clang toolchain, so it runs here.
+  tsan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-tsan -DGEOM_TSAN=ON -DGEOM_WERROR=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build-tsan -j 4
+      - name: QA-2 concurrency under TSan
+        run: ./build-tsan/tests/geom_tests --test-case="qa2*"

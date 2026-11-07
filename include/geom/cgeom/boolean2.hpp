@@ -191,7 +191,9 @@ struct BooleanComponent {
 //     parameter, so the output topology would be unreliable;
 //   - Errc::self_intersecting when allow_self_intersections is false and two
 //     non-adjacent edges of the same input ring meet. Overlaps between distinct
-//     rings or distinct operands are not self-intersections.
+//     rings or distinct operands are not self-intersections;
+//   - Errc::numeric_failure when a hole ring cannot be attached to any outer
+//     ring (a degenerate arrangement state that must not be papered over).
 //
 // Face areas are stored by the arrangement as per-cycle mantissa/exponent
 // pairs, so orientation and nesting stay exact across mixed coordinate scales
@@ -428,6 +430,10 @@ inline Result<BooleanResult> boolean2(std::span<const Polygon2d> operands, Boole
                                     current.area_mantissa, current.area_exponent)) {
         best = c;
       }
+    }
+    if (!found) {
+      return Error{Errc::numeric_failure, "boolean2: hole has no containing outer ring",
+                   0u, 0u};
     }
     components[best].holes.push_back(std::move(hole));
   }
