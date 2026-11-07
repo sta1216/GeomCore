@@ -571,7 +571,11 @@ inline detail::SplitResult split_segments(std::span<const ArrangementSegment> se
 //   - Face areas are computed after an exact power-of-two normalization of the
 //     coordinates (e = ilogb of the largest |coordinate|), so faces are
 //     classified and ordered correctly from subnormal magnitudes up to about
-//     1e308; locate() uses the original coordinates and exact predicates.
+//     1e308, provided every face's area stays representable after that scaling
+//     (feature-size dynamic range below roughly 1e154). Ordering a 1e308 face
+//     against a 1e-200 nested face would need per-face exponents; that mixed
+//     scale is outside this contract. locate() uses the original coordinates
+//     and exact predicates.
 class Arrangement2 {
  public:
   struct HalfEdge {
