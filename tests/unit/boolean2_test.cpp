@@ -484,3 +484,69 @@ TEST_CASE("boolean2: single convex polygon unions to itself") {
         doctest::Approx(3.139525976));
 }
 
+
+// Ring areas of 1e200 squares are 1e400, above the double range. Per-loop
+// scaling must still recover the orientation and nesting of every ring. The
+// island inside the hole makes the test sensitive to an unscaled area: NaN
+// orientation happens to read as a hole, so only the polygon count shows that
+// the island was lost.
+TEST_CASE("boolean2: per-loop scaling survives ring areas above the double range") {
+  Polygon2d poly;
+  append_ring(poly, {{0.0, 0.0}, {1e200, 0.0}, {1e200, 1e200}, {0.0, 1e200}});  // CCW
+  append_ring(poly, {{0.5e200, 0.5e200},
+                     {0.5e200, 0.9e200},
+                     {0.9e200, 0.9e200},
+                     {0.9e200, 0.5e200}});  // CW hole
+  append_ring(poly, {{0.55e200, 0.55e200},
+                     {0.85e200, 0.55e200},
+                     {0.85e200, 0.85e200},
+                     {0.55e200, 0.85e200}});  // CCW island inside the hole
+  const Polygon2d ops[1] = {poly};
+
+  const auto out = boolean2(ops, BooleanOp::union_);
+  REQUIRE(out.has_value());
+  REQUIRE(out.value().polygons.polygons.size() == 2);
+  const Polygon2d* outer = nullptr;
+  const Polygon2d* island = nullptr;
+  for (const Polygon2d& candidate : out.value().polygons.polygons) {
+    if (candidate.ring_count() == 2) outer = &candidate;
+    if (candidate.ring_count() == 1) island = &candidate;
+  }
+  REQUIRE(outer != nullptr);
+  REQUIRE(island != nullptr);
+  CHECK(outer->ring(0).size() == 4);
+  CHECK(outer->ring(1).size() == 4);
+  CHECK(ring_orientation2(outer->ring(0)) == 1);
+  CHECK(ring_orientation2(outer->ring(1)) == -1);
+  CHECK(island->ring(0).size() == 4);
+  CHECK(ring_orientation2(island->ring(0)) == 1);
+}
+
+// The horizontal segment's endpoint difference overflows double. Before the
+// split fix the T junction at (0, 0) was not recorded (max_residual = +inf) and
+// the intersection came out empty instead of the unit square.
+TEST_CASE("boolean2: overflowing endpoint difference keeps the T junction topology") {
+  const Polygon2d huge = rect(-1e308, 0.0, 1e308, 1e308);
+  const Polygon2d band = rect(0.0, -1.0, 1.0, 1.0);
+  const Polygon2d ops[2] = {huge, band};
+
+  const auto inter = boolean2(ops, BooleanOp::intersection);
+  REQUIRE(inter.has_value());
+  REQUIRE(inter.value().polygons.polygons.size() == 1);
+  const Polygon2d& unit = inter.value().polygons.polygons[0];
+  CHECK(unit.ring_count() == 1);
+  CHECK(unit.vertices.size() == 4);
+  CHECK(polygon_area2(unit) == doctest::Approx(1.0));
+
+  const auto uni = boolean2(ops, BooleanOp::union_);
+  REQUIRE(uni.has_value());
+  REQUIRE(uni.value().polygons.polygons.size() == 1);
+  CHECK(uni.value().polygons.polygons[0].ring_count() == 1);
+  CHECK(uni.value().polygons.polygons[0].vertices.size() == 8);
+
+  const auto diff = boolean2(ops, BooleanOp::difference);
+  REQUIRE(diff.has_value());
+  REQUIRE(diff.value().polygons.polygons.size() == 1);
+  CHECK(diff.value().polygons.polygons[0].ring_count() == 1);
+  CHECK(diff.value().polygons.polygons[0].vertices.size() == 8);
+}

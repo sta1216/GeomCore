@@ -185,18 +185,18 @@ struct BooleanComponent {
 //   - Errc::degenerate for an empty operand list or a malformed Polygon2d
 //     (which includes a ring with fewer than three vertices);
 //   - Errc::non_finite for a non-finite coordinate;
-//   - Errc::unsupported when the coordinate exponent span exceeds 1314 bits,
-//     the same guard delaunay2 uses (the arrangement face areas are scaled by
-//     one global power of two and cannot separate such magnitudes);
+//   - Errc::unsupported when the coordinate exponent span exceeds 1314 bits
+//     (the same guard delaunay2 uses), or when the arrangement reports a
+//     non-finite split residual: a proper crossing had no representable
+//     parameter, so the output topology would be unreliable;
 //   - Errc::self_intersecting when allow_self_intersections is false and two
 //     non-adjacent edges of the same input ring meet. Overlaps between distinct
 //     rings or distinct operands are not self-intersections.
 //
-// Scale limit inherited from the arrangement: face winding is seeded from face
-// areas scaled by one global power of two, so a feature more than about 1e154
-// times smaller than the largest coordinate can still be misclassified even
-// though the exponent span is accepted; keep every feature within ~1e154 of the
-// largest coordinate.
+// Face areas are stored by the arrangement as per-cycle mantissa/exponent
+// pairs, so orientation and nesting stay exact across mixed coordinate scales
+// inside the accepted span. Point location keeps using the original
+// coordinates; the split residual covers the remaining unrepresentable cases.
 //
 // The result may be empty; an empty PolygonSet is a legal answer.
 inline Result<BooleanResult> boolean2(std::span<const Polygon2d> operands, BooleanOp op,
@@ -272,6 +272,10 @@ inline Result<BooleanResult> boolean2(std::span<const Polygon2d> operands, Boole
 
   // 2. One arrangement over every operand resolves all crossings exactly.
   const Arrangement2 arrangement = Arrangement2::build(segments);
+  if (!std::isfinite(arrangement.max_residual())) {
+    return Error{Errc::unsupported,
+                 "boolean2: arrangement has a non-representable intersection", 0u, 0u};
+  }
   const std::span<const Arrangement2::HalfEdge> half_edges = arrangement.half_edges();
   const std::span<const Arrangement2::Face> faces = arrangement.faces();
   const std::span<const Point2d> vertices = arrangement.vertices();

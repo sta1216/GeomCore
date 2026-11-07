@@ -77,21 +77,53 @@ inline bool split_in_box(const Point2d& a, const Point2d& b, const Point2d& p) n
          p[1] >= std::min(a[1], b[1]) && p[1] <= std::max(a[1], b[1]);
 }
 
+// Power-of-two shift that brings the largest coordinate of a, b, p into
+// [0.5, 1). Used when a coordinate difference overflows double (MSVC long
+// double is double): dividing inf by inf would otherwise produce NaN.
+inline int split_scale_shift(const Point2d& a, const Point2d& b,
+                             const Point2d& p) noexcept {
+  double m = 0.0;
+  for (const double c : {a[0], a[1], b[0], b[1], p[0], p[1]}) {
+    const double mag = std::fabs(c);
+    if (mag > m) m = mag;
+  }
+  if (!(m > 0.0) || !std::isfinite(m)) return 0;
+  return -std::ilogb(m);
+}
+
 // Parameter of p on ab, clamped to [0, 1]. p is assumed to lie on the line.
 // The direction is normalized by its largest component so that the dot products
 // neither overflow nor underflow at extreme (but finite) coordinate scales.
+// When b - a overflows (for example -1e308 to 1e308), every involved coordinate
+// is first rescaled by a power of two; t is invariant under that scaling.
 inline long double split_param_on(const Point2d& p, const Point2d& a,
                                   const Point2d& b) noexcept {
-  long double dx = static_cast<long double>(b[0]) - static_cast<long double>(a[0]);
-  long double dy = static_cast<long double>(b[1]) - static_cast<long double>(a[1]);
-  const long double dm = std::max(std::fabs(dx), std::fabs(dy));
-  if (!(dm > 0.0L)) return 0.0L;
+  double ax = a[0];
+  double ay = a[1];
+  double bx = b[0];
+  double by = b[1];
+  double px_in = p[0];
+  double py_in = p[1];
+  long double dx = static_cast<long double>(bx) - static_cast<long double>(ax);
+  long double dy = static_cast<long double>(by) - static_cast<long double>(ay);
+  long double dm = std::max(std::fabs(dx), std::fabs(dy));
+  if (!std::isfinite(dm)) {
+    const int shift = split_scale_shift(a, b, p);
+    ax = std::scalbn(ax, shift);
+    ay = std::scalbn(ay, shift);
+    bx = std::scalbn(bx, shift);
+    by = std::scalbn(by, shift);
+    px_in = std::scalbn(px_in, shift);
+    py_in = std::scalbn(py_in, shift);
+    dx = static_cast<long double>(bx) - static_cast<long double>(ax);
+    dy = static_cast<long double>(by) - static_cast<long double>(ay);
+    dm = std::max(std::fabs(dx), std::fabs(dy));
+  }
+  if (!(dm > 0.0L) || !std::isfinite(dm)) return 0.0L;
   dx /= dm;
   dy /= dm;
-  const long double px =
-      (static_cast<long double>(p[0]) - static_cast<long double>(a[0])) / dm;
-  const long double py =
-      (static_cast<long double>(p[1]) - static_cast<long double>(a[1])) / dm;
+  const long double px = (static_cast<long double>(px_in) - static_cast<long double>(ax)) / dm;
+  const long double py = (static_cast<long double>(py_in) - static_cast<long double>(ay)) / dm;
   const long double t = (px * dx + py * dy) / (dx * dx + dy * dy);
   if (!(t > 0.0L)) return 0.0L;
   if (t >= 1.0L) return 1.0L;
@@ -106,6 +138,21 @@ inline void split_add_param(std::vector<SplitParam>& params, long double t,
     t = 1.0L;
   }
   params.push_back(SplitParam{t, p});
+}
+
+// Orders two distinct contacts that share a (rounded) parameter. The dominant
+// coordinate of the segment is monotone from a to b, so comparing it with the
+// segment direction recovers the spatial order that the parameter lost: on a
+// 1e308-long segment two contacts one unit apart can round to the same t.
+inline bool split_contact_before(const Point2d& a, const Point2d& b,
+                                 const Point2d& lhs, const Point2d& rhs) noexcept {
+  const double dx = b[0] - a[0];
+  const double dy = b[1] - a[1];
+  const bool use_x = std::fabs(dx) >= std::fabs(dy);
+  const double direction = use_x ? dx : dy;
+  const double l = use_x ? lhs[0] : lhs[1];
+  const double r = use_x ? rhs[0] : rhs[1];
+  return direction >= 0.0 ? l < r : l > r;
 }
 
 // Exact orientation determinant det = cross(b - a, c - a), evaluated as an
@@ -218,19 +265,40 @@ inline Point2d split_point_at(const Point2d& a, const Point2d& b, long double t)
 // |cross(b - a, p - a)| / |b - a|, evaluated in long double with both the
 // direction and the offset normalized. This keeps 1e200-scale inputs finite and
 // 1e-200-scale inputs nonzero. A non-finite result is saturated to infinity.
+// If b - a overflows double, the frame is rescaled by a power of two and the
+// distance is converted back to the original units (divided by the scale).
 inline long double split_perp_distance(const Point2d& p, const Point2d& a,
                                        const Point2d& b) noexcept {
-  const long double dx = static_cast<long double>(b[0]) - static_cast<long double>(a[0]);
-  const long double dy = static_cast<long double>(b[1]) - static_cast<long double>(a[1]);
-  const long double dm = std::max(std::fabs(dx), std::fabs(dy));
+  double ax = a[0];
+  double ay = a[1];
+  double bx = b[0];
+  double by = b[1];
+  double px_in = p[0];
+  double py_in = p[1];
+  long double dx = static_cast<long double>(bx) - static_cast<long double>(ax);
+  long double dy = static_cast<long double>(by) - static_cast<long double>(ay);
+  long double dm = std::max(std::fabs(dx), std::fabs(dy));
+  int shift = 0;
+  if (!std::isfinite(dm)) {
+    shift = split_scale_shift(a, b, p);
+    ax = std::scalbn(ax, shift);
+    ay = std::scalbn(ay, shift);
+    bx = std::scalbn(bx, shift);
+    by = std::scalbn(by, shift);
+    px_in = std::scalbn(px_in, shift);
+    py_in = std::scalbn(py_in, shift);
+    dx = static_cast<long double>(bx) - static_cast<long double>(ax);
+    dy = static_cast<long double>(by) - static_cast<long double>(ay);
+    dm = std::max(std::fabs(dx), std::fabs(dy));
+  }
   if (!(dm > 0.0L) || !std::isfinite(dm)) {
     return std::numeric_limits<long double>::infinity();
   }
   const long double ux = dx / dm;
   const long double uy = dy / dm;
 
-  const long double px = static_cast<long double>(p[0]) - static_cast<long double>(a[0]);
-  const long double py = static_cast<long double>(p[1]) - static_cast<long double>(a[1]);
+  const long double px = static_cast<long double>(px_in) - static_cast<long double>(ax);
+  const long double py = static_cast<long double>(py_in) - static_cast<long double>(ay);
   const long double pm = std::max(std::fabs(px), std::fabs(py));
   if (pm == 0.0L) return 0.0L;
   if (!std::isfinite(pm)) {
@@ -242,6 +310,7 @@ inline long double split_perp_distance(const Point2d& p, const Point2d& a,
   const long double cross = ux * qy - uy * qx;
   const long double len = std::hypot(ux, uy);
   long double distance = std::fabs(cross) / len * pm;
+  if (shift != 0) distance = std::ldexp(distance, -shift);
   if (!std::isfinite(distance)) {
     return std::numeric_limits<long double>::infinity();
   }
@@ -511,19 +580,21 @@ inline detail::SplitResult split_segments(std::span<const ArrangementSegment> se
 
   for (std::size_t i = 0; i < inputs.size(); ++i) {
     std::vector<detail::SplitParam>& ps = params[i];
-    std::sort(ps.begin(), ps.end(), [](const detail::SplitParam& lhs,
-                                       const detail::SplitParam& rhs) {
+    const ArrangementSegment& source = inputs[i].seg;
+    std::sort(ps.begin(), ps.end(), [&source](const detail::SplitParam& lhs,
+                                              const detail::SplitParam& rhs) {
       if (lhs.t != rhs.t) return lhs.t < rhs.t;
-      if (lhs.p[0] != rhs.p[0]) return lhs.p[0] < rhs.p[0];
-      return lhs.p[1] < rhs.p[1];
+      // Contacts that round to the same parameter are ordered along the
+      // segment. On a 1e308-long segment two contacts 1 apart share t exactly,
+      // so t alone cannot order them; the dominant coordinate is monotone.
+      return detail::split_contact_before(source.a, source.b, lhs.p, rhs.p);
     });
     ps.erase(std::unique(ps.begin(), ps.end(),
                          [](const detail::SplitParam& lhs, const detail::SplitParam& rhs) {
-                           return lhs.t == rhs.t;
+                           return lhs.p[0] == rhs.p[0] && lhs.p[1] == rhs.p[1];
                          }),
              ps.end());
 
-    const ArrangementSegment& source = inputs[i].seg;
     for (std::size_t k = 0; k + 1 < ps.size(); ++k) {
       const Point2d p0 = ps[k].t <= 0.0L
                              ? source.a
@@ -538,6 +609,28 @@ inline detail::SplitResult split_segments(std::span<const ArrangementSegment> se
 
   result.max_residual = static_cast<double>(max_residual);
   return result;
+}
+
+// |ma| * 2^ea < |mb| * 2^eb for finite normalized mantissas.
+inline bool area_abs_less(double ma, int ea, double mb, int eb) noexcept {
+  if (ea != eb) return ea < eb;
+  return std::fabs(ma) < std::fabs(mb);
+}
+
+// Signed comparison of ma*2^ea and mb*2^eb: -1, 0 or 1.
+inline int area_compare(double ma, int ea, double mb, int eb) noexcept {
+  const bool negative_a = ma < 0.0;
+  const bool negative_b = mb < 0.0;
+  if (negative_a != negative_b) return negative_a ? -1 : 1;
+  int magnitude = 0;
+  if (ea != eb) {
+    magnitude = ea < eb ? -1 : 1;
+  } else {
+    const double aa = std::fabs(ma);
+    const double ab = std::fabs(mb);
+    magnitude = aa < ab ? -1 : (aa > ab ? 1 : 0);
+  }
+  return negative_a ? -magnitude : magnitude;
 }
 
 }  // namespace detail
@@ -783,52 +876,65 @@ class Arrangement2 {
     }
 
     // 5. Walk next() to assign one Face per closed boundary cycle and to
-    // accumulate the signed shoelace area. The area is computed on coordinates
-    // scaled by an exact power of two: long double is double on MSVC, so a raw
-    // shoelace would overflow to inf - inf = NaN around 1e200 and underflow to
-    // 0 around 1e-200. Scaling by 2^-e with e = ilogb(max |coordinate|) is
-    // exact and sign-preserving, which keeps `area > 0` and the |area| ordering
-    // used by locate() and by the nesting seed exact. Point location keeps
-    // operating on the original coordinates, so no accuracy is lost there.
-    int area_exponent = 0;
-    {
-      double max_magnitude = 0.0;
-      for (const Point2d& vertex : arrangement.vertices_) {
-        const double x = std::fabs(vertex[0]);
-        const double y = std::fabs(vertex[1]);
-        if (x > max_magnitude) max_magnitude = x;
-        if (y > max_magnitude) max_magnitude = y;
-      }
-      if (max_magnitude > 0.0 && std::isfinite(max_magnitude)) {
-        area_exponent = std::ilogb(max_magnitude);
-      }
-    }
+    // accumulate the signed shoelace area. Each cycle is scaled by its own
+    // exact power of two (e = ilogb(max |coordinate| of that cycle)): long
+    // double is double on MSVC, so a raw shoelace would overflow to
+    // inf - inf = NaN around 1e200 and underflow to 0 around 1e-200, and one
+    // global frame collapses a unit-scale ring next to a 1e308 ring to zero
+    // area. The normalized area is stored as mantissa * 2^exponent so
+    // `mantissa > 0` gives the face orientation and the |area| ordering used by
+    // locate() and by the nesting seed stays exact across mixed scales. Point
+    // location keeps operating on the original coordinates.
     std::vector<std::uint32_t> face_of(half_edge_total, kNoFace);
+    std::vector<std::uint32_t> cycle;
+    cycle.reserve(half_edge_total);
     for (std::uint32_t start = 0; start < half_edge_total; ++start) {
       if (face_of[start] != kNoFace) continue;
       const std::uint32_t face_id =
           static_cast<std::uint32_t>(arrangement.faces_.size());
-      long double twice_area = 0.0L;
+      cycle.clear();
+      double max_magnitude = 0.0;
       std::uint32_t h = start;
       std::uint32_t guard = 0;
       do {
         face_of[h] = face_id;
         arrangement.half_edges_[h].face = face_id;
-        const Point2d& a = arrangement.vertices_[arrangement.half_edges_[h].origin];
+        const Point2d& p = arrangement.vertices_[arrangement.half_edges_[h].origin];
+        const double x = std::fabs(p[0]);
+        const double y = std::fabs(p[1]);
+        if (x > max_magnitude) max_magnitude = x;
+        if (y > max_magnitude) max_magnitude = y;
+        cycle.push_back(h);
+        h = arrangement.half_edges_[h].next;
+        ++guard;
+      } while (h != start && guard <= half_edge_total);
+
+      int area_exponent = 0;
+      if (max_magnitude > 0.0 && std::isfinite(max_magnitude)) {
+        area_exponent = std::ilogb(max_magnitude);
+      }
+      long double twice_area = 0.0L;
+      for (const std::uint32_t edge : cycle) {
+        const Point2d& a = arrangement.vertices_[arrangement.half_edges_[edge].origin];
         const Point2d& b = arrangement.vertices_[
-            arrangement.half_edges_[arrangement.half_edges_[h].twin].origin];
+            arrangement.half_edges_[arrangement.half_edges_[edge].twin].origin];
         const double ax = std::ldexp(a[0], -area_exponent);
         const double ay = std::ldexp(a[1], -area_exponent);
         const double bx = std::ldexp(b[0], -area_exponent);
         const double by = std::ldexp(b[1], -area_exponent);
         twice_area += static_cast<long double>(ax) * static_cast<long double>(by) -
                       static_cast<long double>(bx) * static_cast<long double>(ay);
-        h = arrangement.half_edges_[h].next;
-        ++guard;
-      } while (h != start && guard <= half_edge_total);
+      }
       const long double area = twice_area * 0.5L;
-      arrangement.faces_.push_back(Face{start, 0, area > 0.0L});
-      arrangement.face_areas_.push_back(static_cast<double>(area));
+      double mantissa = 0.0;
+      int mantissa_exponent = 0;
+      if (area != 0.0L) {
+        mantissa = static_cast<double>(std::frexp(area, &mantissa_exponent));
+      }
+      arrangement.face_area_mantissa_.push_back(mantissa);
+      arrangement.face_area_exponent_.push_back(
+          area != 0.0L ? mantissa_exponent + 2 * area_exponent : 0);
+      arrangement.faces_.push_back(Face{start, 0, mantissa > 0.0});
     }
 
     // 6. Propagate the per-source winding across every edge. Each connected
@@ -906,17 +1012,22 @@ class Arrangement2 {
         // lower-half-plane edge and its left side is the interior. Restricting
         // candidates to this component also keeps touching components apart.
         std::uint32_t seed = kNoFace;
-        double seed_area = 0.0;
         for (const std::uint32_t h : outgoing[min_vertex]) {
           const std::uint32_t sides[2] = {face_of[h],
                                           face_of[arrangement.half_edges_[h].twin]};
           for (const std::uint32_t candidate : sides) {
             if (find_root(candidate) != root) continue;
-            const double area = arrangement.face_areas_[candidate];
-            if (seed == kNoFace || area < seed_area ||
-                (area == seed_area && candidate < seed)) {
+            if (seed == kNoFace) {
               seed = candidate;
-              seed_area = area;
+              continue;
+            }
+            const int order = detail::area_compare(
+                arrangement.face_area_mantissa_[candidate],
+                arrangement.face_area_exponent_[candidate],
+                arrangement.face_area_mantissa_[seed],
+                arrangement.face_area_exponent_[seed]);
+            if (order < 0 || (order == 0 && candidate < seed)) {
+              seed = candidate;
             }
           }
         }
@@ -927,11 +1038,14 @@ class Arrangement2 {
 
       std::sort(component_order.begin(), component_order.end(),
                 [&](std::uint32_t lhs, std::uint32_t rhs) noexcept {
-                  const double lhs_area =
-                      std::fabs(arrangement.face_areas_[seed_face[lhs]]);
-                  const double rhs_area =
-                      std::fabs(arrangement.face_areas_[seed_face[rhs]]);
-                  if (lhs_area != rhs_area) return lhs_area > rhs_area;
+                  const std::uint32_t lhs_seed = seed_face[lhs];
+                  const std::uint32_t rhs_seed = seed_face[rhs];
+                  const int order = detail::area_compare(
+                      std::fabs(arrangement.face_area_mantissa_[lhs_seed]),
+                      arrangement.face_area_exponent_[lhs_seed],
+                      std::fabs(arrangement.face_area_mantissa_[rhs_seed]),
+                      arrangement.face_area_exponent_[rhs_seed]);
+                  if (order != 0) return order > 0;
                   return lhs < rhs;
                 });
 
@@ -941,15 +1055,23 @@ class Arrangement2 {
       for (const std::uint32_t root : component_order) {
         const std::uint32_t seed = seed_face[root];
         const Point2d representative = arrangement.vertices_[seed_vertex[root]];
-        double best_area = std::numeric_limits<double>::infinity();
+        double best_mantissa = 0.0;
+        int best_exponent = 0;
+        bool have_best = false;
         for (std::size_t s = 0; s < source_total; ++s) seed_values[s] = 0;
         for (std::uint32_t f = 0; f < face_total; ++f) {
           if (assigned[f] == 0) continue;
-          if (!(arrangement.face_areas_[f] > 0.0)) continue;
-          const double area = std::fabs(arrangement.face_areas_[f]);
-          if (area >= best_area) continue;
+          if (!(arrangement.face_area_mantissa_[f] > 0.0)) continue;
+          if (have_best &&
+              !detail::area_abs_less(arrangement.face_area_mantissa_[f],
+                                     arrangement.face_area_exponent_[f],
+                                     best_mantissa, best_exponent)) {
+            continue;
+          }
           if (!arrangement.point_in_face(f, representative)) continue;
-          best_area = area;
+          have_best = true;
+          best_mantissa = arrangement.face_area_mantissa_[f];
+          best_exponent = arrangement.face_area_exponent_[f];
           for (std::size_t s = 0; s < source_total; ++s) {
             seed_values[s] = windings[static_cast<std::size_t>(f) * source_total + s];
           }
@@ -1049,14 +1171,19 @@ class Arrangement2 {
     }
 
     std::uint32_t best = kNoFace;
-    double best_area = std::numeric_limits<double>::infinity();
+    double best_mantissa = 0.0;
+    int best_exponent = 0;
     const std::uint32_t face_total = static_cast<std::uint32_t>(faces_.size());
     for (std::uint32_t f = 0; f < face_total; ++f) {
       if (!faces_[f].bounded) continue;
-      const double area = std::fabs(face_areas_[f]);
-      if (area >= best_area) continue;
+      if (best != kNoFace &&
+          !detail::area_abs_less(face_area_mantissa_[f], face_area_exponent_[f],
+                                 best_mantissa, best_exponent)) {
+        continue;
+      }
       if (!point_in_face(f, p)) continue;
-      best_area = area;
+      best_mantissa = face_area_mantissa_[f];
+      best_exponent = face_area_exponent_[f];
       best = f;
     }
     return best;
@@ -1100,9 +1227,11 @@ class Arrangement2 {
   std::vector<Point2d> vertices_;
   std::vector<HalfEdge> half_edges_;
   std::vector<Face> faces_;
-  // Signed shoelace area after the exact power-of-two normalization in build();
-  // only its sign and its |area| ordering are meaningful.
-  std::vector<double> face_areas_;
+  // Signed face-cycle area as mantissa * 2^exponent after the exact per-cycle
+  // power-of-two normalization in build(); only the sign and the |area|
+  // ordering are meaningful.
+  std::vector<double> face_area_mantissa_;
+  std::vector<int> face_area_exponent_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>> input_pairs_;
   // Distinct input sources, sorted; `windings_` is a faces x sources table.
   std::vector<std::uint32_t> sources_;

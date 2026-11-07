@@ -113,6 +113,34 @@ TEST_CASE("split: collinear overlap and T junction") {
   CHECK(rt.max_residual == 0.0);
 }
 
+// b - a overflows to +inf for this horizontal segment (MSVC long double is
+// double), so the old parameter evaluation divided inf by inf: the endpoint
+// touch at (0, 0) became NaN, was clamped to t = 0 and deduped, and the
+// vertical segment's endpoint was left sitting on the horizontal's interior
+// with max_residual = +inf.
+TEST_CASE("split: overflowing endpoint difference splits a T junction at the origin") {
+  const ArrangementSegment segs[2] = {
+      {Point2d{-1e308, 0.0}, Point2d{1e308, 0.0}, 0},
+      {Point2d{0.0, 0.0}, Point2d{0.0, 1.0}, 1},
+  };
+  const SplitResult r = split_segments(segs);
+  REQUIRE(r.segments.size() == 3);
+  REQUIRE(r.input_pairs.size() == 1);
+  CHECK(r.input_pairs[0] == std::make_pair(0u, 1u));
+  CHECK(count_with_source(r, 0) == 2);
+  CHECK(count_with_source(r, 1) == 1);
+  CHECK(r.max_residual == 0.0L);
+
+  CHECK(r.segments[0].a[0] == -1e308);
+  CHECK(r.segments[0].a[1] == 0.0);
+  CHECK(r.segments[0].b[0] == 0.0);
+  CHECK(r.segments[0].b[1] == 0.0);
+  CHECK(r.segments[1].a[0] == 0.0);
+  CHECK(r.segments[1].a[1] == 0.0);
+  CHECK(r.segments[1].b[0] == 1e308);
+  CHECK(r.segments[1].b[1] == 0.0);
+}
+
 TEST_CASE("split: triple point and duplicate segments") {
   const ArrangementSegment triple[3] = {
       {Point2d{-1, -1}, Point2d{1, 1}, 0},
