@@ -81,11 +81,12 @@ class KdTree {
     }
     std::array<std::int32_t, 128> stack{};
     int sp = 0;
-    stack[sp++] = 0;
+    stack[static_cast<std::size_t>(sp++)] = 0;
     best_d2 = std::numeric_limits<double>::infinity();
     std::uint32_t best = 0xFFFFFFFFu;
     while (sp > 0) {
-      const Node& n = nodes_[static_cast<std::size_t>(stack[--sp])];
+      const std::size_t level = static_cast<std::size_t>(--sp);
+      const Node& n = nodes_[static_cast<std::size_t>(stack[level])];
       // Equality is not pruned: another point at exactly best_d2 may still win
       // the index tie-break.
       if (box_distance2(n.box, p) > best_d2) continue;
@@ -99,8 +100,8 @@ class KdTree {
           }
         }
       } else {
-        stack[sp++] = n.left;
-        stack[sp++] = n.right;
+        stack[static_cast<std::size_t>(sp++)] = n.left;
+        stack[static_cast<std::size_t>(sp++)] = n.right;
       }
     }
     return best;
@@ -120,9 +121,10 @@ class KdTree {
     heap.reserve(limit);
     std::array<std::int32_t, 128> stack{};
     int sp = 0;
-    stack[sp++] = 0;
+    stack[static_cast<std::size_t>(sp++)] = 0;
     while (sp > 0) {
-      const Node& n = nodes_[static_cast<std::size_t>(stack[--sp])];
+      const std::size_t level = static_cast<std::size_t>(--sp);
+      const Node& n = nodes_[static_cast<std::size_t>(stack[level])];
       if (heap.size() >= limit && box_distance2(n.box, p) > heap.front().d2) continue;
       if (n.count > 0) {
         for (std::uint32_t i = n.first; i < n.first + n.count; ++i) {
@@ -137,8 +139,8 @@ class KdTree {
           }
         }
       } else {
-        stack[sp++] = n.left;
-        stack[sp++] = n.right;
+        stack[static_cast<std::size_t>(sp++)] = n.left;
+        stack[static_cast<std::size_t>(sp++)] = n.right;
       }
     }
     std::sort(heap.begin(), heap.end(), better);
@@ -155,9 +157,10 @@ class KdTree {
     if (nodes_.empty() || box.is_empty()) return hits;
     std::array<std::int32_t, 128> stack{};
     int sp = 0;
-    stack[sp++] = 0;
+    stack[static_cast<std::size_t>(sp++)] = 0;
     while (sp > 0) {
-      const Node& n = nodes_[static_cast<std::size_t>(stack[--sp])];
+      const std::size_t level = static_cast<std::size_t>(--sp);
+      const Node& n = nodes_[static_cast<std::size_t>(stack[level])];
       if (!intersects(n.box, box)) continue;
       if (n.count > 0) {
         for (std::uint32_t i = n.first; i < n.first + n.count; ++i) {
@@ -165,8 +168,8 @@ class KdTree {
           if (box.contains(points_[index])) hits.push_back(index);
         }
       } else {
-        stack[sp++] = n.left;
-        stack[sp++] = n.right;
+        stack[static_cast<std::size_t>(sp++)] = n.left;
+        stack[static_cast<std::size_t>(sp++)] = n.right;
       }
     }
     std::sort(hits.begin(), hits.end());
