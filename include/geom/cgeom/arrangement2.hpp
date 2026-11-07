@@ -568,6 +568,10 @@ inline detail::SplitResult split_segments(std::span<const ArrangementSegment> se
 //   - Inputs must be closed chains (the segments of one source must join end to
 //     end); otherwise the winding numbers are only defined relative to the
 //     initialized outer faces.
+//   - Face areas are computed after an exact power-of-two normalization of the
+//     coordinates (e = ilogb of the largest |coordinate|), so faces are
+//     classified and ordered correctly from subnormal magnitudes up to about
+//     1e308; locate() uses the original coordinates and exact predicates.
 class Arrangement2 {
  public:
   struct HalfEdge {
@@ -770,7 +774,26 @@ class Arrangement2 {
     }
 
     // 5. Walk next() to assign one Face per closed boundary cycle and to
-    // accumulate the signed shoelace area in long double.
+    // accumulate the signed shoelace area. The area is computed on coordinates
+    // scaled by an exact power of two: long double is double on MSVC, so a raw
+    // shoelace would overflow to inf - inf = NaN around 1e200 and underflow to
+    // 0 around 1e-200. Scaling by 2^-e with e = ilogb(max |coordinate|) is
+    // exact and sign-preserving, which keeps `area > 0` and the |area| ordering
+    // used by locate() and by the nesting seed exact. Point location keeps
+    // operating on the original coordinates, so no accuracy is lost there.
+    int area_exponent = 0;
+    {
+      double max_magnitude = 0.0;
+      for (const Point2d& vertex : arrangement.vertices_) {
+        const double x = std::fabs(vertex[0]);
+        const double y = std::fabs(vertex[1]);
+        if (x > max_magnitude) max_magnitude = x;
+        if (y > max_magnitude) max_magnitude = y;
+      }
+      if (max_magnitude > 0.0 && std::isfinite(max_magnitude)) {
+        area_exponent = std::ilogb(max_magnitude);
+      }
+    }
     std::vector<std::uint32_t> face_of(half_edge_total, kNoFace);
     for (std::uint32_t start = 0; start < half_edge_total; ++start) {
       if (face_of[start] != kNoFace) continue;
@@ -785,8 +808,12 @@ class Arrangement2 {
         const Point2d& a = arrangement.vertices_[arrangement.half_edges_[h].origin];
         const Point2d& b = arrangement.vertices_[
             arrangement.half_edges_[arrangement.half_edges_[h].twin].origin];
-        twice_area += static_cast<long double>(a[0]) * static_cast<long double>(b[1]) -
-                      static_cast<long double>(b[0]) * static_cast<long double>(a[1]);
+        const double ax = std::ldexp(a[0], -area_exponent);
+        const double ay = std::ldexp(a[1], -area_exponent);
+        const double bx = std::ldexp(b[0], -area_exponent);
+        const double by = std::ldexp(b[1], -area_exponent);
+        twice_area += static_cast<long double>(ax) * static_cast<long double>(by) -
+                      static_cast<long double>(bx) * static_cast<long double>(ay);
         h = arrangement.half_edges_[h].next;
         ++guard;
       } while (h != start && guard <= half_edge_total);
@@ -1043,6 +1070,8 @@ class Arrangement2 {
   std::vector<Point2d> vertices_;
   std::vector<HalfEdge> half_edges_;
   std::vector<Face> faces_;
+  // Signed shoelace area after the exact power-of-two normalization in build();
+  // only its sign and its |area| ordering are meaningful.
   std::vector<double> face_areas_;
   std::vector<std::pair<std::uint32_t, std::uint32_t>> input_pairs_;
   // Distinct input sources, sorted; `windings_` is a faces x sources table.

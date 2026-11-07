@@ -376,6 +376,14 @@ std::vector<ArrangementSegment> ring_segments(const Polygon2d& p, std::uint32_t 
   return out;
 }
 
+std::size_t bounded_faces(const Arrangement2& arr) {
+  std::size_t count = 0;
+  for (const auto& face : arr.faces()) {
+    if (face.bounded) ++count;
+  }
+  return count;
+}
+
 }  // namespace
 
 TEST_CASE("arrangement: single square") {
@@ -425,4 +433,90 @@ TEST_CASE("arrangement: vertical chain and point locate on boundary") {
   const Arrangement2 arr = Arrangement2::build(ring_segments(p, 0));
   CHECK(arr.winding(arr.locate(Point2d{0, 0}), 0) == 1);
   CHECK(arr.locate(Point2d{1, 0}) == 0xFFFFFFFFu);  // boundary has no unique face
+  // Bottom-edge midpoint: the even-odd ray test alone reports this point as
+  // inside, so only the explicit on-edge rejection returns the sentinel.
+  CHECK(arr.locate(Point2d{0, -1}) == 0xFFFFFFFFu);
+}
+
+TEST_CASE("arrangement: three nested squares accumulate per-source winding") {
+  std::vector<ArrangementSegment> segs = ring_segments(square(0, 0, 10, 10), 0);
+  for (auto s : ring_segments(square(2, 2, 8, 8), 1)) segs.push_back(s);
+  for (auto s : ring_segments(square(3, 3, 7, 7), 2)) segs.push_back(s);
+  const Arrangement2 arr = Arrangement2::build(segs);
+  CHECK(arr.source_count() == 3);
+  CHECK(bounded_faces(arr) == 3);
+  const std::uint32_t core = arr.locate(Point2d{5, 5});
+  CHECK(core != Arrangement2::kNoFace);
+  CHECK(arr.faces()[core].bounded);
+  CHECK(arr.winding(core, 0) == 1);
+  CHECK(arr.winding(core, 1) == 1);
+  CHECK(arr.winding(core, 2) == 1);
+  CHECK(arr.faces()[core].winding == 3);
+  const std::uint32_t ring0 = arr.locate(Point2d{1, 1});
+  CHECK(arr.winding(ring0, 0) == 1);
+  CHECK(arr.winding(ring0, 1) == 0);
+  CHECK(arr.faces()[ring0].winding == 1);
+  const std::uint32_t ring1 = arr.locate(Point2d{9, 9});  // inside 0..10 only
+  CHECK(arr.winding(ring1, 0) == 1);
+  CHECK(arr.winding(ring1, 1) == 0);
+  CHECK(arr.faces()[ring1].winding == 1);
+  CHECK(arr.locate(Point2d{11, 11}) == Arrangement2::kNoFace);
+}
+
+TEST_CASE("arrangement: extreme coordinate nested squares") {
+  const double scales[2] = {1e150, 1e200};
+  for (const double s : scales) {
+    std::vector<ArrangementSegment> segs = ring_segments(square(s, s, 4 * s, 4 * s), 0);
+    for (auto seg : ring_segments(square(2 * s, 2 * s, 3 * s, 3 * s), 1)) {
+      segs.push_back(seg);
+    }
+    const Arrangement2 arr = Arrangement2::build(segs);
+    CHECK(arr.vertex_count() == 8);
+    CHECK(arr.edge_count() == 8);
+    CHECK(bounded_faces(arr) == 2);
+    const std::uint32_t inner = arr.locate(Point2d{2.5 * s, 2.5 * s});
+    CHECK(inner != Arrangement2::kNoFace);
+    CHECK(arr.faces()[inner].bounded);
+    CHECK(arr.winding(inner, 0) == 1);
+    CHECK(arr.winding(inner, 1) == 1);
+    CHECK(arr.faces()[inner].winding == 2);
+    const std::uint32_t ring = arr.locate(Point2d{1.5 * s, 1.5 * s});
+    CHECK(ring != Arrangement2::kNoFace);
+    CHECK(arr.winding(ring, 0) == 1);
+    CHECK(arr.winding(ring, 1) == 0);
+    CHECK(arr.locate(Point2d{5 * s, 5 * s}) == Arrangement2::kNoFace);
+
+    std::vector<ArrangementSegment> negative =
+        ring_segments(square(-4 * s, -4 * s, -s, -s), 0);
+    for (auto seg : ring_segments(square(-3 * s, -3 * s, -2 * s, -2 * s), 1)) {
+      negative.push_back(seg);
+    }
+    const Arrangement2 neg = Arrangement2::build(negative);
+    CHECK(bounded_faces(neg) == 2);
+    const std::uint32_t neg_inner = neg.locate(Point2d{-2.5 * s, -2.5 * s});
+    CHECK(neg_inner != Arrangement2::kNoFace);
+    CHECK(neg.winding(neg_inner, 0) == 1);
+    CHECK(neg.winding(neg_inner, 1) == 1);
+    CHECK(neg.faces()[neg_inner].winding == 2);
+  }
+}
+
+TEST_CASE("arrangement: hole in one ring winds down") {
+  Polygon2d hole;
+  hole.vertices = {{4, 4}, {4, 6}, {6, 6}, {6, 4}};  // clockwise
+  hole.ring_starts = {0, 4};
+  std::vector<ArrangementSegment> segs = ring_segments(square(0, 0, 10, 10), 0);
+  for (auto s : ring_segments(hole, 0)) segs.push_back(s);
+  const Arrangement2 arr = Arrangement2::build(segs);
+  CHECK(arr.face_count() == 4);
+  CHECK(bounded_faces(arr) == 2);
+  const std::uint32_t interior = arr.locate(Point2d{5, 5});
+  CHECK(interior != Arrangement2::kNoFace);
+  CHECK(arr.faces()[interior].bounded);
+  CHECK(arr.faces()[interior].winding == 0);
+  CHECK(arr.winding(interior, 0) == 0);
+  const std::uint32_t body = arr.locate(Point2d{1, 1});
+  CHECK(body != Arrangement2::kNoFace);
+  CHECK(arr.faces()[body].winding == 1);
+  CHECK(arr.winding(body, 0) == 1);
 }
