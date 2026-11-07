@@ -3,6 +3,7 @@
 #include <geom/cgeom/polygon2.hpp>
 
 #include <limits>
+#include <vector>
 
 using geom::v1::Errc;
 using geom::v1::Polygon2d;
@@ -28,9 +29,9 @@ TEST_CASE("polygon2: ring iteration, orientation and area") {
   CHECK(poly.ring(1).size() == 4);
   CHECK(geom::v1::ring_orientation2(poly.ring(0)) == 1);
   CHECK(geom::v1::ring_orientation2(poly.ring(1)) == -1);
-  CHECK(geom::v1::signed_area2(poly.ring(0)) == doctest::Approx(16.0));
-  CHECK(geom::v1::signed_area2(poly.ring(1)) == doctest::Approx(-4.0));
-  CHECK(geom::v1::polygon_area2(poly) == doctest::Approx(12.0));
+  CHECK(geom::v1::signed_area2(poly.ring(0)) == doctest::Approx(16.0).epsilon(1e-12));
+  CHECK(geom::v1::signed_area2(poly.ring(1)) == doctest::Approx(-4.0).epsilon(1e-12));
+  CHECK(geom::v1::polygon_area2(poly) == doctest::Approx(12.0).epsilon(1e-12));
 }
 
 TEST_CASE("polygon2: area is independent of winding") {
@@ -38,7 +39,7 @@ TEST_CASE("polygon2: area is independent of winding") {
   p.vertices = {{0, 0}, {0, 1}, {1, 1}, {1, 0}};  // CW outer
   p.ring_starts = {0, 4};
   CHECK(geom::v1::ring_orientation2(p.ring(0)) == -1);
-  CHECK(geom::v1::polygon_area2(p) == doctest::Approx(1.0));
+  CHECK(geom::v1::polygon_area2(p) == doctest::Approx(1.0).epsilon(1e-12));
   CHECK(geom::v1::ring_orientation2(std::vector<Point2d>{{0, 0}, {1, 1}}) == 0);
 }
 
@@ -47,6 +48,20 @@ TEST_CASE("polygon2: duplicate consecutive points do not change orientation") {
   p.vertices = {{0, 0}, {0, 0}, {1, 0}, {1, 1}, {0, 1}};
   p.ring_starts = {0, 5};
   CHECK(geom::v1::ring_orientation2(p.ring(0)) == 1);
+}
+
+TEST_CASE("polygon2: orientation uses the lexicographically smallest vertex") {
+  // The minimum (0, 0) sits at index 3, so the min search, the equal-x tie-break
+  // and the wrapped previous/next walk are all exercised.
+  Polygon2d p;
+  p.vertices = {{4, 0}, {4, 4}, {0, 4}, {0, 0}};  // CCW, lex-min last
+  p.ring_starts = {0, 4};
+  CHECK(geom::v1::ring_orientation2(p.ring(0)) == 1);
+
+  // A concave ring that starts at its reflex vertex: an implementation anchored on
+  // ring[0] would report -1, while the lexicographic minimum (0, 0) is convex.
+  const std::vector<Point2d> concave{{1, 1}, {1, 2}, {0, 2}, {0, 0}, {2, 0}, {2, 1}};
+  CHECK(geom::v1::ring_orientation2(concave) == 1);
 }
 
 TEST_CASE("polygon2: structural validation") {
@@ -76,5 +91,18 @@ TEST_CASE("polygon2: set area sums polygons") {
   geom::v1::PolygonSet set;
   set.polygons.push_back(square_with_hole());
   set.polygons.push_back(square_with_hole());
-  CHECK(geom::v1::polygon_set_area2(set) == doctest::Approx(24.0));
+  CHECK(geom::v1::polygon_set_area2(set) == doctest::Approx(24.0).epsilon(1e-12));
+}
+
+TEST_CASE("polygon2: all-duplicate ring and empty containers") {
+  // Every vertex equals the extreme vertex: no two distinct directions exist.
+  CHECK(geom::v1::ring_orientation2(std::vector<Point2d>{{0, 0}, {0, 0}, {0, 0}}) == 0);
+
+  const Polygon2d empty;
+  CHECK(empty.ring_count() == 0);
+  CHECK(geom::v1::validate_polygon2(empty) == Errc::degenerate);
+  CHECK(geom::v1::polygon_area2(empty) == 0.0);
+
+  const geom::v1::PolygonSet no_polys;
+  CHECK(geom::v1::polygon_set_area2(no_polys) == 0.0);
 }
