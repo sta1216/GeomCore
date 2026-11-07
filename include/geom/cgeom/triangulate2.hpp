@@ -407,8 +407,10 @@ inline long double triangle_area2(const Point2d& a, const Point2d& b,
 // consecutive duplicate points and exactly-collinear points -> bridge every hole
 // to the outer ring through a deterministic visible vertex -> ear clipping.
 // Convexity and point-in-triangle decisions use the exact sign_orient2d, so no
-// global epsilon is involved. Complexity is O(n^2) in the number of vertices
-// (each ear scan is O(n) and each hole bridge is O(n^2) worst case).
+// global epsilon is involved. Complexity is O(n^2) in the common case (each
+// ear scan is O(n), each hole bridge is O(n^2) worst case) and O(n^3) for
+// pathological rings where every candidate ear needs the O(n) diagonal check;
+// M1b has no triangulation performance gate.
 //
 // Preconditions (documented, not repaired):
 //   - validate_polygon2(poly) == Errc::none;

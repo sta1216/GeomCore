@@ -99,7 +99,7 @@ docs/adr/0020-m1b-arrangement-and-triangulation.md
   - `double polygon_area2(const Polygon2d&) noexcept;`
   - `double polygon_set_area2(const PolygonSet&) noexcept;`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/unit/polygon2_test.cpp`：
 
@@ -186,7 +186,7 @@ TEST_CASE("polygon2: set area sums polygons") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```powershell
 cmake -S . -B build -DGEOM_WERROR=ON
@@ -195,7 +195,7 @@ cmake --build build --config Debug
 
 Expected: 编译失败，`geom/cgeom/polygon2.hpp: No such file or directory`。
 
-- [ ] **Step 3: 实现 `polygon2.hpp`**
+- [x] **Step 3: 实现 `polygon2.hpp`**
 
 实现要点（签名见 Interfaces，全部 `inline`/`noexcept`）：
 
@@ -206,7 +206,7 @@ Expected: 编译失败，`geom/cgeom/polygon2.hpp: No such file or directory`。
 - `polygon_area2`：`|outer| - Σ|hole|`（用 `signed_area2` 的绝对值），保证与环绕方向无关。
 - `polygon_set_area2`：累加。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 ```powershell
 cmake --build build --config Debug
@@ -215,7 +215,7 @@ ctest --test-dir build -C Debug --output-on-failure
 
 Expected: `geom_tests` 通过；`polygon2` 用例 5 个全绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add include/geom/cgeom/polygon2.hpp tests/unit/polygon2_test.cpp tests/CMakeLists.txt
@@ -252,7 +252,7 @@ class KdTree {
 };
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/unit/kdtree_test.cpp`：
 
@@ -359,7 +359,7 @@ TEST_CASE("kdtree: nearest, k-nearest and range match brute force") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```powershell
 cmake --build build --config Debug
@@ -367,7 +367,7 @@ cmake --build build --config Debug
 
 Expected: 找不到 `geom/index/kdtree.hpp`。
 
-- [ ] **Step 3: 实现 `kdtree.hpp`**
+- [x] **Step 3: 实现 `kdtree.hpp`**
 
 - 存储：`points_`（构建时拷贝）、`order_`（索引排列）、`nodes_`；`Node { Box3d box; std::int32_t left, right; std::uint32_t first, count; }`，叶子 `count>0`，内部 `count==0`。
 - `build`：空输入清空并返回；否则递归构建：节点盒 = 点盒并集；叶子阈值 8；按盒最长轴（相等取 x→y→z）取中位点分割，`nth_element` 比较键 `(coord[axis], index)` 保证确定性；深度上限 64，到达上限强制叶子。
@@ -375,7 +375,7 @@ Expected: 找不到 `geom/index/kdtree.hpp`。
 - `range`：遍历与盒相交的节点，收集后 `std::sort` 升序。
 - 文档注明：坐标有限；空树语义；`range` 线性于输出大小 + 访问节点数。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 ```powershell
 cmake --build build --config Debug
@@ -384,7 +384,7 @@ ctest --test-dir build -C Debug --output-on-failure
 
 Expected: 3 个 `kdtree` 用例全绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add include/geom/index/kdtree.hpp tests/unit/kdtree_test.cpp tests/CMakeLists.txt
@@ -414,7 +414,7 @@ Triangulation2 triangulate_polygon2(const Polygon2d& poly);
 
 前置条件（文档化）：`validate_polygon2(poly) == Errc::none`；各环简单、互不相交；洞严格位于外环内部且互不嵌套；环可任意方向；允许重复的相邻点（内部去重）。违反前置条件或校验失败时返回 `{ {}, false }`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/unit/triangulate2_test.cpp`：
 
@@ -515,7 +515,7 @@ TEST_CASE("triangulate2: rejects malformed input") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```powershell
 cmake --build build --config Debug
@@ -523,7 +523,7 @@ cmake --build build --config Debug
 
 Expected: 找不到 `triangulate2.hpp`。
 
-- [ ] **Step 3: 实现 `triangulate2.hpp`**
+- [x] **Step 3: 实现 `triangulate2.hpp`**
 
 实现要点：
 
@@ -534,7 +534,7 @@ Expected: 找不到 `triangulate2.hpp`。
 5. `ok=true` 当且仅当输出的每个三角形非退化且总面积与 `polygon_area2` 的相对误差 ≤ 1e-9（内部自检）。
 6. 复杂度 O(n²)，文档注明；`triangles` 不排序（按裁耳顺序），调用方自行规范化。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 ```powershell
 cmake --build build --config Debug
@@ -543,7 +543,7 @@ ctest --test-dir build -C Debug --output-on-failure
 
 Expected: 5 个 `triangulate2` 用例全绿。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add include/geom/cgeom/triangulate2.hpp tests/unit/triangulate2_test.cpp tests/CMakeLists.txt
@@ -583,7 +583,7 @@ SplitResult split_segments(std::span<const ArrangementSegment> segments);
 
 `split_segments` 契约：输入段有限、非零长；输出按原段方向保序拆分；`input_pairs` 含共享端点/共线重叠/真相交的全部原段对；`max_residual` 是交点相对两条支撑线的最大垂距（坐标单位）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/unit/arrangement2_test.cpp`（本任务只包含这些用例；后续任务追加）：
 
@@ -680,7 +680,7 @@ TEST_CASE("split: disjoint and vertical segments") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```powershell
 cmake --build build --config Debug
@@ -688,7 +688,7 @@ cmake --build build --config Debug
 
 Expected: 找不到 `arrangement2.hpp`。
 
-- [ ] **Step 3: 实现拆分**
+- [x] **Step 3: 实现拆分**
 
 - 过滤零长段（`a == b`）。宽相位：按 `min(x)` 排序，活动集 + `max(x)` 与 y 区间剪枝，枚举候选对。
 - 精确判定：用 `sign_orient2d` 的四个符号区分相离、端点接触、真相交、共线重叠。真相交由 `long double` 计算参数 `t,u`，夹到 `[0,1]`，点 = `a + t*(b-a)` 取 double；接触点直接用已有端点坐标（保证精确相等）。
@@ -697,7 +697,7 @@ Expected: 找不到 `arrangement2.hpp`。
 - `max_residual`：每个新交点 `p` 到两条支撑线的垂距取大者，累计最大；用 `long double` 计算 `|cross(dir, p-a)| / |dir|`。
 - `input_pairs`：每对相交（含端点接触/共线重叠）记录一次，排序去重。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 ```powershell
 cmake --build build --config Debug
@@ -706,7 +706,7 @@ ctest --test-dir build -C Debug --output-on-failure
 
 Expected: 4 个 `split:` 用例全绿（段数/对数逐项精确）。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add include/geom/cgeom/arrangement2.hpp tests/unit/arrangement2_test.cpp tests/CMakeLists.txt
@@ -757,7 +757,7 @@ class Arrangement2 {
 };
 ```
 
-- [ ] **Step 1: 写失败测试（追加到 `arrangement2_test.cpp`）**
+- [x] **Step 1: 写失败测试（追加到 `arrangement2_test.cpp`）**
 
 ```cpp
 #include <geom/cgeom/polygon2.hpp>  // for the Polygon2d test fixtures
@@ -830,7 +830,7 @@ TEST_CASE("arrangement: vertical chain and point locate on boundary") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```powershell
 cmake --build build --config Debug
@@ -838,7 +838,7 @@ cmake --build build --config Debug
 
 Expected: `Arrangement2` 未定义。
 
-- [ ] **Step 3: 实现 DCEL 与 winding**
+- [x] **Step 3: 实现 DCEL 与 winding**
 
 1. 调 `detail::split_segments`；把每个子段端点按坐标精确去重成顶点 id（排序 + 相等合并）。
 2. 聚合无向边 `(min(u,v), max(u,v))`，保存 `delta_low_to_high[source]`：方向 `u→v` 时 low→high 记 +1，否则 -1。
@@ -851,7 +851,7 @@ Expected: `Arrangement2` 未定义。
 
 文档注明：输入应是闭合链（每个 source 的段首尾相接），否则 winding 只相对于初始化的无界面；面环模型把多连通面的每个边界环记为独立 face 记录（winding 相同），布尔只使用 bounded 面。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 ```powershell
 cmake --build build --config Debug
@@ -860,7 +860,7 @@ ctest --test-dir build -C Debug --output-on-failure
 
 Expected: 8 个 `arrangement`/`split` 用例全绿；顶点/边/面计数与 winding 精确相等。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add include/geom/cgeom/arrangement2.hpp tests/unit/arrangement2_test.cpp
@@ -908,7 +908,7 @@ Result<BooleanResult> boolean2(std::span<const Polygon2d> operands, BooleanOp op
 
 语义：`union_`/`intersection`/`symmetric_difference` 对全部操作数；`difference` 为 `operands[0] - union(其余)`。fill rule 逐操作数作用于其 winding。错误：`non_finite`、`degenerate`（空操作数/<3 点）、`unsupported`（指数跨度 > 1314）、`self_intersecting`（`allow_self_intersections=false` 且同一环的非相邻边相交）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/unit/boolean2_test.cpp`：
 
@@ -1049,7 +1049,7 @@ TEST_CASE("boolean2: rejects unsupported input") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```powershell
 cmake --build build --config Debug
@@ -1057,7 +1057,7 @@ cmake --build build --config Debug
 
 Expected: 找不到 `boolean2.hpp`；`Errc::self_intersecting` 不存在。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 1. `error.hpp` 在 `Errc` 末尾加 `self_intersecting`，`to_string` 加 `"self_intersecting"`；`coverage_gaps_test.cpp` 补一条 `to_string` 断言。
 2. 校验与跨度：空操作数 → `degenerate`；每个 `validate_polygon2`；跨度复用 `delaunay2` 的 `kMaxSpan=1314` 逻辑（`frexp` 扫描）→ 超限 `unsupported`。
@@ -1069,7 +1069,7 @@ Expected: 找不到 `boolean2.hpp`；`Errc::self_intersecting` 不存在。
 8. 输出 `Polygon2d`（`vertices` 为各环拼接，`ring_starts` 累加）；`report.input_edges` = 原始段数，`output_polygons`，`merged_vertices`，`max_residual = arrangement.max_residual()`。
 9. 空结果合法（例如不相交的交集）。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 ```powershell
 cmake --build build --config Debug
@@ -1078,7 +1078,7 @@ ctest --test-dir build -C Debug --output-on-failure
 
 Expected: 6 个 `boolean2` 用例全绿；面积误差在 `doctest::Approx` 默认容差内。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add include/geom/cgeom/boolean2.hpp include/geom/core/error.hpp tests/unit/boolean2_test.cpp tests/unit/coverage_gaps_test.cpp tests/CMakeLists.txt
@@ -1114,7 +1114,7 @@ Result<CdtResult> cdt2(std::span<const Point2d> points,
 
 契约：非约束点需一般位置（同 `delaunay2`）；约束边可位于凸包内或边界上，端点必须是输入点；约束之间只允许在共享端点相接；重复/反向约束去重。错误：`non_finite`、`index_out_of_range`、`degenerate`（点数不足/全共线/`a==b`）、`self_intersecting`（约束相交或与非相邻约束共线重叠）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `tests/unit/cdt2_test.cpp`：
 
@@ -1237,7 +1237,7 @@ TEST_CASE("cdt2: non-constrained edges stay Delaunay") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 ```powershell
 cmake --build build --config Debug
@@ -1245,7 +1245,7 @@ cmake --build build --config Debug
 
 Expected: 找不到 `cdt2.hpp`。
 
-- [ ] **Step 3: 实现 `cdt2.hpp`**
+- [x] **Step 3: 实现 `cdt2.hpp`**
 
 1. 校验：坐标有限、约束索引 < n、`a != b`、跨度 ≤1314；每对约束用精确谓词检查是否只在共享端点相接，否则 `self_intersecting`；去重（无向边）。
 2. 基三角化：`delaunay2(points)`；空且 n≥3 → `degenerate`。
@@ -1254,7 +1254,7 @@ Expected: 找不到 `cdt2.hpp`。
 5. Delaunay 恢复：对非约束内部边做 Lawson 翻转，`sign_incircle > 0` 时翻，直到无翻转或达到迭代上限（`4 * triangles.size()`，超出返回 `numeric_failure`）。
 6. 输出：每个三角形用 `sign_orient2d` 保证 CCW，按 `(a,b,c)` 排序；`ok` 由 `Result` 表达。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 ```powershell
 cmake --build build --config Debug
@@ -1263,7 +1263,7 @@ ctest --test-dir build -C Debug --output-on-failure
 
 Expected: 4 个 `cdt2` 用例全绿；两条对角线的约束各自被恢复。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```powershell
 git add include/geom/cgeom/cdt2.hpp tests/unit/cdt2_test.cpp tests/CMakeLists.txt

@@ -425,8 +425,10 @@ inline bool split_record_pair(const SplitInput& sa, std::vector<SplitParam>& pa,
 //   - zero-length inputs (a == b) are dropped;
 //   - the output keeps the input order and each piece keeps its input's
 //     direction and `source`;
-//   - endpoint touches, collinear overlaps and proper crossings all split both
+//   - endpoint touches, collinear overlaps and proper crossings split both
 //     segments and are recorded once in `input_pairs` as (i, j), i < j, sorted;
+//     a crossing whose parameter ratio is not representable leaves both
+//     segments unsplit (it is still recorded) and sets `max_residual` to +inf;
 //   - `max_residual` is the largest perpendicular distance of a computed
 //     intersection point to the two supporting lines; it is +infinity when a
 //     crossing is not representable (see the supported domain below).
