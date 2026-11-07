@@ -192,6 +192,12 @@ struct BooleanComponent {
 //     non-adjacent edges of the same input ring meet. Overlaps between distinct
 //     rings or distinct operands are not self-intersections.
 //
+// Scale limit inherited from the arrangement: face winding is seeded from face
+// areas scaled by one global power of two, so a feature more than about 1e154
+// times smaller than the largest coordinate can still be misclassified even
+// though the exponent span is accepted; keep every feature within ~1e154 of the
+// largest coordinate.
+//
 // The result may be empty; an empty PolygonSet is a legal answer.
 inline Result<BooleanResult> boolean2(std::span<const Polygon2d> operands, BooleanOp op,
                                      const BooleanOptions& options = {}) {

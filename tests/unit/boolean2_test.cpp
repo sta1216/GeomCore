@@ -372,6 +372,41 @@ TEST_CASE("boolean2: hole attaches to the smallest containing outer") {
   CHECK(island->ring(1).size() == 4);
 }
 
+// Regression: the per-loop area exponent must include the 2*loop_exp term.
+// All coordinates are <= 10, but the loops sit at different magnitudes. If the
+// term is dropped, the small hole's area exponent is understated and it looks
+// larger than the small island, so it attaches to the big outer ring instead.
+TEST_CASE("boolean2: per-loop area exponent preserves nested hole ownership") {
+  Polygon2d poly;
+  append_ring(poly, {{0.0, 0.0}, {10.0, 0.0}, {10.0, 10.0}, {0.0, 10.0}});  // outer, CCW
+  append_ring(poly, {{0.5, 0.5}, {0.5, 8.0}, {8.0, 8.0}, {8.0, 0.5}});      // hole, CW
+  append_ring(poly, {{1.0, 1.0}, {7.0, 1.0}, {7.0, 7.0}, {1.0, 7.0}});      // island, CCW
+  append_ring(poly, {{2.0, 2.0}, {2.0, 3.0}, {3.0, 3.0}, {3.0, 2.0}});      // hole, CW
+  REQUIRE(poly.ring_count() == 4);
+  const Polygon2d ops[1] = {poly};
+  BooleanOptions even;
+  even.fill_rule = FillRule::even_odd;
+  auto r = boolean2(ops, BooleanOp::union_, even);
+  REQUIRE(r.has_value());
+  REQUIRE(r.value().polygons.polygons.size() == 2);
+
+  const Polygon2d* outer = nullptr;
+  const Polygon2d* island = nullptr;
+  for (const Polygon2d& p : r.value().polygons.polygons) {
+    if (polygon_area2(p) > 40.0) {
+      outer = &p;
+    } else {
+      island = &p;
+    }
+  }
+  REQUIRE(outer != nullptr);
+  REQUIRE(island != nullptr);
+  REQUIRE(outer->ring_count() == 2);
+  REQUIRE(island->ring_count() == 2);
+  CHECK(polygon_area2(*outer) == doctest::Approx(43.75).epsilon(1e-12));
+  CHECK(polygon_area2(*island) == doctest::Approx(35.0).epsilon(1e-12));
+}
+
 // A plain square has no self-intersection; strict mode must accept it.
 TEST_CASE("boolean2: strict mode accepts a simple square") {
   const Polygon2d a = rect(0.0, 0.0, 1.0, 1.0);
