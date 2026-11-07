@@ -14,6 +14,7 @@ enum class Errc : std::uint8_t {
   io_error,
   unsupported,
   cancelled,
+  self_intersecting,
 };
 
 struct Error {
@@ -33,6 +34,7 @@ constexpr const char* to_string(Errc code) noexcept {
     case Errc::io_error: return "io_error";
     case Errc::unsupported: return "unsupported";
     case Errc::cancelled: return "cancelled";
+    case Errc::self_intersecting: return "self_intersecting";
   }
   return "unknown";
 }

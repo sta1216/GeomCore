@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <string_view>
 #include <vector>
 
 #include <geom/cgeom/delaunay2.hpp>
@@ -84,4 +85,9 @@ TEST_CASE("expansion handles scalar scaling and null handles") {
   HandleAllocator alloc;
   alloc.release(Handle::null());
   CHECK_FALSE(alloc.alive(Handle::null()));
+}
+
+TEST_CASE("self_intersecting error code has a name") {
+  CHECK(std::string_view(geom::v1::to_string(Errc::self_intersecting)) ==
+        "self_intersecting");
 }
