@@ -616,6 +616,13 @@ TEST_CASE("arrangement: zero-area spur does not outrank a small square") {
   CHECK(arr.winding(face, 0) == 1);
   CHECK(arr.winding(face, 1) == 0);
   CHECK(arr.faces()[face].winding == 1);
+  // The degenerate spur orbit sits inside the square and must inherit its
+  // source-0 winding; at the pre-fix ordering its seed resolved to 0 instead.
+  int inside_faces = 0;
+  for (std::uint32_t f = 0; f < arr.faces().size(); ++f) {
+    if (arr.winding(f, 0) == 1) ++inside_faces;
+  }
+  CHECK(inside_faces == 2);
 }
 
 // One global vertex exponent collapses the unit square's area to zero next to
