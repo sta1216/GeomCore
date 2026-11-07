@@ -536,6 +536,7 @@ TEST_CASE("boolean2: overflowing endpoint difference keeps the T junction topolo
   const Polygon2d& unit = inter.value().polygons.polygons[0];
   CHECK(unit.ring_count() == 1);
   CHECK(unit.vertices.size() == 4);
+  CHECK(inter.value().report.max_residual == 0.0);
   CHECK(polygon_area2(unit) == doctest::Approx(1.0));
 
   const auto uni = boolean2(ops, BooleanOp::union_);

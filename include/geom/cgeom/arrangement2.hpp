@@ -611,14 +611,23 @@ inline detail::SplitResult split_segments(std::span<const ArrangementSegment> se
   return result;
 }
 
-// |ma| * 2^ea < |mb| * 2^eb for finite normalized mantissas.
+// |ma| * 2^ea < |mb| * 2^eb. A zero-area face (mantissa 0) has no
+// scale and sorts below every nonzero face.
 inline bool area_abs_less(double ma, int ea, double mb, int eb) noexcept {
+  const bool zero_a = (ma == 0.0);
+  const bool zero_b = (mb == 0.0);
+  if (zero_a || zero_b) return zero_a && !zero_b;
   if (ea != eb) return ea < eb;
   return std::fabs(ma) < std::fabs(mb);
 }
 
 // Signed comparison of ma*2^ea and mb*2^eb: -1, 0 or 1.
 inline int area_compare(double ma, int ea, double mb, int eb) noexcept {
+  if (ma == 0.0 || mb == 0.0) {
+    if (ma == 0.0 && mb == 0.0) return 0;
+    if (ma == 0.0) return (mb < 0.0) ? 1 : -1;
+    return (ma < 0.0) ? -1 : 1;
+  }
   const bool negative_a = ma < 0.0;
   const bool negative_b = mb < 0.0;
   if (negative_a != negative_b) return negative_a ? -1 : 1;

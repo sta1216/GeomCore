@@ -130,6 +130,9 @@ TEST_CASE("split: overflowing endpoint difference splits a T junction at the ori
   CHECK(count_with_source(r, 0) == 2);
   CHECK(count_with_source(r, 1) == 1);
   CHECK(r.max_residual == 0.0L);
+  CHECK(static_cast<double>(geom::v1::detail::split_perp_distance(
+            Point2d{0.0, 1.0}, Point2d{-1e308, 0.0}, Point2d{1e308, 0.0})) ==
+        doctest::Approx(1.0));
 
   CHECK(r.segments[0].a[0] == -1e308);
   CHECK(r.segments[0].a[1] == 0.0);
@@ -597,4 +600,54 @@ TEST_CASE("arrangement: pentagon with a lower-half edge at its leftmost vertex")
   CHECK(arr.winding(inside, 0) == 1);
   CHECK(arr.faces()[inside].winding == 1);
   CHECK(arr.locate(Point2d{1.6, 5.0}) == Arrangement2::kNoFace);
+}
+
+// A spur traversed in both directions is a zero-area component. Zero area must
+// compare smaller than every nonzero face; otherwise the spur is processed
+// before the small square and its seed winding leaks into the square's face.
+TEST_CASE("arrangement: zero-area spur does not outrank a small square") {
+  std::vector<ArrangementSegment> segs = ring_segments(square(0.0, 0.0, 0.5, 0.5), 0);
+  segs.push_back(ArrangementSegment{Point2d{0.1, 0.1}, Point2d{0.2, 0.1}, 1});
+  segs.push_back(ArrangementSegment{Point2d{0.2, 0.1}, Point2d{0.1, 0.1}, 1});
+  const Arrangement2 arr = Arrangement2::build(segs);
+  const std::uint32_t face = arr.locate(Point2d{0.25, 0.25});
+  REQUIRE(face != Arrangement2::kNoFace);
+  CHECK(arr.faces()[face].bounded);
+  CHECK(arr.winding(face, 0) == 1);
+  CHECK(arr.winding(face, 1) == 0);
+  CHECK(arr.faces()[face].winding == 1);
+}
+
+// One global vertex exponent collapses the unit square's area to zero next to
+// the 1e200 square, so the small component loses its bounded face and locate()
+// returns the sentinel. Per-cycle normalization keeps both components usable.
+TEST_CASE("arrangement: disjoint components keep independent area scales") {
+  std::vector<ArrangementSegment> segs = ring_segments(square(0.0, 0.0, 1.0, 1.0), 0);
+  for (const auto& s : ring_segments(square(0.5e200, 0.5e200, 1e200, 1e200), 1)) {
+    segs.push_back(s);
+  }
+  const Arrangement2 arr = Arrangement2::build(segs);
+  const std::uint32_t unit = arr.locate(Point2d{0.5, 0.5});
+  REQUIRE(unit != Arrangement2::kNoFace);
+  CHECK(arr.faces()[unit].bounded);
+  CHECK(arr.winding(unit, 0) == 1);
+  const std::uint32_t huge = arr.locate(Point2d{0.75e200, 0.75e200});
+  REQUIRE(huge != Arrangement2::kNoFace);
+  CHECK(arr.faces()[huge].bounded);
+  CHECK(arr.winding(huge, 1) == 1);
+  CHECK(arr.locate(Point2d{-1.0, -1.0}) == Arrangement2::kNoFace);
+  CHECK(arr.locate(Point2d{2e200, 2e200}) == Arrangement2::kNoFace);
+}
+// Zero-area faces are degenerate records (mantissa 0). Their magnitude must be
+// below every nonzero face, even when the nonzero face's area is < 1 and its
+// exponent is negative. The old helpers compared 0 * 2^0 against 0.5 * 2^-1 as
+// if 1 < 0.5, which put a zero-area component ahead of a small square.
+TEST_CASE("arrangement: zero-area faces sort below every nonzero face") {
+  CHECK(geom::v1::detail::area_abs_less(0.0, 0, 0.5, -1));
+  CHECK_FALSE(geom::v1::detail::area_abs_less(0.5, -1, 0.0, 0));
+  CHECK_FALSE(geom::v1::detail::area_abs_less(0.0, 0, 0.0, 0));
+  CHECK(geom::v1::detail::area_compare(0.0, 0, 0.5, -1) < 0);
+  CHECK(geom::v1::detail::area_compare(0.5, -1, 0.0, 0) > 0);
+  CHECK(geom::v1::detail::area_compare(0.0, 0, 0.0, 0) == 0);
+  CHECK(geom::v1::detail::area_compare(0.0, 0, -0.5, -1) > 0);
 }
