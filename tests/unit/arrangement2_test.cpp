@@ -294,6 +294,49 @@ TEST_CASE("split: uniform 1e200 and 1e-200 scaling") {
   }
 }
 
+TEST_CASE("split: underflowing exact ratio is reported as unrepresentable") {
+  // The exact crossing parameter is 1e-360, which rounds to zero. The contact
+  // (1e-160, 0) lies on both lines, but adding it at t = 0 makes the t-only
+  // dedupe drop it, leaving cd's vertex on ab's interior without a split there.
+  const ArrangementSegment segs[2] = {
+      {Point2d{0, 0}, Point2d{1e200, 0}, 0},
+      {Point2d{1e-160, -1e-160}, Point2d{1e-160, 1e-160}, 1},
+  };
+  const SplitResult r = split_segments(segs);
+  REQUIRE(r.segments.size() == 2);
+  REQUIRE(r.input_pairs.size() == 1);
+  CHECK(r.input_pairs[0] == std::make_pair(0u, 1u));
+  CHECK(std::isinf(r.max_residual));
+  for (const auto& piece : r.segments) {
+    const ArrangementSegment& in = piece.source == 0 ? segs[0] : segs[1];
+    CHECK(piece.a[0] == in.a[0]);
+    CHECK(piece.a[1] == in.a[1]);
+    CHECK(piece.b[0] == in.b[0]);
+    CHECK(piece.b[1] == in.b[1]);
+  }
+}
+
+TEST_CASE("split: beyond-span crossing is deterministic and unsplit") {
+  // Both the unscaled and scaled determinants underflow here; the pair must
+  // still be recorded, but neither input may be split or bent.
+  const ArrangementSegment segs[2] = {
+      {Point2d{0, 0}, Point2d{1e308, 0}, 0},
+      {Point2d{1e-300, -1e-300}, Point2d{1e-300, 1e-300}, 1},
+  };
+  const SplitResult r = split_segments(segs);
+  REQUIRE(r.segments.size() == 2);
+  REQUIRE(r.input_pairs.size() == 1);
+  CHECK(r.input_pairs[0] == std::make_pair(0u, 1u));
+  CHECK(std::isinf(r.max_residual));
+  for (const auto& piece : r.segments) {
+    const ArrangementSegment& in = piece.source == 0 ? segs[0] : segs[1];
+    CHECK(piece.a[0] == in.a[0]);
+    CHECK(piece.a[1] == in.a[1]);
+    CHECK(piece.b[0] == in.b[0]);
+    CHECK(piece.b[1] == in.b[1]);
+  }
+}
+
 TEST_CASE("split: zero-length input is filtered without renumbering outputs") {
   const ArrangementSegment segs[3] = {
       {Point2d{5, 5}, Point2d{5, 5}, 9},  // dropped

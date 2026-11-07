@@ -59,6 +59,13 @@ struct SplitInput {
   double max_y;
 };
 
+// Largest supported exponent span between finite input coordinates. The exact
+// determinant ratios are evaluated in the unscaled frame first and in one
+// power-of-two scaled frame second; within kMaxSpan those two frames cover the
+// representable ratios. Inputs whose finite coordinates span more than this are
+// outside the documented contract.
+inline constexpr int kMaxSpan = 1314;
+
 inline bool split_same_xy(const Point2d& a, const Point2d& b) noexcept {
   return a[0] == b[0] && a[1] == b[1];
 }
@@ -172,6 +179,14 @@ inline bool split_exact_params(const Expansion& det1, const Expansion& det2,
   const long double tt = o3 / denom_t_ld;
   const long double uu = o1 / denom_u_ld;
   if (!std::isfinite(tt) || !std::isfinite(uu)) return false;
+  // The signs are strict for a proper crossing, so both ratios are strictly
+  // inside (0, 1). A ratio that rounds to an endpoint is not representable in
+  // this frame: emitting it would add the contact at t = 0 or t = 1, where the
+  // t-only dedupe drops it and leaves the other segment's vertex on this
+  // segment's interior without a split. Report the frame as unusable instead;
+  // the caller then retries scaled, and finally leaves both inputs unsplit with
+  // max_residual = +infinity rather than silently losing the vertex.
+  if (tt <= 0.0L || tt >= 1.0L || uu <= 0.0L || uu >= 1.0L) return false;
   t = tt;
   u = uu;
   return true;
@@ -312,10 +327,10 @@ inline bool split_record_pair(const SplitInput& sa, std::vector<SplitParam>& pa,
   // first; a mixed-span pair (for example 2e200 and 1e-160) is exact there even
   // though a single globally scaled frame would collapse the tiny coordinate to
   // zero. Only when the unscaled products overflow/underflow is the 2^k-scaled
-  // frame retried. If neither frame is usable, the split point is not
-  // representable: the pair is still recorded, the split degenerates to the
-  // start endpoint, and max_residual becomes +infinity so the failure is
-  // visible instead of silently bending the geometry.
+  // frame retried. If neither frame yields a ratio strictly inside (0, 1), the
+  // split point is not representable: the pair is still recorded and both input
+  // segments are left unsplit, while max_residual becomes +infinity so the
+  // failure is visible instead of silently bending the geometry.
   if (((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) &&
       ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) {
     const Expansion det1 =
@@ -413,19 +428,22 @@ inline bool split_record_pair(const SplitInput& sa, std::vector<SplitParam>& pa,
 //   - endpoint touches, collinear overlaps and proper crossings all split both
 //     segments and are recorded once in `input_pairs` as (i, j), i < j, sorted;
 //   - `max_residual` is the largest perpendicular distance of a computed
-//     intersection point to the two supporting lines.
+//     intersection point to the two supporting lines; it is +infinity when a
+//     crossing is not representable (see the supported domain below).
 //
 // Candidate pairs come from a min-x sweep with an active set; the exact
 // classification uses sign_orient2d, so disjoint and exact endpoint cases never
 // depend on a tolerance. Proper-crossing parameters are exact determinant
 // ratios, evaluated in the unscaled frame first and retried in a 2^k-scaled
 // frame only if the unscaled products overflow/underflow; they are then clamped
-// to [0, 1]. The supported span is the double exponent range: differences and
-// products are formed exactly as Expansions, so mixed spans such as 2e200 and
-// 1e-160 are handled. If neither frame can represent the ratios, the pair is
-// still recorded, the split degenerates to the segment start, and
-// `max_residual` is +infinity ("split point not representable") rather than
-// silently emitting non-collinear pieces.
+// to [0, 1]. The supported domain is finite coordinates whose input exponent
+// span is at most detail::kMaxSpan (1314). Within it, differences and products
+// are formed exactly as Expansions, so mixed spans such as 2e200 and 1e-160 are
+// handled. A crossing whose exact ratio is still not representable (for example
+// 1e-360, below the long double range) records the pair but leaves both input
+// segments unsplit and sets `max_residual` to +infinity ("split point not
+// representable") rather than silently emitting a wrong split. Inputs beyond
+// the span are outside the contract.
 // The function throws no exceptions of its own (standard allocation failures
 // may still propagate).
 inline detail::SplitResult split_segments(std::span<const ArrangementSegment> segments) {
