@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <random>
 #include <unordered_map>
 #include <vector>
 
@@ -285,4 +286,75 @@ TEST_CASE("cdt2: rejects exponent spans beyond the accepted range") {
   auto r = cdt2(pts, none);
   REQUIRE(!r.has_value());
   CHECK(r.error().code == Errc::unsupported);
+}
+
+// Reviewer repro: recovering {1,4} on this general-position set used to remove
+// the whole star of point 6, so the ear-clipped cavity quietly produced a mesh
+// that omitted an input point. The documented escape hatch is numeric_failure,
+// never a wrong mesh.
+TEST_CASE("cdt2: recovery must not swallow an interior vertex") {
+  const std::vector<Point2d> pts{
+      {24.835623265281971, 24.975544898685598},
+      {35.736693793280196, 3.6658108026016323},
+      {67.583047380048313, 97.104084970485133},
+      {3.7925798899290597, 71.946238576968199},
+      {0.59580263212383189, 72.555319797019976},
+      {17.974444826745039, 16.446577952183215},
+      {21.871031715147961, 39.039743750011304},
+      {9.6664943551109985, 54.127130392998311}};
+  const CdtConstraint cs[1] = {{1, 4}};
+  auto r = cdt2(pts, cs);
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == Errc::numeric_failure);
+}
+
+// 200 deterministic general-position sets with one random chord. A success must
+// keep every input vertex and the constraint edge; a failure may only use the
+// documented error codes. On the previous implementation some seeds returned a
+// successful mesh with a missing vertex, which this property rejects.
+TEST_CASE("cdt2: fuzz never silently drops a vertex") {
+  std::mt19937_64 rng(0x9E3779B97F4A7C15ULL);
+  std::uniform_real_distribution<double> coord(0.0, 100.0);
+  int successes = 0;
+  int failures = 0;
+  for (int iter = 0; iter < 200; ++iter) {
+    const int n = 6 + static_cast<int>(rng() % 7);
+    std::vector<Point2d> pts;
+    pts.reserve(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+      pts.push_back({coord(rng), coord(rng)});
+    }
+    const auto a = static_cast<std::uint32_t>(rng() % static_cast<std::uint64_t>(n));
+    std::uint32_t b = static_cast<std::uint32_t>(rng() % static_cast<std::uint64_t>(n));
+    while (b == a) {
+      b = static_cast<std::uint32_t>(rng() % static_cast<std::uint64_t>(n));
+    }
+    const CdtConstraint cs[1] = {{a, b}};
+    auto r = cdt2(pts, cs);
+    if (!r.has_value()) {
+      ++failures;
+      CHECK((r.error().code == Errc::numeric_failure ||
+             r.error().code == Errc::self_intersecting));
+      continue;
+    }
+    ++successes;
+    std::vector<char> used(pts.size(), 0);
+    std::size_t missing = 0;
+    bool constraint_present = false;
+    for (const auto& t : r.value().triangles) {
+      for (int k = 0; k < 3; ++k) used[t[k]] = 1;
+      for (int k = 0; k < 3; ++k) {
+        const std::uint32_t u = t[k];
+        const std::uint32_t w = t[(k + 1) % 3];
+        if ((u == a && w == b) || (u == b && w == a)) constraint_present = true;
+      }
+    }
+    for (const char u : used) {
+      if (u == 0) ++missing;
+    }
+    CHECK(missing == 0);
+    CHECK(constraint_present);
+  }
+  CHECK(successes > 0);
+  CHECK(successes + failures == 200);
 }

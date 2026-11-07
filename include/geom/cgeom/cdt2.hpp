@@ -261,6 +261,23 @@ inline bool cdt_recover(std::vector<CdtTri>& tris, std::span<const Point2d> p,
 
   std::unordered_map<std::uint32_t, std::uint32_t> next;
   next.reserve(boundary.size());
+
+  // Every cavity vertex must survive on the boundary. A cavity that swallows an
+  // interior vertex (removing its whole star) or pinches at one is not a simple
+  // polygon, and ear clipping it would silently emit a mesh without that input
+  // point. Fail instead; cdt2 maps this to Errc::numeric_failure.
+  std::unordered_set<std::uint32_t> boundary_vertices;
+  boundary_vertices.reserve(boundary.size());
+  for (const auto& [u, w] : boundary) {
+    boundary_vertices.insert(u);
+    boundary_vertices.insert(w);
+  }
+  for (const std::uint32_t t : cavity) {
+    for (int e = 0; e < 3; ++e) {
+      if (boundary_vertices.find(tris[t].v[e]) == boundary_vertices.end()) return false;
+    }
+  }
+
   for (const auto& [u, w] : boundary) {
     if (!next.emplace(u, w).second) return false;  // boundary is not simple
   }
@@ -385,11 +402,19 @@ inline bool cdt_restore_delaunay(std::vector<CdtTri>& tris, std::span<const Poin
 //     Errc::self_intersecting;
 //   - duplicate constraints, including a reversed duplicate, are accepted and
 //     deduplicated.
+//   - a recovery cavity must be a simple polygon whose boundary contains every
+//     cavity vertex. A pinched cavity, or one that would swallow an interior
+//     vertex, returns Errc::numeric_failure instead of a mesh that omits an
+//     input point.
+//   - on success every input point (after duplicate collapsing and excluding
+//     points that delaunay2 itself drops) is a vertex of the output, and every
+//     constraint edge appears in the triangulation.
 //
 // Errors: Errc::non_finite, Errc::index_out_of_range, Errc::degenerate (fewer
 // than three distinct points, all points collinear, or a constraint with equal
 // endpoints), Errc::self_intersecting, Errc::unsupported (exponent span), and
-// Errc::numeric_failure if the recovery/flip machinery cannot finish.
+// Errc::numeric_failure if the recovery/flip machinery cannot finish or would
+// produce a mesh that loses an input vertex.
 //
 // Method: build the unconstrained delaunay2 mesh, then recover each missing
 // constraint edge by deleting the triangles its segment crosses and
@@ -500,6 +525,23 @@ inline Result<CdtResult> cdt2(std::span<const Point2d> points,
 
   if (!detail::cdt_restore_delaunay(tris, points, constrained)) {
     return Error{Errc::numeric_failure, "cdt2: Delaunay restoration did not converge", 0u, 0u};
+  }
+
+  // Defensive post-condition: success promises that every vertex of the base
+  // triangulation is still present. Recovery or flips that lose one are a
+  // numeric failure, never a silently partial mesh.
+  std::vector<char> used(points.size(), 0);
+  for (const detail::CdtTri& t : tris) {
+    if (!t.alive) continue;
+    for (int e = 0; e < 3; ++e) used[t.v[e]] = 1;
+  }
+  for (const auto& base_tri : base) {
+    for (int e = 0; e < 3; ++e) {
+      if (used[base_tri[e]] == 0) {
+        return Error{Errc::numeric_failure, "cdt2: triangulation lost an input vertex",
+                     base_tri[e], 0u};
+      }
+    }
   }
 
   CdtResult result;
