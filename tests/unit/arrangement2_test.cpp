@@ -399,8 +399,13 @@ TEST_CASE("arrangement: two overlapping squares") {
   CHECK(arr.edge_count() == 12);
   CHECK(arr.face_count() == 4);
   CHECK(arr.winding(arr.locate(Point2d{0.25, 0.75}), 0) == 1);
-  CHECK(arr.winding(arr.locate(Point2d{0.75, 0.75}), 0) == 2);
-  CHECK(arr.winding(arr.locate(Point2d{1.25, 0.75}), 1) == 1);
+  const std::uint32_t overlap = arr.locate(Point2d{0.75, 0.75});
+  CHECK(arr.winding(overlap, 0) == 1);
+  CHECK(arr.winding(overlap, 1) == 1);
+  CHECK(arr.faces()[overlap].winding == 2);
+  const std::uint32_t right = arr.locate(Point2d{1.25, 0.75});
+  CHECK(arr.winding(right, 1) == 1);
+  CHECK(arr.winding(right, 0) == 0);
   CHECK(arr.locate(Point2d{2, 2}) == 0xFFFFFFFFu);
 }
 

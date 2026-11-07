@@ -563,7 +563,8 @@ inline detail::SplitResult split_segments(std::span<const ArrangementSegment> se
 //   - Per-source winding follows w[left] = w[right] + s * delta_low_to_high, with
 //     s = +1 for the low->high half-edge. The unbounded side of a component
 //     starts at zero; a component nested inside another one inherits the winding
-//     of the face that contains it. `Face::winding` is the sum over all sources.
+//     of the face that contains it. `winding(face, source)` returns that one
+//     source's value; `Face::winding` is the sum over all sources.
 //   - Inputs must be closed chains (the segments of one source must join end to
 //     end); otherwise the winding numbers are only defined relative to the
 //     initialized outer faces.
@@ -957,25 +958,23 @@ class Arrangement2 {
   std::span<const HalfEdge> half_edges() const noexcept { return half_edges_; }
   std::span<const Face> faces() const noexcept { return faces_; }
 
-  // Winding number of `face`. Face::winding aggregates every source, so the
-  // result does not depend on `source`; it is zero for an out-of-range face or
-  // an out-of-range source. winding_of_source() exposes the individual
-  // per-source contributions that the aggregate is summed from.
+  // Winding number of `face` contributed by `source`. The two-argument call is
+  // always per source, which is what a boolean fill rule needs; it never depends
+  // on how many other sources cover the same face. Face::winding holds the
+  // aggregate sum over all sources. A kNoFace face id, any face id beyond
+  // faces().size(), or a source that never appears in the input yields 0.
   std::int32_t winding(std::uint32_t face, std::uint32_t source) const noexcept {
-    if (face >= faces_.size()) return 0;
-    if (source >= source_count_) return 0;
-    return faces_[face].winding;
-  }
-
-  // Per-source contribution to the winding of `face`. This is what the boolean
-  // layer needs to apply a fill rule to one operand at a time; it returns zero
-  // for a face or a source that does not exist.
-  std::int32_t winding_of_source(std::uint32_t face, std::uint32_t source) const noexcept {
     if (face >= faces_.size()) return 0;
     const auto it = std::lower_bound(sources_.begin(), sources_.end(), source);
     if (it == sources_.end() || *it != source) return 0;
     const std::size_t index = static_cast<std::size_t>(it - sources_.begin());
     return windings_[static_cast<std::size_t>(face) * sources_.size() + index];
+  }
+
+  // Alias for winding(); both return the per-source contribution. Kept so the
+  // boolean layer can spell out that it wants one operand at a time.
+  std::int32_t winding_of_source(std::uint32_t face, std::uint32_t source) const noexcept {
+    return winding(face, source);
   }
 
   // Face containing `p`, or kNoFace when `p` is on an edge or outside every
