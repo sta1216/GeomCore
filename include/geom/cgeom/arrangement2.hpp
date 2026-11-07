@@ -558,8 +558,11 @@ inline detail::SplitResult split_segments(std::span<const ArrangementSegment> se
 //     positive for a bounded face and negative for the unbounded side. A face
 //     with several boundary rings (a hole, or a component nested inside another
 //     component) contributes one `Face` record per ring; all of those records
-//     carry the same winding, and only bounded faces are used by point location
-//     and by the boolean layer.
+//     carry the same winding. Point location only considers bounded faces, but
+//     the boolean layer classifies every face record by its per-source winding:
+//     for a hole the region lies on the unbounded side, so the kept record is
+//     the unbounded one. Boundary emission is therefore seeded from every
+//     accepted record, bounded or not.
 //   - Per-source winding follows w[left] = w[right] + s * delta_low_to_high, with
 //     s = +1 for the low->high half-edge. The unbounded side of a component
 //     starts at zero; a component nested inside another one inherits the winding

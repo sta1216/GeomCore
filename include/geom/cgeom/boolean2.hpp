@@ -82,9 +82,9 @@ inline bool boolean_accept(std::int32_t winding, FillRule rule) noexcept {
 }
 
 // Signed shoelace area of one traced loop, computed after the exact power-of-two
-// scaling 2^-exponent. Scaling keeps 1e300 and 1e-300 inputs representable
-// (long double is double on MSVC) while preserving both sign and |area| order,
-// which is all the classification below needs.
+// scaling 2^-exponent. Each loop is scaled by its own exponent (see the caller),
+// so a tiny loop keeps a representable area even beside a huge one; the scaling
+// preserves both sign and |area| order, which is all the classification needs.
 inline double boolean_ring_area(std::span<const Point2d> ring, int exponent) noexcept {
   const std::size_t n = ring.size();
   if (n < 3) return 0.0;
@@ -157,8 +157,19 @@ inline void boolean_rotate_to_min(std::vector<Point2d>& ring) noexcept {
 
 struct BooleanLoop {
   std::vector<Point2d> points;
-  double signed_area = 0.0;
+  // |signed area| = area_mantissa * 2^area_exponent, with
+  // area_mantissa in [0.5, 1). Keeping the magnitude as a mantissa and an
+  // exponent lets hole attachment compare areas across the whole accepted span.
+  double area_mantissa = 0.0;
+  int area_exponent = 0;
 };
+
+// True when |area_a| < |area_b|, both given as mantissa * 2^exponent.
+inline bool boolean_area_less(double mantissa_a, int exponent_a, double mantissa_b,
+                              int exponent_b) noexcept {
+  if (exponent_a != exponent_b) return exponent_a < exponent_b;
+  return std::fabs(mantissa_a) < std::fabs(mantissa_b);
+}
 
 struct BooleanComponent {
   BooleanLoop outer;
@@ -333,25 +344,23 @@ inline Result<BooleanResult> boolean2(std::span<const Polygon2d> operands, Boole
     if (loop.size() >= 3) loops.push_back(std::move(loop));
   }
 
-  // 5. Classify and canonicalize the loops. All areas share one power-of-two
-  //    scaling taken from the arrangement vertices.
-  int scale_exp = 0;
-  double max_magnitude = 0.0;
-  for (const Point2d& vertex : vertices) {
-    const double x = std::fabs(vertex[0]);
-    const double y = std::fabs(vertex[1]);
-    if (x > max_magnitude) max_magnitude = x;
-    if (y > max_magnitude) max_magnitude = y;
-  }
-  if (max_magnitude > 0.0 && std::isfinite(max_magnitude)) {
-    scale_exp = std::ilogb(max_magnitude);
-  }
-
+  // 5. Classify and canonicalize the loops. Every loop is normalized by its own
+  //    power of two: a global exponent would underflow the area of a small loop
+  //    next to a huge one and silently drop it.
   std::uint32_t merged_vertices = 0;
   std::vector<detail::BooleanComponent> components;
   std::vector<detail::BooleanLoop> holes;
   for (const std::vector<Point2d>& loop : loops) {
-    const double signed_area = detail::boolean_ring_area(loop, scale_exp);
+    double max_magnitude = 0.0;
+    for (const Point2d& vertex : loop) {
+      const double x = std::fabs(vertex[0]);
+      const double y = std::fabs(vertex[1]);
+      if (x > max_magnitude) max_magnitude = x;
+      if (y > max_magnitude) max_magnitude = y;
+    }
+    const int loop_exp =
+        (max_magnitude > 0.0 && std::isfinite(max_magnitude)) ? std::ilogb(max_magnitude) : 0;
+    const double signed_area = detail::boolean_ring_area(loop, loop_exp);
     if (signed_area == 0.0) continue;  // zero-area sliver, not part of any region
     detail::BooleanLoop ring;
     ring.points = loop;
@@ -359,8 +368,11 @@ inline Result<BooleanResult> boolean2(std::span<const Polygon2d> operands, Boole
     if (ring.points.size() < 3) continue;
     merged_vertices += removed;
     detail::boolean_rotate_to_min(ring.points);
-    ring.signed_area = signed_area;
-    if (signed_area > 0.0) {
+    int mantissa_exp = 0;
+    const double mantissa = std::frexp(signed_area, &mantissa_exp);
+    ring.area_mantissa = mantissa;
+    ring.area_exponent = mantissa_exp + 2 * loop_exp;
+    if (mantissa > 0.0) {
       detail::BooleanComponent component;
       component.outer = std::move(ring);
       components.push_back(std::move(component));
@@ -384,20 +396,27 @@ inline Result<BooleanResult> boolean2(std::span<const Polygon2d> operands, Boole
     if (components.empty()) break;
     std::size_t fallback = 0;
     for (std::size_t c = 1; c < components.size(); ++c) {
-      if (std::fabs(components[c].outer.signed_area) < std::fabs(components[fallback].outer.signed_area)) {
+      const detail::BooleanLoop& candidate = components[c].outer;
+      const detail::BooleanLoop& current = components[fallback].outer;
+      if (detail::boolean_area_less(candidate.area_mantissa, candidate.area_exponent,
+                                    current.area_mantissa, current.area_exponent)) {
         fallback = c;
       }
     }
     std::size_t best = fallback;
-    double best_area = 0.0;
     bool found = false;
     for (std::size_t c = 0; c < components.size(); ++c) {
       if (!detail::boolean_point_in_ring(hole.points.front(), components[c].outer.points)) continue;
-      const double area = std::fabs(components[c].outer.signed_area);
-      if (!found || area < best_area) {
+      if (!found) {
         best = c;
-        best_area = area;
         found = true;
+        continue;
+      }
+      const detail::BooleanLoop& candidate = components[c].outer;
+      const detail::BooleanLoop& current = components[best].outer;
+      if (detail::boolean_area_less(candidate.area_mantissa, candidate.area_exponent,
+                                    current.area_mantissa, current.area_exponent)) {
+        best = c;
       }
     }
     components[best].holes.push_back(std::move(hole));

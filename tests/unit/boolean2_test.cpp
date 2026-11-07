@@ -94,6 +94,7 @@ TEST_CASE("boolean2: shared edge produces one clean rectangle") {
   const Polygon2d& p = uni.value().polygons.polygons[0];
   CHECK(p.ring_count() == 1);
   CHECK(p.ring(0).size() == 4);  // collinear shared-edge endpoints merged away
+  CHECK(uni.value().report.merged_vertices == 2);
   CHECK(area_of(uni.value().polygons) == doctest::Approx(2.0));
 }
 
@@ -105,6 +106,9 @@ TEST_CASE("boolean2: fill rules and self-intersection") {
   auto ok = boolean2(ops, BooleanOp::union_);
   REQUIRE(ok.has_value());
   CHECK(std::isfinite(area_of(ok.value().polygons)));
+  // Both lobes are accepted with opposite winding and become two components.
+  REQUIRE(ok.value().polygons.polygons.size() == 2);
+  CHECK(area_of(ok.value().polygons) == doctest::Approx(2.0));
 
   BooleanOptions strict;
   strict.allow_self_intersections = false;
@@ -248,3 +252,135 @@ TEST_CASE("boolean2: positive fill rule drops negative winding") {
   REQUIRE(ev.has_value());
   CHECK(area_of(ev.value().polygons) == doctest::Approx(13.0));
 }
+
+// Regression C1: one global area scale loses every loop much smaller than the
+// largest operand. Each loop is normalized by its own exponent, so a tiny
+// disjoint operand or hole survives next to a 1e150 operand. Areas are not
+// asserted here: polygon_area2 overflows or underflows at this scale.
+TEST_CASE("boolean2: mixed-scale union keeps the tiny disjoint operand") {
+  const Polygon2d big = rect(2e150, 0.0, 3e150, 1e150);
+  const Polygon2d tiny = rect(0.0, 0.0, 1e-150, 1e-150);
+  const Polygon2d ops[2] = {big, tiny};
+  auto uni = boolean2(ops, BooleanOp::union_);
+  REQUIRE(uni.has_value());
+  REQUIRE(uni.value().polygons.polygons.size() == 2);
+  CHECK(uni.value().report.output_polygons == 2);
+  for (const Polygon2d& p : uni.value().polygons.polygons) {
+    CHECK(p.ring_count() == 1);
+    CHECK(p.ring(0).size() == 4);
+  }
+}
+
+TEST_CASE("boolean2: mixed-scale difference keeps the tiny hole") {
+  const Polygon2d big = rect(0.0, 0.0, 1e150, 1e150);
+  const Polygon2d tiny = rect(1e-149, 1e-149, 2e-149, 2e-149);
+  const Polygon2d ops[2] = {big, tiny};
+  auto diff = boolean2(ops, BooleanOp::difference);
+  REQUIRE(diff.has_value());
+  REQUIRE(diff.value().polygons.polygons.size() == 1);
+  const Polygon2d& p = diff.value().polygons.polygons[0];
+  REQUIRE(p.ring_count() == 2);
+  CHECK(p.ring(0).size() == 4);
+  CHECK(p.ring(1).size() == 4);
+}
+
+TEST_CASE("boolean2: mixed-scale intersection keeps the tiny operand") {
+  const Polygon2d big = rect(0.0, 0.0, 1e150, 1e150);
+  const Polygon2d tiny = rect(1e-149, 1e-149, 2e-149, 2e-149);
+  const Polygon2d ops[2] = {big, tiny};
+  auto inter = boolean2(ops, BooleanOp::intersection);
+  REQUIRE(inter.has_value());
+  REQUIRE(inter.value().polygons.polygons.size() == 1);
+  const Polygon2d& p = inter.value().polygons.polygons[0];
+  CHECK(p.ring_count() == 1);
+  CHECK(p.ring(0).size() == 4);
+}
+
+// A ring's first and last segments meet at the closing vertex; strict mode must
+// not report that shared endpoint as a self-intersection.
+TEST_CASE("boolean2: strict mode accepts wrap-around adjacency") {
+  Polygon2d triangle;
+  triangle.vertices = {{0.0, 0.0}, {1.0, 0.0}, {0.0, 1.0}};
+  triangle.ring_starts = {0, 3};
+  const Polygon2d tri[1] = {triangle};
+  BooleanOptions strict;
+  strict.allow_self_intersections = false;
+  auto t = boolean2(tri, BooleanOp::union_, strict);
+  REQUIRE(t.has_value());
+  CHECK(t.value().polygons.polygons.size() == 1);
+  CHECK(area_of(t.value().polygons) == doctest::Approx(0.5));
+}
+
+// Crossings between distinct operands are not self-intersections.
+TEST_CASE("boolean2: strict mode accepts cross-operand overlap") {
+  const Polygon2d a = rect(0.0, 0.0, 1.0, 1.0);
+  const Polygon2d b = rect(0.5, 0.5, 1.5, 1.5);
+  const Polygon2d ops[2] = {a, b};
+  BooleanOptions strict;
+  strict.allow_self_intersections = false;
+  auto uni = boolean2(ops, BooleanOp::union_, strict);
+  REQUIRE(uni.has_value());
+  CHECK(area_of(uni.value().polygons) == doctest::Approx(1.75));
+}
+
+// An outer ring and one of its hole rings are different rings; their contact at
+// a corner is not a self-intersection even in strict mode.
+TEST_CASE("boolean2: strict mode accepts a hole touching its outer at a corner") {
+  Polygon2d poly = rect(0.0, 0.0, 4.0, 4.0);
+  append_ring(poly, {{0.0, 0.0}, {1.0, 0.5}, {0.5, 1.0}});
+  REQUIRE(poly.ring_count() == 2);
+  const Polygon2d ops[1] = {poly};
+  BooleanOptions strict;
+  strict.allow_self_intersections = false;
+  auto r = boolean2(ops, BooleanOp::union_, strict);
+  REQUIRE(r.has_value());
+  CHECK(!r.value().polygons.polygons.empty());
+}
+
+// Four nested rings with even_odd: the result has two outers (0..10 and 4..6)
+// and both contain the 5..5.5 hole, which must attach to the smaller one.
+TEST_CASE("boolean2: hole attaches to the smallest containing outer") {
+  Polygon2d poly;
+  append_ring(poly, {{0.0, 0.0}, {10.0, 0.0}, {10.0, 10.0}, {0.0, 10.0}});
+  append_ring(poly, {{2.0, 2.0}, {8.0, 2.0}, {8.0, 8.0}, {2.0, 8.0}});
+  append_ring(poly, {{4.0, 4.0}, {6.0, 4.0}, {6.0, 6.0}, {4.0, 6.0}});
+  append_ring(poly, {{5.0, 5.0}, {5.5, 5.0}, {5.5, 5.5}, {5.0, 5.5}});
+  REQUIRE(poly.ring_count() == 4);
+  const Polygon2d ops[1] = {poly};
+  BooleanOptions even;
+  even.fill_rule = FillRule::even_odd;
+  auto r = boolean2(ops, BooleanOp::union_, even);
+  REQUIRE(r.has_value());
+  REQUIRE(r.value().polygons.polygons.size() == 2);
+
+  const Polygon2d* big = nullptr;
+  const Polygon2d* island = nullptr;
+  for (const Polygon2d& p : r.value().polygons.polygons) {
+    if (polygon_area2(p) > 10.0) {
+      big = &p;
+    } else {
+      island = &p;
+    }
+  }
+  REQUIRE(big != nullptr);
+  REQUIRE(island != nullptr);
+  REQUIRE(big->ring_count() == 2);
+  REQUIRE(island->ring_count() == 2);
+  CHECK(polygon_area2(*big) == doctest::Approx(64.0));
+  CHECK(polygon_area2(*island) == doctest::Approx(3.75));
+  CHECK(big->ring(1).size() == 4);
+  CHECK(island->ring(1).size() == 4);
+}
+
+// A plain square has no self-intersection; strict mode must accept it.
+TEST_CASE("boolean2: strict mode accepts a simple square") {
+  const Polygon2d a = rect(0.0, 0.0, 1.0, 1.0);
+  const Polygon2d ops[1] = {a};
+  BooleanOptions strict;
+  strict.allow_self_intersections = false;
+  auto r = boolean2(ops, BooleanOp::union_, strict);
+  REQUIRE(r.has_value());
+  CHECK(r.value().polygons.polygons.size() == 1);
+  CHECK(area_of(r.value().polygons) == doctest::Approx(1.0));
+}
+
