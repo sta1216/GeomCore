@@ -43,6 +43,7 @@ set(GEOM_TEST_SOURCES
   unit/triangulate2_test.cpp
   unit/arrangement2_test.cpp
   unit/boolean2_test.cpp
+  unit/cdt2_test.cpp
 )
 
 list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)
