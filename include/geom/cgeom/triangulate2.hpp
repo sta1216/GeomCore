@@ -125,6 +125,25 @@ inline bool properly_cross(const Point2d& a, const Point2d& b, const Point2d& c,
   return o3 != 0 && o4 != 0 && o3 != o4;
 }
 
+// True iff the open diagonal (a, c) properly crosses a ring edge that does not
+// share a vertex with the diagonal. After hole bridges are spliced in, a convex
+// corner with an empty ear triangle can still have a diagonal that pierces a
+// non-incident edge; clipping such an ear would tear the ring. The check is
+// exact (properly_cross uses sign_orient2d only). Edges incident to a or c are
+// exempt by vertex index, exactly like their shared endpoints in the diagonal.
+inline bool diagonal_crosses_ring(const TriRing& ring, std::size_t ia,
+                                  std::size_t ic) noexcept {
+  const std::size_t n = ring.size();
+  const Point2d& a = ring[ia].p;
+  const Point2d& c = ring[ic].p;
+  for (std::size_t j = 0; j < n; ++j) {
+    const std::size_t jn = (j + 1) % n;
+    if (j == ia || j == ic || jn == ia || jn == ic) continue;
+    if (properly_cross(a, c, ring[j].p, ring[jn].p)) return true;
+  }
+  return false;
+}
+
 // p lies on the open segment ab (strictly between a and b). The collinearity
 // test is exact; the bounding-box test only accepts an already-collinear point.
 inline bool on_open_segment(const Point2d& a, const Point2d& b, const Point2d& p) noexcept {
@@ -206,6 +225,26 @@ inline void splice_hole(TriRing& outer, std::size_t b_index, const TriRing& hole
   outer.swap(merged);
 }
 
+// True when the direction from ring[i] to target lies inside the polygon's
+// interior wedge at that vertex. After one or more holes are bridged the same
+// coordinate can occur several times; every copy has its own pair of incident
+// edges and therefore its own wedge.
+inline bool interior_cone_contains(const TriRing& ring, std::size_t i,
+                                   const Point2d& target) noexcept {
+  const std::size_t n = ring.size();
+  const std::size_t ip = (i + n - 1) % n;
+  const std::size_t in = (i + 1) % n;
+  const Point2d& p = ring[ip].p;
+  const Point2d& c = ring[i].p;
+  const Point2d& q = ring[in].p;
+  const int turn = sign_orient2d(p[0], p[1], c[0], c[1], q[0], q[1]);
+  const int s1 = sign_orient2d(p[0], p[1], c[0], c[1], target[0], target[1]);
+  const int s2 = sign_orient2d(c[0], c[1], q[0], q[1], target[0], target[1]);
+  if (turn > 0) return s1 >= 0 && s2 >= 0;
+  if (turn < 0) return s1 >= 0 || s2 >= 0;
+  return s1 >= 0;
+}
+
 // Bridges one clockwise hole into the counter-clockwise outer ring.
 //
 // Candidate order (deterministic):
@@ -217,6 +256,13 @@ inline void splice_hole(TriRing& outer, std::size_t b_index, const TriRing& hole
 // then the other one. An exact x tie between the endpoints is broken by
 // lexicographic (x, then y) order, i.e. the lexicographically smaller visible
 // partner wins that tie.
+//
+// An endpoint coordinate can occur more than once after earlier bridges. The
+// copies are scanned in ring order and the first copy whose interior wedge
+// contains the bridge direction is used; splicing into the wrong copy (for
+// example the far side of an existing bridge) produces a locally inverted ring
+// that ear clipping cannot resolve. If no copy passes the wedge test the first
+// copy is used, preserving the pre-existing fallback.
 inline bool bridge_hole(TriRing& outer, const TriRing& hole,
                         const std::vector<TriRing>& rings) {
   const std::size_t h = hole.size();
@@ -246,20 +292,56 @@ inline bool bridge_hole(TriRing& outer, const TriRing& hole,
       second = e0;
     }
 
-    const std::size_t candidates[2] = {first, second};
-    for (const std::size_t b_index : candidates) {
-      if (!bridge_is_visible(outer[b_index].p, m, outer, rings)) continue;
-      splice_hole(outer, b_index, hole, m_index);
+    const auto splice_at = [&](const Point2d& coord) -> bool {
+      std::size_t chosen = n;
+      std::size_t fallback = n;
+      for (std::size_t i = 0; i < n; ++i) {
+        if (!same_xy(outer[i].p, coord)) continue;
+        if (fallback == n) fallback = i;
+        if (interior_cone_contains(outer, i, m)) {
+          chosen = i;
+          break;
+        }
+      }
+      if (chosen == n) chosen = fallback;
+      if (chosen == n) return false;
+      splice_hole(outer, chosen, hole, m_index);
       return true;
+    };
+
+    const Point2d endpoints[2] = {outer[first].p, outer[second].p};
+    const std::size_t endpoint_count = same_xy(endpoints[0], endpoints[1]) ? 1 : 2;
+    for (std::size_t e = 0; e < endpoint_count; ++e) {
+      const Point2d& coord = endpoints[e];
+      if (!bridge_is_visible(coord, m, outer, rings)) continue;
+      if (splice_at(coord)) return true;
     }
+
+    // Fallback: when several holes are present, both endpoints of the ray-hit
+    // edge can be blocked because the bridge would graze another hole. Any
+    // visible outer vertex is then a valid partner; take the lexicographically
+    // smallest visible coordinate so the choice stays deterministic.
+    std::size_t best_coord = n;
+    for (std::size_t i = 0; i < n; ++i) {
+      const Point2d& coord = outer[i].p;
+      bool seen = false;
+      for (std::size_t j = 0; j < i && !seen; ++j) seen = same_xy(outer[j].p, coord);
+      if (seen) continue;
+      if (!bridge_is_visible(coord, m, outer, rings)) continue;
+      if (best_coord == n || lex_less_xy(coord, outer[best_coord].p)) best_coord = i;
+    }
+    if (best_coord != n && splice_at(outer[best_coord].p)) return true;
   }
   return false;
 }
 
 // Ear clipping on the merged counter-clockwise ring. The lowest valid ear index
 // is always removed first, so the output is deterministic. A convex corner is a
-// valid ear when no other ring vertex lies in or on its closed triangle;
-// duplicate bridge vertices are skipped by coordinate equality.
+// valid ear when no other ring vertex lies in or on its closed triangle and its
+// diagonal (prev, next) does not properly cross a non-incident ring edge;
+// duplicate bridge vertices are skipped by coordinate equality. The diagonal
+// test makes ear validation O(n) per candidate, so pathological rings are
+// O(n^3) overall; M1b has no triangulation performance gate.
 inline bool ear_clip(TriRing ring, std::vector<std::array<std::uint32_t, 3>>& out) {
   while (ring.size() > 3) {
     const std::size_t n = ring.size();
@@ -283,6 +365,11 @@ inline bool ear_clip(TriRing ring, std::vector<std::array<std::uint32_t, 3>>& ou
         }
       }
       if (blocked) continue;
+
+      // The ear triangle can be free of vertices yet still be invalid: after
+      // hole bridging, its diagonal may properly cross another edge of the
+      // ring. Reject the candidate; if no ear survives the ring is not simple.
+      if (diagonal_crosses_ring(ring, ip, in)) continue;
 
       out.push_back({ring[ip].original, ring[i].original, ring[in].original});
       ring.erase(ring.begin() + static_cast<std::ptrdiff_t>(i));
@@ -329,8 +416,8 @@ inline long double triangle_area2(const Point2d& a, const Point2d& b,
 //   - every hole lies strictly inside the outer ring and holes are not nested;
 //   - ring windings may be arbitrary; adjacent duplicate points are tolerated.
 // If validation or any precondition-dependent step fails, the result is
-// {{}, false}; the function never indexes outside `poly.vertices` and never
-// throws.
+// {{}, false}; the function never indexes outside `poly.vertices` and throws no
+// exceptions of its own (standard allocation failures may still propagate).
 //
 // On success every emitted triangle is counter-clockwise, non-degenerate, and
 // indexes `poly.vertices` (indices refer to the original pool even though
