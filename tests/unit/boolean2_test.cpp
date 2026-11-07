@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <limits>
+#include <utility>
 #include <vector>
 
 using geom::v1::BooleanOp;
@@ -417,5 +418,69 @@ TEST_CASE("boolean2: strict mode accepts a simple square") {
   REQUIRE(r.has_value());
   CHECK(r.value().polygons.polygons.size() == 1);
   CHECK(area_of(r.value().polygons) == doctest::Approx(1.0));
+}
+
+namespace {
+
+Polygon2d polygon_of(std::vector<Point2d> vertices) {
+  Polygon2d p;
+  p.vertices = std::move(vertices);
+  p.ring_starts = {0, static_cast<std::uint32_t>(p.vertices.size())};
+  return p;
+}
+
+}  // namespace
+
+// The kite's leftmost vertex owns a lower-half-plane edge. Arrangement winding
+// seeding used to invert the interior/exterior, so this simple polygon unioned
+// to nothing and its intersection with itself was empty as well.
+TEST_CASE("boolean2: kite keeps its topology for single-operand ops") {
+  const Polygon2d kite = polygon_of({{0, 0}, {2, 1}, {0, 4}, {-2, 1}});
+  const Polygon2d ops[1] = {kite};
+
+  const auto uni = boolean2(ops, BooleanOp::union_);
+  REQUIRE(uni.has_value());
+  REQUIRE(uni.value().polygons.polygons.size() == 1);
+  CHECK(uni.value().polygons.polygons[0].ring_count() == 1);
+  CHECK(polygon_area2(uni.value().polygons.polygons[0]) == doctest::Approx(8.0));
+
+  const auto self = boolean2(ops, BooleanOp::intersection);
+  REQUIRE(self.has_value());
+  REQUIRE(self.value().polygons.polygons.size() == 1);
+  CHECK(polygon_area2(self.value().polygons.polygons[0]) == doctest::Approx(8.0));
+
+  const Polygon2d pair[2] = {kite, rect(100.0, 100.0, 101.0, 101.0)};
+  const auto far = boolean2(pair, BooleanOp::union_);
+  REQUIRE(far.has_value());
+  REQUIRE(far.value().polygons.polygons.size() == 2);
+  CHECK(area_of(far.value().polygons) == doctest::Approx(9.0));
+}
+
+// One simple convex polygon in, one polygon out: both orientations of the
+// leftmost-vertex edge fan are covered (the pentagon has a lower-half edge, and
+// the regular 100-gon has one on each side of the +x axis).
+TEST_CASE("boolean2: single convex polygon unions to itself") {
+  const Polygon2d pentagon =
+      polygon_of({{0, 0}, {3, -1}, {4, 1}, {2, 3}, {-1, 1}});
+  const Polygon2d pent_ops[1] = {pentagon};
+  const auto pent = boolean2(pent_ops, BooleanOp::union_);
+  REQUIRE(pent.has_value());
+  REQUIRE(pent.value().polygons.polygons.size() == 1);
+  CHECK(pent.value().polygons.polygons[0].ring_count() == 1);
+  CHECK(polygon_area2(pent.value().polygons.polygons[0]) == doctest::Approx(11.0));
+
+  std::vector<Point2d> circle;
+  for (int i = 0; i < 100; ++i) {
+    const double angle = 2.0 * 3.14159265358979323846 * i / 100.0;
+    circle.push_back({std::cos(angle), std::sin(angle)});
+  }
+  const Polygon2d polygon = polygon_of(circle);
+  const Polygon2d polygon_ops[1] = {polygon};
+  const auto round = boolean2(polygon_ops, BooleanOp::union_);
+  REQUIRE(round.has_value());
+  REQUIRE(round.value().polygons.polygons.size() == 1);
+  CHECK(round.value().polygons.polygons[0].ring_count() == 1);
+  CHECK(polygon_area2(round.value().polygons.polygons[0]) ==
+        doctest::Approx(3.139525976));
 }
 

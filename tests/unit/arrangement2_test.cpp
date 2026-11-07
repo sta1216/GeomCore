@@ -520,3 +520,53 @@ TEST_CASE("arrangement: hole in one ring winds down") {
   CHECK(arr.faces()[body].winding == 1);
   CHECK(arr.winding(body, 0) == 1);
 }
+
+namespace {
+
+Polygon2d polygon_of(std::vector<Point2d> vertices) {
+  Polygon2d p;
+  p.vertices = std::move(vertices);
+  p.ring_starts = {0, static_cast<std::uint32_t>(p.vertices.size())};
+  return p;
+}
+
+std::uint32_t unbounded_face(const Arrangement2& arr) {
+  for (std::uint32_t f = 0; f < arr.faces().size(); ++f) {
+    if (!arr.faces()[f].bounded) return f;
+  }
+  return Arrangement2::kNoFace;
+}
+
+}  // namespace
+
+// The lexicographically smallest vertex of this kite has one outgoing edge
+// pointing into the lower half-plane. The old angular seed picked that edge and
+// started the component from the interior face, inverting every winding.
+TEST_CASE("arrangement: kite seeds winding from its unbounded face") {
+  const Polygon2d kite = polygon_of({{0, 0}, {2, 1}, {0, 4}, {-2, 1}});
+  const Arrangement2 arr = Arrangement2::build(ring_segments(kite, 0));
+  REQUIRE(arr.faces().size() == 2);
+  const std::uint32_t inside = arr.locate(Point2d{0, 1});
+  REQUIRE(inside != Arrangement2::kNoFace);
+  CHECK(arr.faces()[inside].bounded);
+  CHECK(arr.winding(inside, 0) == 1);
+  CHECK(arr.faces()[inside].winding == 1);
+  CHECK(arr.locate(Point2d{0, 5}) == Arrangement2::kNoFace);
+  const std::uint32_t outside = unbounded_face(arr);
+  REQUIRE(outside != Arrangement2::kNoFace);
+  CHECK(arr.winding(outside, 0) == 0);
+  CHECK(arr.faces()[outside].winding == 0);
+}
+
+// Same accidental dependency, one step more general: the leftmost vertex
+// (-1, 1) has an outgoing edge with a negative y component.
+TEST_CASE("arrangement: pentagon with a lower-half edge at its leftmost vertex") {
+  const Polygon2d pentagon = polygon_of({{0, 0}, {3, -1}, {4, 1}, {2, 3}, {-1, 1}});
+  const Arrangement2 arr = Arrangement2::build(ring_segments(pentagon, 0));
+  const std::uint32_t inside = arr.locate(Point2d{1.6, 0.8});
+  REQUIRE(inside != Arrangement2::kNoFace);
+  CHECK(arr.faces()[inside].bounded);
+  CHECK(arr.winding(inside, 0) == 1);
+  CHECK(arr.faces()[inside].winding == 1);
+  CHECK(arr.locate(Point2d{1.6, 5.0}) == Arrangement2::kNoFace);
+}

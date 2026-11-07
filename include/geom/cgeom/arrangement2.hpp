@@ -894,10 +894,31 @@ class Arrangement2 {
             ++guard;
           } while (h != start && guard <= half_edge_total);
         }
-        // At the lexicographically smallest vertex the exterior sector lies to
-        // the left of the highest-angle outgoing half-edge, which identifies
-        // the unbounded face even when its cycle has zero area.
-        seed_face[root] = face_of[outgoing[min_vertex].back()];
+        // The seed is the unbounded side of this component: the incident face
+        // record with the most negative signed area. Each closed ring has one
+        // positive (bounded) and one negative (unbounded) cycle, and at the
+        // lexicographically smallest vertex both cycles touch one of the
+        // outgoing edges. Selecting by signed area is robust where the previous
+        // angular rule was not: `outgoing` is ordered [0..pi, pi..2pi], so for
+        // a leftmost vertex whose edges straddle the +x axis `.back()` is the
+        // lower-half-plane edge and its left side is the interior. Restricting
+        // candidates to this component also keeps touching components apart.
+        std::uint32_t seed = kNoFace;
+        double seed_area = 0.0;
+        for (const std::uint32_t h : outgoing[min_vertex]) {
+          const std::uint32_t sides[2] = {face_of[h],
+                                          face_of[arrangement.half_edges_[h].twin]};
+          for (const std::uint32_t candidate : sides) {
+            if (find_root(candidate) != root) continue;
+            const double area = arrangement.face_areas_[candidate];
+            if (seed == kNoFace || area < seed_area ||
+                (area == seed_area && candidate < seed)) {
+              seed = candidate;
+              seed_area = area;
+            }
+          }
+        }
+        seed_face[root] = seed;
         seed_vertex[root] = min_vertex;
         component_order.push_back(root);
       }

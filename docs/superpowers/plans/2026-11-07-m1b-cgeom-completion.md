@@ -1499,7 +1499,7 @@ git commit -m "test(m1b): add QA-1/QA-2/QA-4 gates and M1b exit evidence"
 - [x] `cmake -S . -B build -DGEOM_WERROR=ON -DGEOM_BUILD_BENCH=ON`
 - [x] `cmake --build build --config Debug` 与 `--config Release` 均 0 警告（`GEOM_WERROR=ON`）
 - [x] `ctest --test-dir build -C Debug --output-on-failure` 与 `-C Release` 全绿
-- [ ] `geom_bench_m1b`：QA-1 并集 ≤80 ms、面积相对误差 ≤1e-12；QA-4 构建 ≤350 ms、≥8 Mray/s/核（2026-11-07 实测 **FAIL**：QA-1 5.6–5.9 s / 9.981e-01；QA-4 构建 2.7–3.7 s、0.35–0.41 Mray/s；见 `docs/benchmarks/m1b.md`）
+- [ ] `geom_bench_m1b`：QA-1 并集 ≤80 ms、面积相对误差 ≤1e-12；QA-4 构建 ≤350 ms、≥8 Mray/s/核（2026-11-07 实测 **FAIL**：winding 播种修复后 QA-1 面积误差 1.783e-13 已通过，但并集 4.8–4.9 s；QA-4 构建 2.6–2.7 s、0.42–0.44 Mray/s；见 `docs/benchmarks/m1b.md`）
 - [ ] QA-2：`GEOM_TSAN=ON` 的 Linux/Clang 构建下 `ctest -R qa_concurrency` 无 TSan 报告（本地 MSVC 只跑一致性断言，通过；TSan 待 CI）
 - [ ] 覆盖率：`GEOM_COVERAGE=ON` + gcovr，`cgeom`/`index` 行 ≥90%、分支 ≥85%；diff 覆盖 100%（本地 MSVC 无 gcovr，待首次 CI `coverage` job 回填）
 - [x] `docs/benchmarks/m1b.md` 记录实测环境与数值

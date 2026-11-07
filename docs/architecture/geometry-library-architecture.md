@@ -1135,12 +1135,12 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
 - **M1b（代码与测试完成；验收未达成）**：`cdt2`、`triangulate2`、
   `arrangement2`/`boolean2`、KD 树与 BVH 的代码及性质/差分测试已完成；QA-2
   一致性测试与 `geom_bench_m1b` 已入库（实现取舍见 ADR-020）。**验收状态
-  （2026-11-07 实测，见 `docs/benchmarks/m1b.md`）**：QA-1 FAIL（并集
-  5.6–5.9 s vs 80 ms；面积相对误差 9.981e-01——并集对 5 万顶点星形返回空，
-  根因是 arrangement winding 播种缺陷）；QA-4 FAIL（构建 2.7–3.7 s vs 350 ms，
-  0.35–0.41 Mray/s vs 8）；QA-2 仅本地 MSVC 一致性断言通过，TSan 未运行（MSVC
-  不支持），故不声称 QA-2；覆盖率仍待 CI。因此不声称 M1b 验收完成，也不得据
-  §16.2 的 M1 行声称已达标。
+  （2026-11-07 实测，见 `docs/benchmarks/m1b.md`）**：QA-1 FAIL，仅为性能——
+  winding 播种修复后面积相对误差 1.783e-13（门禁 1e-12）已通过，但并集
+  4.8–4.9 s vs 80 ms；QA-4 FAIL（构建 2.6–2.7 s vs 350 ms，0.42–0.44 Mray/s
+  vs 8）；QA-2 仅本地 MSVC 一致性断言通过，TSan 未运行（MSVC 不支持），故不
+  声称 QA-2；覆盖率仍待 CI。因此不声称 M1b 验收完成，也不得据 §16.2 的 M1 行
+  声称已达标。
 
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于 `Affine::inverse`
 这类可失败构造；谓词之外无全局 epsilon。
