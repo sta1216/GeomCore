@@ -102,8 +102,8 @@ inline void split_add_param(std::vector<SplitParam>& params, long double t,
 }
 
 // Exact orientation determinant det = cross(b - a, c - a), evaluated as an
-// Expansion. The caller passes a power-of-two-scaled frame so the products stay
-// in range; the sign of this determinant is exact in that frame.
+// Expansion. The same routine is used both on the original coordinates and on
+// a power-of-two-scaled frame; scaling preserves the exact sign.
 inline Expansion split_orient_det(double ax, double ay, double bx, double by,
                                   double cx, double cy) {
   const Expansion acx = Expansion::difference(ax, cx);
@@ -126,14 +126,78 @@ inline long double split_exp_to_long_double(const Expansion& e) noexcept {
   return v;
 }
 
-// Clamp an intersection parameter. A non-finite value must not drop the pair
-// (the pair was already classified exactly); +-inf clamps to the nearer end.
-// NaN carries no direction information, so it is split in the middle.
+// True when every component of e is finite. An unscaled product can overflow to
+// inf (or produce NaN through inf - inf), in which case that frame must be
+// discarded and the scaled retry used instead.
+inline bool split_exp_finite(const Expansion& e) noexcept {
+  for (std::size_t i = 0; i < e.size(); ++i) {
+    if (!std::isfinite(static_cast<long double>(e[i]))) return false;
+  }
+  return true;
+}
+
+// Computes t = O3/(O3 - O4) and u = O1/(O1 - O2) from the four exact
+// orientation determinants. Returns false when the frame overflowed or a
+// determinant that must be nonzero for a proper crossing underflowed to zero;
+// the caller then retries in the scaled frame.
+inline bool split_exact_params(const Expansion& det1, const Expansion& det2,
+                               const Expansion& det3, const Expansion& det4,
+                               long double& t, long double& u) {
+  if (!split_exp_finite(det1) || !split_exp_finite(det2) || !split_exp_finite(det3) ||
+      !split_exp_finite(det4)) {
+    return false;
+  }
+  Expansion denom_t = det3;
+  denom_t.add_scaled(det4, -1.0);
+  Expansion denom_u = det1;
+  denom_u.add_scaled(det2, -1.0);
+  if (!split_exp_finite(denom_t) || !split_exp_finite(denom_u)) return false;
+
+  const long double o1 = split_exp_to_long_double(det1);
+  const long double o2 = split_exp_to_long_double(det2);
+  const long double o3 = split_exp_to_long_double(det3);
+  const long double o4 = split_exp_to_long_double(det4);
+  const long double denom_t_ld = split_exp_to_long_double(denom_t);
+  const long double denom_u_ld = split_exp_to_long_double(denom_u);
+  if (!std::isfinite(o1) || !std::isfinite(o2) || !std::isfinite(o3) ||
+      !std::isfinite(o4) || !std::isfinite(denom_t_ld) || !std::isfinite(denom_u_ld)) {
+    return false;
+  }
+  // For a proper crossing all four signs are strict, so a zero here means the
+  // frame lost information (underflow), not a degenerate configuration.
+  if (o1 == 0.0L || o2 == 0.0L || o3 == 0.0L || o4 == 0.0L ||
+      denom_t_ld == 0.0L || denom_u_ld == 0.0L) {
+    return false;
+  }
+  const long double tt = o3 / denom_t_ld;
+  const long double uu = o1 / denom_u_ld;
+  if (!std::isfinite(tt) || !std::isfinite(uu)) return false;
+  t = tt;
+  u = uu;
+  return true;
+}
+
+// Clamp a finite intersection parameter. Non-finite values are rejected by
+// split_exact_params before reaching this point, so NaN here is a defensive
+// fallback to the start endpoint, never a silent 0.5 midpoint.
 inline long double split_clamp_parameter(long double t) noexcept {
-  if (std::isnan(t)) return 0.5L;
+  if (std::isnan(t)) return 0.0L;
   if (t <= 0.0L) return 0.0L;
   if (t >= 1.0L) return 1.0L;
   return t;
+}
+
+// Point at parameter t on ab. Endpoints are returned exactly; the interior is
+// evaluated as a convex combination, which stays finite for finite endpoints
+// even when b - a would overflow.
+inline Point2d split_point_at(const Point2d& a, const Point2d& b, long double t) noexcept {
+  if (t <= 0.0L) return a;
+  if (t >= 1.0L) return b;
+  const long double omt = 1.0L - t;
+  return Point2d{static_cast<double>(omt * static_cast<long double>(a[0]) +
+                                     t * static_cast<long double>(b[0])),
+                 static_cast<double>(omt * static_cast<long double>(a[1]) +
+                                     t * static_cast<long double>(b[1]))};
 }
 
 // |cross(b - a, p - a)| / |b - a|, evaluated in long double with both the
@@ -169,16 +233,28 @@ inline long double split_perp_distance(const Point2d& p, const Point2d& a,
   return distance;
 }
 
-inline void split_update_residual(long double& max_residual, const Point2d& p,
-                                  const Point2d& a, const Point2d& b,
-                                  const Point2d& c, const Point2d& d) noexcept {
+// Worst perpendicular distance from p to the two supporting lines, in the same
+// normalized units as split_perp_distance. A non-finite distance is returned as
+// infinity so the caller can mark the split point as not representable.
+inline long double split_contact_error(const Point2d& p, const Point2d& a,
+                                       const Point2d& b, const Point2d& c,
+                                       const Point2d& d) noexcept {
   const long double to_ab = split_perp_distance(p, a, b);
   const long double to_cd = split_perp_distance(p, c, d);
   if (!std::isfinite(to_ab) || !std::isfinite(to_cd)) {
+    return std::numeric_limits<long double>::infinity();
+  }
+  return to_ab > to_cd ? to_ab : to_cd;
+}
+
+inline void split_update_residual(long double& max_residual, const Point2d& p,
+                                  const Point2d& a, const Point2d& b,
+                                  const Point2d& c, const Point2d& d) noexcept {
+  const long double worst = split_contact_error(p, a, b, c, d);
+  if (!std::isfinite(worst)) {
     max_residual = std::numeric_limits<long double>::infinity();
     return;
   }
-  const long double worst = to_ab > to_cd ? to_ab : to_cd;
   if (worst > max_residual) max_residual = worst;
 }
 
@@ -231,75 +307,70 @@ inline bool split_record_pair(const SplitInput& sa, std::vector<SplitParam>& pa,
 
   // Proper crossing: each segment's endpoints lie strictly on opposite sides
   // of the other segment. The classification above is exact, so this branch
-  // must never be vetoed by a floating-point denominator test. Instead the
-  // parameters are ratios of exact orientation determinants evaluated in a
-  // per-pair power-of-two frame: scaling by 2^k is exact, preserves signs, and
-  // keeps both the near-parallel (2^60 products cancelling to 2) and the
-  // 1e+-200 uniform-scale cases representable.
+  // must never be vetoed by a floating-point denominator test. Parameters are
+  // ratios of exact orientation determinants, evaluated in the unscaled frame
+  // first; a mixed-span pair (for example 2e200 and 1e-160) is exact there even
+  // though a single globally scaled frame would collapse the tiny coordinate to
+  // zero. Only when the unscaled products overflow/underflow is the 2^k-scaled
+  // frame retried. If neither frame is usable, the split point is not
+  // representable: the pair is still recorded, the split degenerates to the
+  // start endpoint, and max_residual becomes +infinity so the failure is
+  // visible instead of silently bending the geometry.
   if (((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) &&
       ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) {
-    const double max_coord = std::max({std::fabs(a[0]), std::fabs(a[1]), std::fabs(b[0]),
-                                       std::fabs(b[1]), std::fabs(c[0]), std::fabs(c[1]),
-                                       std::fabs(d[0]), std::fabs(d[1])});
-    const int shift =
-        (max_coord > 0.0 && std::isfinite(max_coord)) ? -std::ilogb(max_coord) : 0;
-    const double sax = std::scalbn(a[0], shift);
-    const double say = std::scalbn(a[1], shift);
-    const double sbx = std::scalbn(b[0], shift);
-    const double sby = std::scalbn(b[1], shift);
-    const double scx = std::scalbn(c[0], shift);
-    const double scy = std::scalbn(c[1], shift);
-    const double sdx = std::scalbn(d[0], shift);
-    const double sdy = std::scalbn(d[1], shift);
+    const Expansion det1 =
+        split_orient_det(a[0], a[1], b[0], b[1], c[0], c[1]);
+    const Expansion det2 =
+        split_orient_det(a[0], a[1], b[0], b[1], d[0], d[1]);
+    const Expansion det3 =
+        split_orient_det(c[0], c[1], d[0], d[1], a[0], a[1]);
+    const Expansion det4 =
+        split_orient_det(c[0], c[1], d[0], d[1], b[0], b[1]);
 
-    const Expansion det1 = split_orient_det(sax, say, sbx, sby, scx, scy);
-    const Expansion det2 = split_orient_det(sax, say, sbx, sby, sdx, sdy);
-    const Expansion det3 = split_orient_det(scx, scy, sdx, sdy, sax, say);
-    const Expansion det4 = split_orient_det(scx, scy, sdx, sdy, sbx, sby);
+    long double t = 0.0L;
+    long double u = 0.0L;
+    bool have_params = split_exact_params(det1, det2, det3, det4, t, u);
+    if (!have_params) {
+      const double max_coord = std::max(
+          {std::fabs(a[0]), std::fabs(a[1]), std::fabs(b[0]), std::fabs(b[1]),
+           std::fabs(c[0]), std::fabs(c[1]), std::fabs(d[0]), std::fabs(d[1])});
+      const int shift =
+          (max_coord > 0.0 && std::isfinite(max_coord)) ? -std::ilogb(max_coord) : 0;
+      const double sax = std::scalbn(a[0], shift);
+      const double say = std::scalbn(a[1], shift);
+      const double sbx = std::scalbn(b[0], shift);
+      const double sby = std::scalbn(b[1], shift);
+      const double scx = std::scalbn(c[0], shift);
+      const double scy = std::scalbn(c[1], shift);
+      const double sdx = std::scalbn(d[0], shift);
+      const double sdy = std::scalbn(d[1], shift);
 
-    // t = O3 / (O3 - O4), u = O1 / (O1 - O2). For a proper crossing the two
-    // terms in each denominator have opposite signs, so the denominator is a
-    // sum of magnitudes and the exact difference is evaluated as an Expansion
-    // before the conversion.
-    Expansion denom_t = det3;
-    denom_t.add_scaled(det4, -1.0);
-    Expansion denom_u = det1;
-    denom_u.add_scaled(det2, -1.0);
+      const Expansion sdet1 = split_orient_det(sax, say, sbx, sby, scx, scy);
+      const Expansion sdet2 = split_orient_det(sax, say, sbx, sby, sdx, sdy);
+      const Expansion sdet3 = split_orient_det(scx, scy, sdx, sdy, sax, say);
+      const Expansion sdet4 = split_orient_det(scx, scy, sdx, sdy, sbx, sby);
+      have_params = split_exact_params(sdet1, sdet2, sdet3, sdet4, t, u);
+    }
 
-    const long double o1_ld = split_exp_to_long_double(det1);
-    const long double o3_ld = split_exp_to_long_double(det3);
-    const long double denom_t_ld = split_exp_to_long_double(denom_t);
-    const long double denom_u_ld = split_exp_to_long_double(denom_u);
-
-    long double t = 0.5L;
-    long double u = 0.5L;
-    if (denom_t_ld != 0.0L && o3_ld != 0.0L) t = o3_ld / denom_t_ld;
-    if (denom_u_ld != 0.0L && o1_ld != 0.0L) u = o1_ld / denom_u_ld;
+    if (!have_params) {
+      // No representable split point: keep both input segments unsplit (the
+      // caller still records the pair) and make the failure visible.
+      max_residual = std::numeric_limits<long double>::infinity();
+      return true;
+    }
     t = split_clamp_parameter(t);
     u = split_clamp_parameter(u);
 
-    // Reuse the exact coordinate of an existing endpoint whenever the
-    // intersection degenerates onto one; otherwise evaluate the convex
-    // combination (1 - t) * a + t * b, which cannot overflow when the endpoint
-    // coordinates are finite even if b - a would.
-    const long double ax = static_cast<long double>(a[0]);
-    const long double ay = static_cast<long double>(a[1]);
-    const long double bx = static_cast<long double>(b[0]);
-    const long double by = static_cast<long double>(b[1]);
-    Point2d contact;
-    if (t <= 0.0L) {
-      contact = a;
-    } else if (t >= 1.0L) {
-      contact = b;
-    } else if (u <= 0.0L) {
-      contact = c;
-    } else if (u >= 1.0L) {
-      contact = d;
-    } else {
-      const long double omt = 1.0L - t;
-      contact = Point2d{static_cast<double>(omt * ax + t * bx),
-                        static_cast<double>(omt * ay + t * by)};
-    }
+    // Evaluate the contact from both parameterizations and keep the candidate
+    // closer to both supporting lines. One of them is exact whenever the
+    // intersection is representable (for example the 2e200 x 1e-160 case is
+    // exact on the short segment but rounded on the long one).
+    const Point2d contact_a = split_point_at(a, b, t);
+    const Point2d contact_b = split_point_at(c, d, u);
+    const long double error_a = split_contact_error(contact_a, a, b, c, d);
+    const long double error_b = split_contact_error(contact_b, a, b, c, d);
+    const Point2d contact = error_b < error_a ? contact_b : contact_a;
+
     split_add_param(pa, t, contact);
     split_add_param(pb, u, contact);
     split_update_residual(max_residual, contact, a, b, c, d);
@@ -347,7 +418,14 @@ inline bool split_record_pair(const SplitInput& sa, std::vector<SplitParam>& pa,
 // Candidate pairs come from a min-x sweep with an active set; the exact
 // classification uses sign_orient2d, so disjoint and exact endpoint cases never
 // depend on a tolerance. Proper-crossing parameters are exact determinant
-// ratios evaluated in a power-of-two-scaled frame, then clamped to [0, 1].
+// ratios, evaluated in the unscaled frame first and retried in a 2^k-scaled
+// frame only if the unscaled products overflow/underflow; they are then clamped
+// to [0, 1]. The supported span is the double exponent range: differences and
+// products are formed exactly as Expansions, so mixed spans such as 2e200 and
+// 1e-160 are handled. If neither frame can represent the ratios, the pair is
+// still recorded, the split degenerates to the segment start, and
+// `max_residual` is +infinity ("split point not representable") rather than
+// silently emitting non-collinear pieces.
 // The function throws no exceptions of its own (standard allocation failures
 // may still propagate).
 inline detail::SplitResult split_segments(std::span<const ArrangementSegment> segments) {

@@ -46,6 +46,33 @@ void check_pairs_sorted(const SplitResult& r) {
   }
 }
 
+// Parameter of p on ab, using the dominant axis so huge and tiny mixed spans
+// do not overflow or underflow the test helper itself.
+long double parameter_on(const Point2d& p, const Point2d& a, const Point2d& b) {
+  const long double dx = static_cast<long double>(b[0]) - static_cast<long double>(a[0]);
+  const long double dy = static_cast<long double>(b[1]) - static_cast<long double>(a[1]);
+  if (std::fabs(dx) >= std::fabs(dy)) {
+    return (static_cast<long double>(p[0]) - static_cast<long double>(a[0])) / dx;
+  }
+  return (static_cast<long double>(p[1]) - static_cast<long double>(a[1])) / dy;
+}
+
+// Sine of the angle between p - a and b - a: zero when p is exactly on the
+// supporting line, independent of the coordinate scale.
+long double collinear_sine(const Point2d& p, const Point2d& a, const Point2d& b) {
+  const long double dx = static_cast<long double>(b[0]) - static_cast<long double>(a[0]);
+  const long double dy = static_cast<long double>(b[1]) - static_cast<long double>(a[1]);
+  const long double dm = std::max(std::fabs(dx), std::fabs(dy));
+  if (!(dm > 0.0L)) return std::numeric_limits<long double>::infinity();
+  const long double ux = dx / dm;
+  const long double uy = dy / dm;
+  const long double px = static_cast<long double>(p[0]) - static_cast<long double>(a[0]);
+  const long double py = static_cast<long double>(p[1]) - static_cast<long double>(a[1]);
+  const long double pm = std::max(std::fabs(px), std::fabs(py));
+  if (pm == 0.0L) return 0.0L;
+  return std::fabs(ux * (py / pm) - uy * (px / pm));
+}
+
 }  // namespace
 
 TEST_CASE("split: crossing X splits both segments") {
@@ -93,6 +120,7 @@ TEST_CASE("split: triple point and duplicate segments") {
   const SplitResult r = split_segments(triple);
   CHECK(r.segments.size() == 6);
   CHECK(r.input_pairs.size() == 3);
+  check_pairs_sorted(r);
 
   const ArrangementSegment dup[2] = {
       {Point2d{0, 0}, Point2d{1, 0}, 0},
@@ -149,11 +177,12 @@ TEST_CASE("split: near-parallel crossing uses exact determinants") {
 }
 
 TEST_CASE("split: residual captures an off-line contact") {
-  // A long segment crossed by a vertical one at a coordinate where double
-  // rounding moves the contact off the vertical supporting line.
+  // A long segment crossed by a vertical one at a coordinate where neither
+  // parameterization lands exactly on the other supporting line: the exact
+  // intersection has a y offset that double cannot represent at this scale.
   const ArrangementSegment segs[2] = {
-      {Point2d{0, 0}, Point2d{2.0e15, 2.0e15 + 1.0}, 0},
-      {Point2d{1.0e15 + 0.125, 0}, Point2d{1.0e15 + 0.125, 2.0e15}, 1},
+      {Point2d{0, 0}, Point2d{2.0e15, 2.0e15 + 0.25}, 0},
+      {Point2d{3.0e14, 0}, Point2d{3.0e14, 2.0e15}, 1},
   };
   const SplitResult r = split_segments(segs);
   REQUIRE(r.segments.size() == 4);
@@ -166,6 +195,79 @@ TEST_CASE("split: residual captures an off-line contact") {
   for (const Point2d& p : splits) {
     CHECK(perpendicular_distance(p, segs[0].a, segs[0].b) <= r.max_residual + 1e-12);
     CHECK(perpendicular_distance(p, segs[1].a, segs[1].b) <= r.max_residual + 1e-12);
+  }
+}
+
+TEST_CASE("split: mixed-span 2e200 x 1e-160 uses the unscaled frame") {
+  // A global 2^-e frame collapses the 1e-160 offset to zero and used to fall
+  // back to t = u = 0.5, bending seg1 to (5e199, 0) and giving t = 0.5.
+  const ArrangementSegment segs[2] = {
+      {Point2d{-1e200, 0}, Point2d{2e200, 0}, 0},
+      {Point2d{1e200, -1e-160}, Point2d{1e200, 1e-160}, 1},
+  };
+  const SplitResult r = split_segments(segs);
+  REQUIRE(r.segments.size() == 4);
+  REQUIRE(r.input_pairs.size() == 1);
+  CHECK(r.input_pairs[0] == std::make_pair(0u, 1u));
+  check_pairs_sorted(r);
+  CHECK(r.max_residual == 0.0);
+
+  const Point2d contact = r.segments[0].b;
+  CHECK(std::fabs(parameter_on(contact, segs[0].a, segs[0].b) - 2.0L / 3.0L) <= 1e-9L);
+  CHECK(std::fabs(parameter_on(contact, segs[1].a, segs[1].b) - 0.5L) <= 1e-9L);
+  for (const auto& piece : r.segments) {
+    const ArrangementSegment& in = piece.source == 0 ? segs[0] : segs[1];
+    CHECK(collinear_sine(piece.a, in.a, in.b) <= 1e-12L);
+    CHECK(collinear_sine(piece.b, in.a, in.b) <= 1e-12L);
+  }
+}
+
+TEST_CASE("split: mixed-span 1e-160 x 1e200 uses the unscaled frame") {
+  // The dual span: the global frame collapses to a zero-length seg1 and used
+  // to return contact (0, 0) with t = 0.5 and max_residual = 0.
+  const ArrangementSegment segs[2] = {
+      {Point2d{-1e-160, 0}, Point2d{1e-160, 0}, 0},
+      {Point2d{0.4e-160, -1e200}, Point2d{0.4e-160, 1e200}, 1},
+  };
+  const SplitResult r = split_segments(segs);
+  REQUIRE(r.segments.size() == 4);
+  REQUIRE(r.input_pairs.size() == 1);
+  CHECK(r.input_pairs[0] == std::make_pair(0u, 1u));
+  check_pairs_sorted(r);
+  CHECK(r.max_residual == 0.0);
+
+  const Point2d contact = r.segments[0].b;
+  CHECK(std::fabs(parameter_on(contact, segs[0].a, segs[0].b) - 0.7L) <= 1e-9L);
+  CHECK(std::fabs(parameter_on(contact, segs[1].a, segs[1].b) - 0.5L) <= 1e-9L);
+  for (const auto& piece : r.segments) {
+    const ArrangementSegment& in = piece.source == 0 ? segs[0] : segs[1];
+    CHECK(collinear_sine(piece.a, in.a, in.b) <= 1e-12L);
+    CHECK(collinear_sine(piece.b, in.a, in.b) <= 1e-12L);
+  }
+}
+
+TEST_CASE("split: near-limit 1e307 crossing uses the scaled fallback") {
+  // The unscaled products are ~1e614 and overflow, while the 2^k frame keeps
+  // the ratios representable. This exercises the fallback path, not the error
+  // path, and must still emit four collinear pieces.
+  const ArrangementSegment segs[2] = {
+      {Point2d{-1e307, 0}, Point2d{1e307, 0}, 0},
+      {Point2d{0, -1e307}, Point2d{0, 1e307}, 1},
+  };
+  const SplitResult r = split_segments(segs);
+  REQUIRE(r.segments.size() == 4);
+  REQUIRE(r.input_pairs.size() == 1);
+  CHECK(r.input_pairs[0] == std::make_pair(0u, 1u));
+  check_pairs_sorted(r);
+  CHECK(r.max_residual == 0.0);
+
+  const Point2d contact = r.segments[0].b;
+  CHECK(contact[0] == 0.0);
+  CHECK(contact[1] == 0.0);
+  for (const auto& piece : r.segments) {
+    const ArrangementSegment& in = piece.source == 0 ? segs[0] : segs[1];
+    CHECK(collinear_sine(piece.a, in.a, in.b) <= 1e-12L);
+    CHECK(collinear_sine(piece.b, in.a, in.b) <= 1e-12L);
   }
 }
 
