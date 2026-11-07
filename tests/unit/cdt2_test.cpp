@@ -41,6 +41,21 @@ int edge_use(const std::vector<std::array<std::uint32_t, 3>>& tris,
   return n;
 }
 
+// Deterministic general-position 6x6 grid. The rows are only slightly
+// perturbed, so a long chord such as 0-4 crosses several interior edges.
+std::vector<Point2d> perturbed_grid(int n) {
+  std::vector<Point2d> pts;
+  pts.reserve(static_cast<std::size_t>(n) * static_cast<std::size_t>(n));
+  for (int y = 0; y < n; ++y) {
+    for (int x = 0; x < n; ++x) {
+      const int i = y * n + x;
+      pts.push_back(Point2d{static_cast<double>(x) + 0.031 * std::sin(1.0 + 0.37 * i),
+                            static_cast<double>(y) + 0.029 * std::cos(0.5 + 0.53 * i)});
+    }
+  }
+  return pts;
+}
+
 }  // namespace
 
 TEST_CASE("cdt2: recovers either diagonal of a convex quadrilateral") {
@@ -190,4 +205,84 @@ TEST_CASE("cdt2: output is a manifold triangulation (Euler and edge use)") {
   // V - E + F = 2 with F = T + 1 for a triangulation of a disk.
   CHECK(undirected_use.size() == pts.size() + tris.size() - 1);
   CHECK(3 * tris.size() == 2 * undirected_use.size() - hull_edges);
+}
+
+// Constraint {0,4} is not a base Delaunay edge on this 6x6 grid, so recovery
+// must delete the crossed cavity and retriangulate it. This failed with
+// numeric_failure while the walk could step back across its entry edge.
+TEST_CASE("cdt2: recovers a multi-triangle constraint chord") {
+  const std::vector<Point2d> pts = perturbed_grid(6);
+  const CdtConstraint cs[1] = {{0, 4}};
+  auto r = cdt2(pts, cs);
+  REQUIRE(r.has_value());
+  const auto& tris = r.value().triangles;
+  CHECK(edge_use(tris, 0, 4) == 2);
+
+  std::unordered_map<std::uint64_t, int> directed;
+  for (const auto& t : tris) {
+    for (int e = 0; e < 3; ++e) {
+      const std::uint32_t a = t[e], b = t[(e + 1) % 3];
+      ++directed[(static_cast<std::uint64_t>(a) << 32) | b];
+    }
+  }
+  CHECK(directed[(static_cast<std::uint64_t>(0) << 32) | 4] == 1);
+  CHECK(directed[(static_cast<std::uint64_t>(4) << 32) | 0] == 1);
+  for (const auto& [key, count] : directed) {
+    (void)key;
+    CHECK(count == 1);
+  }
+}
+
+// Non-vacuous Delaunay check: the constraint above really did cross edges, so
+// every unconstrained interior edge must still be locally Delaunay after the
+// restore pass. A skipped restore leaves illegal edges here (this chord's
+// ear-clipped cavity is not Delaunay, unlike the short 0-4 chord).
+TEST_CASE("cdt2: constrained triangulation stays Delaunay away from constraints") {
+  const std::vector<Point2d> pts = perturbed_grid(6);
+  const CdtConstraint cs[1] = {{31, 35}};
+  auto r = cdt2(pts, cs);
+  REQUIRE(r.has_value());
+  const auto& tris = r.value().triangles;
+  CHECK(has_edge(tris, 31, 35));
+
+  std::size_t checked = 0;
+  for (const auto& t : tris) {
+    for (int e = 0; e < 3; ++e) {
+      const std::uint32_t a = t[e], b = t[(e + 1) % 3], c = t[(e + 2) % 3];
+      if (a > b) continue;  // each undirected edge once
+      if ((a == 31 && b == 35) || (a == 35 && b == 31)) continue;
+      std::uint32_t d = 0xFFFFFFFFu;
+      for (const auto& u : tris) {
+        for (int k = 0; k < 3; ++k) {
+          if (u[k] == b && u[(k + 1) % 3] == a) d = u[(k + 2) % 3];
+        }
+      }
+      if (d == 0xFFFFFFFFu) continue;  // hull edge
+      ++checked;
+      CHECK(geom::v1::sign_incircle(pts[a][0], pts[a][1], pts[b][0], pts[b][1],
+                                    pts[c][0], pts[c][1], pts[d][0], pts[d][1]) <= 0);
+    }
+  }
+  CHECK(checked > 0);
+}
+
+TEST_CASE("cdt2: duplicate coordinates map to the surviving representative") {
+  const std::vector<Point2d> pts{{0, 0}, {2, 0}, {0, 2}, {0, 0}};  // 3 duplicates 0
+  const CdtConstraint same[1] = {{0, 3}};
+  auto bad = cdt2(pts, same);
+  REQUIRE(!bad.has_value());
+  CHECK(bad.error().code == Errc::degenerate);
+
+  const CdtConstraint mapped[1] = {{3, 1}};
+  auto ok = cdt2(pts, mapped);
+  REQUIRE(ok.has_value());
+  CHECK(has_edge(ok.value().triangles, 0, 1));
+}
+
+TEST_CASE("cdt2: rejects exponent spans beyond the accepted range") {
+  const std::vector<Point2d> pts{{0.0, 0.0}, {1e200, 0.0}, {0.0, 1e-200}};
+  const std::vector<CdtConstraint> none;
+  auto r = cdt2(pts, none);
+  REQUIRE(!r.has_value());
+  CHECK(r.error().code == Errc::unsupported);
 }

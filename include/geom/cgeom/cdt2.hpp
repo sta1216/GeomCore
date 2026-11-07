@@ -213,7 +213,11 @@ inline bool cdt_recover(std::vector<CdtTri>& tris, std::span<const Point2d> p,
       break;
     }
     // The segment leaves the current triangle through the unique edge that it
-    // properly crosses. Edges incident to `a` are never crossed.
+    // properly crosses. Edges incident to `a` are never crossed. Requiring
+    // o3 > 0 and o4 < 0 selects the exit edge: `a` lies strictly on the
+    // triangle's interior side of it and `b` strictly beyond it. Without the
+    // side signs the just-entered edge (a outside, b inside) also passes the
+    // opposition test, so the walk could step back and oscillate.
     std::uint32_t nxt = 0xFFFFFFFFu;
     for (int e = 0; e < 3; ++e) {
       const std::uint32_t u = tris[cur].v[e];
@@ -224,7 +228,7 @@ inline bool cdt_recover(std::vector<CdtTri>& tris, std::span<const Point2d> p,
       const int o3 = sign_orient2d(p[u][0], p[u][1], p[w][0], p[w][1], p[a][0], p[a][1]);
       const int o4 = sign_orient2d(p[u][0], p[u][1], p[w][0], p[w][1], p[b][0], p[b][1]);
       if (o1 == 0 || o2 == 0 || o3 == 0 || o4 == 0) continue;
-      if (!((o1 > 0) != (o2 > 0)) || !((o3 > 0) != (o4 > 0))) continue;
+      if (!((o1 > 0) != (o2 > 0)) || o3 <= 0 || o4 >= 0) continue;
       const auto it = owner.find(cdt_directed(w, u));
       if (it == owner.end()) return false;
       nxt = it->second;
