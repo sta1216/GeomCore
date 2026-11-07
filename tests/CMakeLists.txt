@@ -40,6 +40,7 @@ set(GEOM_TEST_SOURCES
   unit/coverage_gaps_test.cpp
   unit/polygon2_test.cpp
   unit/kdtree_test.cpp
+  unit/triangulate2_test.cpp
 )
 
 list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)
