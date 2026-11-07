@@ -27,6 +27,15 @@ if(GEOM_COVERAGE)
   target_link_options(geom_warnings INTERFACE --coverage)
 endif()
 
+option(GEOM_TSAN "Build with ThreadSanitizer (GCC/Clang)" OFF)
+if(GEOM_TSAN)
+  if(MSVC)
+    message(FATAL_ERROR "GEOM_TSAN requires GCC or Clang")
+  endif()
+  target_compile_options(geom_warnings INTERFACE -fsanitize=thread -g)
+  target_link_options(geom_warnings INTERFACE -fsanitize=thread)
+endif()
+
 add_library(geom_core INTERFACE)
 add_library(GeomCore::core ALIAS geom_core)
 target_include_directories(geom_core INTERFACE
@@ -72,4 +81,7 @@ endif()
 if(GEOM_BUILD_BENCH)
   add_executable(geom_bench_predicates bench/bench_predicates.cpp)
   target_link_libraries(geom_bench_predicates PRIVATE geom_core)
+
+  add_executable(geom_bench_m1b bench/bench_m1b.cpp)
+  target_link_libraries(geom_bench_m1b PRIVATE geom_core)
 endif()

@@ -1132,9 +1132,15 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
   验证。对应实施计划 T11–T14。**覆盖率尚未在 CI 运行**：本地为 MSVC,无法产出
   gcovr 数据,`docs/benchmarks/m1.md` 只记录了门禁定义,实际百分比待首次 CI
   `coverage` job 通过后回填;在回填前不声称 M1a 验收完成。
-- **M1b（延期，未声称）**：CDT、多边形三角剖分、多边形布尔、KD 树，以及
-  QA-1（10 万顶点布尔）、QA-2（4 线程 TSan）、QA-4（100 万三角形 BVH 预算）。
-  这些能力进入 M2 前置计划，不得据 §16.2 的 M1 行声称已达标。
+- **M1b（代码与测试完成；验收未达成）**：`cdt2`、`triangulate2`、
+  `arrangement2`/`boolean2`、KD 树与 BVH 的代码及性质/差分测试已完成；QA-2
+  一致性测试与 `geom_bench_m1b` 已入库（实现取舍见 ADR-020）。**验收状态
+  （2026-11-07 实测，见 `docs/benchmarks/m1b.md`）**：QA-1 FAIL（并集
+  5.6–5.9 s vs 80 ms；面积相对误差 9.981e-01——并集对 5 万顶点星形返回空，
+  根因是 arrangement winding 播种缺陷）；QA-4 FAIL（构建 2.7–3.7 s vs 350 ms，
+  0.35–0.41 Mray/s vs 8）；QA-2 仅本地 MSVC 一致性断言通过，TSan 未运行（MSVC
+  不支持），故不声称 QA-2；覆盖率仍待 CI。因此不声称 M1b 验收完成，也不得据
+  §16.2 的 M1 行声称已达标。
 
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于 `Affine::inverse`
 这类可失败构造；谓词之外无全局 epsilon。
@@ -1241,6 +1247,7 @@ ai_geometry/
 | 017 | 网格化是 B-rep 与网格世界的唯一契约（水密 / 偏差 / 共享边采样） | 提议 |
 | 018 | 内核只提供建模算子；特征树/历史、STEP/IGES、装配约束不做 | 提议 |
 | 019 | B-rep 存储：扁平数组 + 代际 handle + arena 几何 + 属性稀疏表 | 提议 |
+| 020 | M1b arrangement/三角剖分取舍：桥接+耳切、x 排序宽相位、`input_pairs` 自交判定 | 接受 |
 
 ### E. 需产品侧确认的决策（不阻塞架构）
 
