@@ -41,6 +41,7 @@ set(GEOM_TEST_SOURCES
   unit/polygon2_test.cpp
   unit/kdtree_test.cpp
   unit/triangulate2_test.cpp
+  unit/arrangement2_test.cpp
 )
 
 list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)
