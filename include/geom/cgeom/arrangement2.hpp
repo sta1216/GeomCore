@@ -226,16 +226,22 @@ inline bool split_exact_params(const Expansion& det1, const Expansion& det2,
   const long double tt = o3 / denom_t_ld;
   const long double uu = o1 / denom_u_ld;
   if (!std::isfinite(tt) || !std::isfinite(uu)) return false;
+  // Materialize the parameters as double so the decision does not depend on the
+  // width of long double (80-bit on Linux, 64-bit on MSVC/macOS).
+  const double t_double = static_cast<double>(tt);
+  const double u_double = static_cast<double>(uu);
+  if (!std::isfinite(t_double) || !std::isfinite(u_double)) return false;
   // The signs are strict for a proper crossing, so both ratios are strictly
-  // inside (0, 1). A ratio that rounds to an endpoint is not representable in
-  // this frame: emitting it would add the contact at t = 0 or t = 1, where the
-  // t-only dedupe drops it and leaves the other segment's vertex on this
-  // segment's interior without a split. Report the frame as unusable instead;
-  // the caller then retries scaled, and finally leaves both inputs unsplit with
-  // max_residual = +infinity rather than silently losing the vertex.
-  if (tt <= 0.0L || tt >= 1.0L || uu <= 0.0L || uu >= 1.0L) return false;
-  t = tt;
-  u = uu;
+  // inside (0, 1). A ratio that rounds to an endpoint (or underflows to zero in
+  // double) is not representable: emitting it would add the contact at t = 0 or
+  // t = 1, where the t-only dedupe drops it and leaves the other segment's
+  // vertex on this segment's interior without a split. Report the frame as
+  // unusable instead; the caller then retries scaled, and finally leaves both
+  // inputs unsplit with max_residual = +infinity rather than silently losing
+  // the vertex.
+  if (t_double <= 0.0 || t_double >= 1.0 || u_double <= 0.0 || u_double >= 1.0) return false;
+  t = t_double;
+  u = u_double;
   return true;
 }
 
@@ -510,11 +516,12 @@ inline bool split_record_pair(const SplitInput& sa, std::vector<SplitParam>& pa,
 // to [0, 1]. The supported domain is finite coordinates whose input exponent
 // span is at most detail::kMaxSpan (1314). Within it, differences and products
 // are formed exactly as Expansions, so mixed spans such as 2e200 and 1e-160 are
-// handled. A crossing whose exact ratio is still not representable (for example
-// 1e-360, below the long double range) records the pair but leaves both input
-// segments unsplit and sets `max_residual` to +infinity ("split point not
-// representable") rather than silently emitting a wrong split. Inputs beyond
-// the span are outside the contract.
+// handled. Parameters are materialized as double regardless of the width of
+// long double, so a ratio such as 1e-360 that underflows to zero is treated the
+// same on every platform: the pair is recorded but both inputs stay unsplit and
+// `max_residual` is set to +infinity ("split point not representable") rather
+// than silently emitting a wrong split. Inputs beyond the span are outside the
+// contract.
 // The function throws no exceptions of its own (standard allocation failures
 // may still propagate).
 inline detail::SplitResult split_segments(std::span<const ArrangementSegment> segments) {

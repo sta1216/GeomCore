@@ -162,12 +162,13 @@ class Bvh {
     const Vec3d inv{inverse_dir(ray.dir[0]), inverse_dir(ray.dir[1]), inverse_dir(ray.dir[2])};
     std::array<std::int32_t, 128> stack{};
     int sp = 0;
-    stack[sp++] = 0;
+    stack[static_cast<std::size_t>(sp++)] = 0;
     bool found = false;
     double best = tmax;
     std::uint32_t best_prim = 0;
     while (sp > 0) {
-      const Node& n = nodes_[static_cast<std::size_t>(stack[--sp])];
+      const std::size_t level = static_cast<std::size_t>(--sp);
+      const Node& n = nodes_[static_cast<std::size_t>(stack[level])];
       if (!slab(n.box, ray, inv, best)) continue;
       if (n.count > 0) {
         for (std::uint32_t i = n.first; i < n.first + n.count; ++i) {
@@ -184,8 +185,8 @@ class Bvh {
           }
         }
       } else {
-        stack[sp++] = n.left;
-        stack[sp++] = n.right;
+        stack[static_cast<std::size_t>(sp++)] = n.left;
+        stack[static_cast<std::size_t>(sp++)] = n.right;
       }
     }
     if (found) {
@@ -208,11 +209,12 @@ class Bvh {
     }
     std::array<std::int32_t, 128> stack{};
     int sp = 0;
-    stack[sp++] = 0;
+    stack[static_cast<std::size_t>(sp++)] = 0;
     best_d2 = std::numeric_limits<double>::infinity();
     std::uint32_t best = 0xFFFFFFFFu;
     while (sp > 0) {
-      const Node& n = nodes_[static_cast<std::size_t>(stack[--sp])];
+      const std::size_t level = static_cast<std::size_t>(--sp);
+      const Node& n = nodes_[static_cast<std::size_t>(stack[level])];
       // Equality is not pruned: a different primitive at exactly best_d2 may
       // still win the index tie-break.
       if (box_distance2(n.box, p) > best_d2) continue;
@@ -226,8 +228,8 @@ class Bvh {
           }
         }
       } else {
-        stack[sp++] = n.left;
-        stack[sp++] = n.right;
+        stack[static_cast<std::size_t>(sp++)] = n.left;
+        stack[static_cast<std::size_t>(sp++)] = n.right;
       }
     }
     return best;
