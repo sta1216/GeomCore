@@ -2,14 +2,23 @@
 // Builds the boxes once, tessellates the whole set three times and reports the
 // fastest run. The mesh is also checked once for watertightness and outward
 // winding; a miss is reported but never fails the process (benchmarks report).
+//
+// QA-11: unit-density mass properties of a box, cylinder, sphere and torus
+// against closed forms. Each primitive reports its volume, centroid and inertia
+// diagonal error; the worst relative error is compared with the 1e-6 target.
+// As above, the process returns 0 whatever the verdict; the recorded numbers in
+// docs/benchmarks/m2.md are the evidence.
+#include <geom/brep/mass_properties.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/tessellate.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <numbers>
 #include <utility>
 #include <vector>
 
@@ -19,6 +28,19 @@ namespace {
 
 constexpr std::uint32_t kBoxes = 16666;
 constexpr double kTargetMtri = 1.0;
+constexpr double kQa11Target = 1e-6;
+
+// Closed forms for the unit-density QA-11 solids, about the centroid.
+struct ClosedForm {
+  const char* name;
+  double volume;
+  double centroid[3];
+  double inertia[3];
+};
+
+double relative_error(double actual, double expected) {
+  return std::fabs(actual - expected) / std::max(1.0, std::fabs(expected));
+}
 
 double ms_since(std::chrono::steady_clock::time_point t0) {
   return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -104,5 +126,64 @@ int main() {
               kBoxes * 6u, triangles, best_ms, mtri);
   std::printf("QA10 watertight=%s outward=%s target=%.1f Mtri/s %s\n", watertight ? "yes" : "no",
               outward ? "yes" : "no", kTargetMtri, mtri >= kTargetMtri ? "PASS" : "FAIL");
+
+  // QA-11: mass properties against closed forms, worst relative error.
+  constexpr double pi = std::numbers::pi_v<double>;
+  const double cylinder_mass = 2.0 * pi;
+  const double sphere_mass = 4.0 * pi / 3.0;
+  const double torus_mass = 2.0 * pi * pi * 3.0;
+  std::vector<Brep> solids;
+  std::vector<ClosedForm> forms;
+  bool qa11_ok = true;
+  const auto add_qa11 = [&](const Result<Brep>& brep, ClosedForm form) {
+    if (!brep.has_value()) {
+      std::printf("QA11 build error code=%d message=%s\n", static_cast<int>(brep.error().code),
+                  brep.error().message);
+      qa11_ok = false;
+      return;
+    }
+    solids.push_back(brep.value());
+    forms.push_back(form);
+  };
+  add_qa11(make_box({-1.0, -1.5, -2.0}, {1.0, 1.5, 2.0}, 0.0),
+           ClosedForm{"box", 24.0, {0.0, 0.0, 0.0}, {50.0, 40.0, 26.0}});
+  add_qa11(make_cylinder({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 1.0, 2.0, 0.0),
+           ClosedForm{"cylinder", cylinder_mass, {0.0, 0.0, 1.0},
+                      {cylinder_mass * 7.0 / 12.0, cylinder_mass * 7.0 / 12.0,
+                       cylinder_mass * 0.5}});
+  add_qa11(make_sphere({0.0, 0.0, 0.0}, 1.0, 0.0),
+           ClosedForm{"sphere", sphere_mass, {0.0, 0.0, 0.0},
+                      {0.4 * sphere_mass, 0.4 * sphere_mass, 0.4 * sphere_mass}});
+  add_qa11(make_torus({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 3.0, 1.0, 0.0),
+           ClosedForm{"torus", torus_mass, {0.0, 0.0, 0.0},
+                      {torus_mass * 5.125, torus_mass * 5.125, torus_mass * 9.75}});
+
+  double worst = 0.0;
+  for (std::size_t i = 0; i < solids.size(); ++i) {
+    const Result<MassProperties> properties = mass_properties(solids[i]);
+    if (!properties.has_value()) {
+      std::printf("QA11 %-8s error code=%d message=%s\n", forms[i].name,
+                  static_cast<int>(properties.error().code), properties.error().message);
+      qa11_ok = false;
+      continue;
+    }
+    const MassProperties& m = properties.value();
+    const double volume_error = relative_error(m.volume, forms[i].volume);
+    double centroid_error = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+      centroid_error = std::max(centroid_error, relative_error(m.centroid[axis], forms[i].centroid[axis]));
+    }
+    double inertia_error = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+      inertia_error = std::max(inertia_error, relative_error(m.inertia[axis][axis], forms[i].inertia[axis]));
+    }
+    const double case_error = std::max({volume_error, centroid_error, inertia_error});
+    worst = std::max(worst, case_error);
+    std::printf("QA11 %-8s volume=%.6f vol_err=%.2e centroid_err=%.2e inertia_err=%.2e %s\n",
+                forms[i].name, m.volume, volume_error, centroid_error, inertia_error,
+                case_error <= kQa11Target ? "PASS" : "FAIL");
+  }
+  std::printf("QA11 max_rel_err=%.2e target=%.0e %s\n", worst, kQa11Target,
+              qa11_ok && worst <= kQa11Target ? "PASS" : "FAIL");
   return 0;
 }

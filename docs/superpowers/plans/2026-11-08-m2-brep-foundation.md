@@ -1433,7 +1433,7 @@ Result<MassProperties> mass_properties(const Brep& brep,
                                        const MassPropertiesOptions& options = {});
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 TEST_CASE("box mass properties match closed forms") {
@@ -1483,7 +1483,7 @@ TEST_CASE("open shells have no mass properties") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: 期望找不到 `geom/brep/mass_properties.hpp`。
 
@@ -1507,11 +1507,11 @@ Run: 期望找不到 `geom/brep/mass_properties.hpp`。
 - ADR-0022：边采样复用契约、偏差公式、质量属性积分方法与 QA-11 解析 oracle 的替代说明。
 - 架构 §16.3：M2 状态改为「代码与测试完成，QA-10/QA-11 实测见 m2.md」；若未达标必须写 FAIL，不得声称达成。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*mass*"`；`geom_bench_m2.exe` 打印 QA-10/QA-11。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/mass_properties.hpp tests/unit/mass_properties_test.cpp bench/bench_m2.cpp tests/CMakeLists.txt docs/benchmarks/m2.md docs/adr/0021-brep-storage-and-euler-operators.md docs/adr/0022-tessellation-and-mass-properties.md docs/architecture/geometry-library-architecture.md docs/superpowers/plans/2026-11-08-m2-brep-foundation.md
@@ -1522,11 +1522,11 @@ git commit -m "feat(m2): compute B-rep mass properties and record QA-10/QA-11 ev
 
 ## M2 出口验收
 
-- [ ] QA-10：100,000 面 B-rep 网格化——水密（每条无向边恰好两次）、无零面积/翻转三角形、弦高 ≤ deflection、共享边采样逐点一致；`docs/benchmarks/m2.md` 记录实测面数、三角形数、耗时与 Mtri/s。
-- [ ] QA-11：box/cylinder/sphere/torus 的体积、质心、惯性矩相对误差 ≤ 1e-6，记录最大值。
-- [ ] 所有基本体 `validate_topology` 与 `validate_tolerances` 通过；Euler 特征数断言：box/cylinder/cone/sphere = 2、torus = 0。
-- [ ] Debug 与 Release 全套 `ctest` 通过；GCC/Clang CI 通过；无新增警告。
-- [ ] 架构 §16.3、`docs/benchmarks/m2.md`、ADR-0021/0022 已更新，数字与 CI 一致。
+- [ ] QA-10：100,000 面 B-rep 网格化——水密（每条无向边恰好两次）、无零面积/翻转三角形、弦高 ≤ deflection、共享边采样逐点一致；`docs/benchmarks/m2.md` 记录实测面数、三角形数、耗时与 Mtri/s。**（2026-11-08 实测 FAIL：99,996 面 / 199,992 三角形，0.19–0.21 Mtri/s vs 1.0 Mtri/s；水密与朝外卷绕通过，详见 `docs/benchmarks/m2.md`）**
+- [x] QA-11：box/cylinder/sphere/torus 的体积、质心、惯性矩相对误差 ≤ 1e-6，记录最大值。**（实测最大相对误差 5.33e-10）**
+- [x] 所有基本体 `validate_topology` 与 `validate_tolerances` 通过；Euler 特征数断言：box/cylinder/cone/sphere = 2、torus = 0。
+- [ ] Debug 与 Release 全套 `ctest` 通过；GCC/Clang CI 通过；无新增警告。**（本地 MSVC Debug/Release 均 366/366 用例、450,255 断言、无新增警告；GCC/Clang CI 未在本任务中复跑）**
+- [x] 架构 §16.3、`docs/benchmarks/m2.md`、ADR-0021/0022 已更新，数字与 CI 一致。
 
 ## 自检
 
