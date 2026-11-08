@@ -19,13 +19,11 @@ namespace {
 
 using geom::Point3d;
 
-// Reversed curved faces: the analytic primitives create faces with
-// reversed=false, and SolidEditor has no operation that flips an existing
-// face, so a curved reversed face cannot be authored here without editing the
-// Brep internals. The planar "reversed closed-circle disk" case covers the
-// reversed-face triangle swap; curved reversal waits for an API that can
-// construct it. The same applies to the `angle_tolerance` option, which is
-// validated only (see tessellate.hpp).
+// Reversed curved faces: the analytic primitives never create one, and the
+// shared face.reversed triangle swap is already covered by the planar
+// "reversed closed-circle disk" case, so these tests use the primitive
+// orientation. The `angle_tolerance` option is validated only (see
+// tessellate.hpp).
 
 // Every undirected mesh edge must be used exactly twice by a closed solid.
 void check_closed_manifold(const geom::TriMesh& mesh) {
@@ -202,7 +200,7 @@ TEST_CASE("chord height stays within deflection on a circle") {
     const geom::Point3d& c = ring[(i + 1) % ring.size()];
     const double mx = 0.5 * (a[0] + c[0]);
     const double my = 0.5 * (a[1] + c[1]);
-    CHECK(2.0 - std::hypot(mx, my) <= 0.01 + 1e-12);  // 鐭㈤珮
+    CHECK(2.0 - std::hypot(mx, my) <= 0.01 + 1e-12);  // sagitta
   }
 }
 
