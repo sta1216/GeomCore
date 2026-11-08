@@ -159,7 +159,7 @@ inline std::unordered_map<std::uint64_t, std::uint32_t> cdt_owners(
   owner.reserve(3 * tris.size());
   for (std::uint32_t t = 0; t < tris.size(); ++t) {
     if (!tris[t].alive) continue;
-    for (int e = 0; e < 3; ++e) {
+    for (std::size_t e = 0; e < 3; ++e) {
       owner[cdt_directed(tris[t].v[e], tris[t].v[(e + 1) % 3])] = t;
     }
   }
@@ -185,7 +185,7 @@ inline bool cdt_recover(std::vector<CdtTri>& tris, std::span<const Point2d> p,
   for (std::uint32_t t = 0; t < tris.size() && start == 0xFFFFFFFFu; ++t) {
     if (!tris[t].alive) continue;
     const auto& v = tris[t].v;
-    for (int k = 0; k < 3; ++k) {
+    for (std::size_t k = 0; k < 3; ++k) {
       if (v[k] != a) continue;
       const std::uint32_t x = v[(k + 1) % 3];
       const std::uint32_t y = v[(k + 2) % 3];
@@ -205,7 +205,7 @@ inline bool cdt_recover(std::vector<CdtTri>& tris, std::span<const Point2d> p,
   for (std::size_t guard = 0; guard <= tris.size(); ++guard) {
     cavity.push_back(cur);
     bool has_b = false;
-    for (int k = 0; k < 3; ++k) {
+    for (std::size_t k = 0; k < 3; ++k) {
       if (tris[cur].v[k] == b) has_b = true;
     }
     if (has_b) {
@@ -219,7 +219,7 @@ inline bool cdt_recover(std::vector<CdtTri>& tris, std::span<const Point2d> p,
     // side signs the just-entered edge (a outside, b inside) also passes the
     // opposition test, so the walk could step back and oscillate.
     std::uint32_t nxt = 0xFFFFFFFFu;
-    for (int e = 0; e < 3; ++e) {
+    for (std::size_t e = 0; e < 3; ++e) {
       const std::uint32_t u = tris[cur].v[e];
       const std::uint32_t w = tris[cur].v[(e + 1) % 3];
       if (u == a || w == a) continue;
@@ -244,13 +244,13 @@ inline bool cdt_recover(std::vector<CdtTri>& tris, std::span<const Point2d> p,
   std::unordered_set<std::uint64_t> cavity_edges;
   cavity_edges.reserve(3 * cavity.size());
   for (const std::uint32_t t : cavity) {
-    for (int e = 0; e < 3; ++e) {
+    for (std::size_t e = 0; e < 3; ++e) {
       cavity_edges.insert(cdt_directed(tris[t].v[e], tris[t].v[(e + 1) % 3]));
     }
   }
   std::vector<std::pair<std::uint32_t, std::uint32_t>> boundary;
   for (const std::uint32_t t : cavity) {
-    for (int e = 0; e < 3; ++e) {
+    for (std::size_t e = 0; e < 3; ++e) {
       const std::uint32_t u = tris[t].v[e];
       const std::uint32_t w = tris[t].v[(e + 1) % 3];
       if (cavity_edges.find(cdt_directed(w, u)) == cavity_edges.end()) {
@@ -273,7 +273,7 @@ inline bool cdt_recover(std::vector<CdtTri>& tris, std::span<const Point2d> p,
     boundary_vertices.insert(w);
   }
   for (const std::uint32_t t : cavity) {
-    for (int e = 0; e < 3; ++e) {
+    for (std::size_t e = 0; e < 3; ++e) {
       if (boundary_vertices.find(tris[t].v[e]) == boundary_vertices.end()) return false;
     }
   }
@@ -348,7 +348,7 @@ inline bool cdt_restore_delaunay(std::vector<CdtTri>& tris, std::span<const Poin
     for (std::uint32_t t = 0; t < tris.size() && !flipped; ++t) {
       if (!tris[t].alive) continue;
       const std::array<std::uint32_t, 3> T = tris[t].v;
-      for (int e = 0; e < 3 && !flipped; ++e) {
+      for (std::size_t e = 0; e < 3 && !flipped; ++e) {
         const std::uint32_t a = T[e];
         const std::uint32_t b = T[(e + 1) % 3];
         const std::uint32_t c = T[(e + 2) % 3];
@@ -358,7 +358,7 @@ inline bool cdt_restore_delaunay(std::vector<CdtTri>& tris, std::span<const Poin
         if (it == owner.end()) continue;  // hull edge
         const std::array<std::uint32_t, 3> U = tris[it->second].v;
         std::uint32_t d = 0xFFFFFFFFu;
-        for (int k = 0; k < 3; ++k) {
+        for (std::size_t k = 0; k < 3; ++k) {
           if (U[k] != a && U[k] != b) d = U[k];
         }
         if (d == 0xFFFFFFFFu) continue;
@@ -508,7 +508,7 @@ inline Result<CdtResult> cdt2(std::span<const Point2d> points,
   for (const auto& [a, b] : edges) {
     bool present = false;
     for (const detail::CdtTri& t : tris) {
-      for (int e = 0; e < 3; ++e) {
+      for (std::size_t e = 0; e < 3; ++e) {
         if ((t.v[e] == a && t.v[(e + 1) % 3] == b) ||
             (t.v[e] == b && t.v[(e + 1) % 3] == a)) {
           present = true;
@@ -533,10 +533,10 @@ inline Result<CdtResult> cdt2(std::span<const Point2d> points,
   std::vector<char> used(points.size(), 0);
   for (const detail::CdtTri& t : tris) {
     if (!t.alive) continue;
-    for (int e = 0; e < 3; ++e) used[t.v[e]] = 1;
+    for (std::size_t e = 0; e < 3; ++e) used[t.v[e]] = 1;
   }
   for (const auto& base_tri : base) {
-    for (int e = 0; e < 3; ++e) {
+    for (std::size_t e = 0; e < 3; ++e) {
       if (used[base_tri[e]] == 0) {
         return Error{Errc::numeric_failure, "cdt2: triangulation lost an input vertex",
                      base_tri[e], 0u};
