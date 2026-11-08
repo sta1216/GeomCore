@@ -36,7 +36,7 @@ jobs:
         run: ctest --test-dir build-cov --output-on-failure
       - name: Coverage summary by file (branch)
         run: |
-          gcovr -r . --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
+          gcovr -r . --gcov-ignore-parse-errors negative_hits.warn_once_per_file --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
                 --json -o coverage.json
           python3 - <<'PY'
           import json
@@ -54,18 +54,18 @@ jobs:
           PY
       - name: Coverage gate (global)
         run: |
-          gcovr -r . --fail-under-line 90 --fail-under-branch 85 \
+          gcovr -r . --gcov-ignore-parse-errors negative_hits.warn_once_per_file --fail-under-line 90 --fail-under-branch 85 \
                 --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
                 --print-summary
       - name: Coverage gate (core modules)
         run: |
-          gcovr -r . --filter 'include/geom/(core|numeric|primitives|curves|surfaces)/' \
+          gcovr -r . --gcov-ignore-parse-errors negative_hits.warn_once_per_file --filter 'include/geom/(core|numeric|primitives|curves|surfaces)/' \
                 --fail-under-line 95 --fail-under-branch 90 \
                 --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
                 --print-summary
       - name: Coverage gate (cgeom and index)
         run: |
-          gcovr -r . --filter 'include/geom/(cgeom|index)/' \
+          gcovr -r . --gcov-ignore-parse-errors negative_hits.warn_once_per_file --filter 'include/geom/(cgeom|index)/' \
                 --fail-under-line 90 --fail-under-branch 85 \
                 --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
                 --print-summary
