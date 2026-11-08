@@ -52,6 +52,7 @@ set(GEOM_TEST_SOURCES
   unit/delaunay2_test.cpp
   unit/bvh_test.cpp
   unit/coverage_gaps_test.cpp
+  unit/brep_coverage_test.cpp
   unit/polygon2_test.cpp
   unit/kdtree_test.cpp
   unit/triangulate2_test.cpp
