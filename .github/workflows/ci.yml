@@ -34,10 +34,6 @@ jobs:
         run: cmake --build build-cov -j 4
       - name: Test
         run: ctest --test-dir build-cov --output-on-failure
-      - name: Coverage report (branch, per file)
-        run: |
-          gcovr -r . --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
-                --txt --txt-metric branch
       - name: Coverage summary by file (branch)
         run: |
           gcovr -r . --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
@@ -49,8 +45,8 @@ jobs:
           for f in d['files']:
               total = f.get('branch_total', 0)
               if total:
-                  rows.append((100.0 * f['branch_covered'] / total, f['filename'],
-                               f['branch_covered'], total))
+                  covered = f.get('branch_covered', 0)
+                  rows.append((100.0 * covered / total, f['filename'], covered, total))
           rows.sort()
           for pct, name, cov, total in rows[:30]:
               print(f"{pct:6.1f}% {cov:5d}/{total:<5d} {name}")
