@@ -37,7 +37,7 @@ jobs:
       - name: Coverage summary by file (branch)
         run: |
           gcovr -r . --gcov-ignore-parse-errors negative_hits.warn_once_per_file --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
-                --csv -o coverage.csv --json-pretty -o coverage.json
+                --csv -o coverage.csv
           python3 - <<'PY'
           import csv
           rows, covered_sum, total_sum = [], 0, 0
@@ -54,6 +54,10 @@ jobs:
               print(f"{pct:6.1f}% {cov:5d}/{total:<5d} {name}")
           print(f"TOTAL {covered_sum} {total_sum} ({100.0*covered_sum/total_sum:.1f}%)")
           PY
+      - name: Coverage JSON (per line)
+        run: |
+          gcovr -r . --gcov-ignore-parse-errors negative_hits.warn_once_per_file --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
+                --json-pretty -o coverage.json
       - name: Upload coverage data
         if: always()
         uses: actions/upload-artifact@v4
