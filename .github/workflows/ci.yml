@@ -50,7 +50,7 @@ jobs:
           rows.sort()
           for pct, name, cov, total in rows[:30]:
               print(f"{pct:6.1f}% {cov:5d}/{total:<5d} {name}")
-          print("TOTAL", d['branch_covered'], d['branch_total'])
+          print("TOTAL", d.get('branch_covered', 0), d.get('branch_total', 0))
           PY
       - name: Coverage gate (global)
         run: |
