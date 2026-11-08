@@ -97,10 +97,12 @@ inline Result<std::uint32_t> tessellate_vertex_position(TessellateState& state, 
 // Number of chord segments needed to keep the sagitta of a circle edge within
 // `deflection`. The sagitta of a step `theta` is radius * (1 - cos(theta / 2)), so
 // the largest admissible step is 2 * acos(1 - deflection / radius). The clamp
-// keeps acos defined when deflection >= 2 * radius, where the half turn is the
-// natural limit.
+// keeps acos defined when deflection >= 2 * radius, where a half turn already
+// meets the tolerance; a closed edge still needs three samples so the resulting
+// disk remains a valid triangle, while an open arc only needs its two segments.
 inline Result<std::uint32_t> tessellate_circle_segments(const CircleCurve3& circle, double t0,
-                                                        double t1, double deflection) {
+                                                        double t1, double deflection,
+                                                        bool closed) {
   if (!tessellate_point_finite(circle.center) || !tessellate_vec_finite(circle.x_axis) ||
       !tessellate_vec_finite(circle.y_axis) || !std::isfinite(circle.radius)) {
     return Error{Errc::non_finite, "tessellate: circle edge geometry is not finite", 0u, 0u};
@@ -116,7 +118,8 @@ inline Result<std::uint32_t> tessellate_circle_segments(const CircleCurve3& circ
   const double clamped = cosine < -1.0 ? -1.0 : cosine;
   const double step = 2.0 * std::acos(clamped);
   double count = std::ceil(span / step);
-  if (!(count >= 2.0)) count = 2.0;
+  const double minimum = closed ? 3.0 : 2.0;
+  if (!(count >= minimum)) count = minimum;
   constexpr double kMaximumCount =
       static_cast<double>(std::numeric_limits<std::uint32_t>::max());
   if (!(count <= kMaximumCount)) {
@@ -158,7 +161,7 @@ inline Result<std::vector<Point3d>> tessellate_sample_edge(const Brep& brep, Edg
   }
 
   const Result<std::uint32_t> segments =
-      tessellate_circle_segments(*circle, edge.t0, edge.t1, deflection);
+      tessellate_circle_segments(*circle, edge.t0, edge.t1, deflection, closed);
   if (!segments.has_value()) return segments.error();
   const std::uint32_t count = segments.value();
   const double step = (edge.t1 - edge.t0) / static_cast<double>(count);
