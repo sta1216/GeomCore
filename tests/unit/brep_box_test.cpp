@@ -50,20 +50,38 @@ TEST_CASE("box has the expected topology") {
   const geom::SolidId s = b.solid_ids().front();
   CHECK(geom::euler_characteristic(b, s) == 2);
   CHECK(b.shell(b.solid_shells(s).front()).closed);
+  // Every face's single loop is the outer one.
+  for (const geom::FaceId id : b.face_ids()) {
+    CHECK(b.loop(b.face(id).first_loop).outer);
+  }
+  // A box has no face parameterization, so it stores no pcurves.
+  CHECK(b.geometry().pcurves.empty());
+  for (const geom::CoedgeId id : b.coedge_ids()) {
+    CHECK(b.coedge(id).pcurve == geom::kNoGeometry);
+  }
 }
 
 TEST_CASE("box face normals point outward") {
-  const auto r = geom::make_box({-1, -2, -3}, {1, 2, 3}, 0.0);
+  // [0, 1]^3 sits entirely on the positive side of the origin, so an
+  // origin-based check would pass vacuously; measure against the interior
+  // point instead.
+  const geom::Point3d lo{0, 0, 0};
+  const geom::Point3d hi{1, 1, 1};
+  const auto r = geom::make_box(lo, hi, 0.0);
   REQUIRE(r.has_value());
   const geom::Brep& b = r.value();
-  for (const geom::Face& f : b.faces()) {
+  const geom::Point3d interior{(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5,
+                               (lo[2] + hi[2]) * 0.5};
+  for (const geom::FaceId id : b.face_ids()) {
+    const geom::Face& f = b.face(id);
     const auto& plane = std::get<geom::Plane3>(b.geometry().surfaces[f.surface]);
-    const double h = std::hypot(plane.normal[0], plane.normal[1], plane.normal[2]);
-    const geom::Vec3d unit{plane.normal[0] / h, plane.normal[1] / h,
-                           plane.normal[2] / h};
     const geom::CoedgeId c0 = b.loop(f.first_loop).start;
     const geom::Point3d sample = b.vertex(b.edge(b.coedge(c0).edge).v0).point;
-    CHECK(geom::dot(unit, geom::Vec3d{sample[0], sample[1], sample[2]}) > 0.0);
+    // The sample lies on its face plane ...
+    CHECK(std::fabs(plane.signed_distance(sample)) <= 1e-12);
+    // ... and the unit normal points away from the interior point.
+    const geom::Vec3d away = as_vec(sample) - as_vec(interior);
+    CHECK(geom::dot(unit_of(plane.normal), away) > 0.0);
   }
 }
 
@@ -97,6 +115,12 @@ TEST_CASE("box errors carry specific codes") {
   const auto inf_lo = geom::make_box({0, inf, 0}, {1, 1, 1}, 0.0);
   REQUIRE_FALSE(inf_lo.has_value());
   CHECK(inf_lo.error().code == geom::Errc::non_finite);
+
+  // A box whose edge length overflows a double is rejected before that edge is
+  // staged, so no invalid curve enters the store.
+  const auto overflow = geom::make_box({-1e308, 0, 0}, {1e308, 1, 1}, 0.0);
+  REQUIRE_FALSE(overflow.has_value());
+  CHECK(overflow.error().code == geom::Errc::degenerate);
 
   // A non-finite tolerance has no meaningful sign; rejecting it is enough.
   CHECK_FALSE(geom::make_box({0, 0, 0}, {1, 1, 1}, nan).has_value());

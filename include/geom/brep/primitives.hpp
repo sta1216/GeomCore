@@ -42,15 +42,15 @@ inline bool primitive_point_finite(Point3d p) noexcept {
 // Plane3{normal, dot(normal, corner)} with a unit axis normal. The shell is
 // closed and the solid owns it.
 //
-// Validation (checked before any editor state is allocated):
+// Validation:
 //   - non-finite lo or hi                -> Errc::non_finite
 //   - non-finite or negative tolerance   -> Errc::tolerance_violation
 //   - lo[axis] >= hi[axis] on any axis   -> Errc::degenerate
-//   - an edge length that overflows to a
-//     non-finite value                   -> Errc::degenerate (before the edge
-//                                           is added, so the line stays valid)
-// Any error from a SolidEditor add_* call is propagated unchanged; commit()
-// performs the final validation.
+// The three checks above run before any editor state is allocated. Edge
+// construction then checks every length; a length that overflows to a
+// non-finite value -> Errc::degenerate, and that edge (with its curve) is not
+// staged. Any error from a SolidEditor add_* call is propagated unchanged;
+// commit() performs the final validation.
 inline Result<Brep> make_box(Point3d lo, Point3d hi, double tol) {
   if (!detail::primitive_point_finite(lo) || !detail::primitive_point_finite(hi)) {
     return Error{Errc::non_finite, "make_box: box corner is not finite", 0u, 0u};
