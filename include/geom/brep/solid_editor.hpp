@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <span>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <geom/brep/topology.hpp>
@@ -324,6 +325,314 @@ class SolidEditor {
     return {};
   }
 
+  // MEV: splits `edge` at the interior curve parameter `t` by inserting a new
+  // vertex there. The curve store is never subdivided, so the two new edges
+  // keep the original curve index and only differ in their parameter intervals
+  // ([t0, t] and [t, t1]); both inherit the edge tolerance, and the new vertex
+  // inherits it too. Every coedge that uses the edge is replaced in its loop by
+  // two coedges in traversal order with the same orientation. A pcurve is split
+  // linearly at the curve-parameter fraction (pcurves are treated as running
+  // along the edge from t0 to t1, not along the coedge's traversal direction).
+  // The old edge and its old coedges are released; the new vertex is returned.
+  // Nothing is staged unless every check passes.
+  Result<VertexId> split_edge(EdgeId edge, double t) {
+    if (!staged_.edge_alive(edge)) {
+      return Error{Errc::index_out_of_range, "solid_editor: split edge is not alive",
+                   edge.index(), 0u};
+    }
+    const Edge split = staged_.edge(edge);
+    if (!std::isfinite(t) || !(split.t0 < t) || !(t < split.t1)) {
+      return Error{Errc::degenerate,
+                   "solid_editor: split parameter is not inside the edge interval", 0u, 0u};
+    }
+    if (split.curve == kNoGeometry) {
+      return Error{Errc::degenerate, "solid_editor: split edge has no curve", 0u, 0u};
+    }
+    if (static_cast<std::size_t>(split.curve) >= staged_.geometry_.curves.size()) {
+      return Error{Errc::index_out_of_range, "solid_editor: split edge curve index out of range",
+                   split.curve, 0u};
+    }
+    const Point3d split_point = evaluate_curve(staged_.geometry_.curves[split.curve], t);
+    if (!point_is_finite(split_point)) {
+      return Error{Errc::non_finite, "solid_editor: split point is not finite", 0u, 0u};
+    }
+
+    std::vector<CoedgeId> uses;
+    std::vector<Coedge> old_coedges;
+    std::uint32_t pcurves_needed = 0;
+    for (std::size_t i = 0; i < staged_.coedges_.size(); ++i) {
+      const Handle id = staged_.coedge_alloc_.handle_at(static_cast<std::uint32_t>(i));
+      if (id.is_null() || staged_.coedges_[i].edge != edge) continue;
+      uses.push_back(id);
+      old_coedges.push_back(staged_.coedges_[i]);
+      if (staged_.coedges_[i].pcurve != kNoGeometry) ++pcurves_needed;
+    }
+    const std::uint32_t use_count = static_cast<std::uint32_t>(uses.size());
+
+    // One vertex + two edges are added, and each use trades one coedge for two,
+    // so the coedge pool grows by use_count. pcurves grow by two per use that
+    // references one. Check everything before any handle is allocated.
+    const std::uint32_t coedge_live = staged_.coedge_alloc_.live_count();
+    const std::size_t pcurve_live = staged_.geometry_.pcurves.size();
+    if (!can_alloc(staged_.vertex_alloc_, 1u) || !can_alloc(staged_.edge_alloc_, 2u) ||
+        use_count > Handle::kNullIndex - coedge_live ||
+        pcurve_live > static_cast<std::size_t>(kNoGeometry) -
+                          2u * static_cast<std::size_t>(pcurves_needed)) {
+      return capacity_error();
+    }
+
+    const Handle vertex_id = staged_.vertex_alloc_.alloc();
+    const Handle first_edge = staged_.edge_alloc_.alloc();
+    const Handle second_edge = staged_.edge_alloc_.alloc();
+    if (vertex_id.is_null() || first_edge.is_null() || second_edge.is_null()) {
+      if (!first_edge.is_null()) staged_.edge_alloc_.release(first_edge);
+      if (!second_edge.is_null()) staged_.edge_alloc_.release(second_edge);
+      if (!vertex_id.is_null()) staged_.vertex_alloc_.release(vertex_id);
+      return capacity_error();
+    }
+    Vertex inserted;
+    inserted.point = split_point;
+    inserted.tol = split.tol;
+    place(staged_.vertices_, vertex_id, inserted);
+
+    Edge first_half;
+    first_half.curve = split.curve;
+    first_half.t0 = split.t0;
+    first_half.t1 = t;
+    first_half.v0 = split.v0;
+    first_half.v1 = vertex_id;
+    first_half.tol = split.tol;
+    place(staged_.edges_, first_edge, first_half);
+
+    Edge second_half = first_half;
+    second_half.t0 = t;
+    second_half.t1 = split.t1;
+    second_half.v0 = vertex_id;
+    second_half.v1 = split.v1;
+    place(staged_.edges_, second_edge, second_half);
+
+    // Split the pcurves before releasing the old coedges, copying each source
+    // segment first because appending to the store can reallocate it.
+    std::vector<std::uint32_t> low_pcurves(use_count, kNoGeometry);
+    std::vector<std::uint32_t> high_pcurves(use_count, kNoGeometry);
+    const double fraction = (t - split.t0) / (split.t1 - split.t0);
+    for (std::uint32_t i = 0; i < use_count; ++i) {
+      if (old_coedges[i].pcurve == kNoGeometry) continue;
+      const Pcurve2d source = staged_.geometry_.pcurves[old_coedges[i].pcurve];
+      Point2d split_uv;
+      split_uv[0] = source.p0[0] + (source.p1[0] - source.p0[0]) * fraction;
+      split_uv[1] = source.p0[1] + (source.p1[1] - source.p0[1]) * fraction;
+      low_pcurves[i] = add_pcurve(Pcurve2d{source.p0, split_uv});
+      high_pcurves[i] = add_pcurve(Pcurve2d{split_uv, source.p1});
+    }
+
+    for (const CoedgeId id : uses) staged_.coedge_alloc_.release(id);
+
+    // The allocator bumps a generation on release, so a reused slot can never
+    // alias an old handle; pair_of() below can safely match old neighbours.
+    std::vector<std::pair<Handle, Handle>> pairs;
+    pairs.reserve(use_count);
+    for (std::uint32_t i = 0; i < use_count; ++i) {
+      const Coedge& old = old_coedges[i];
+      const Handle head_id = staged_.coedge_alloc_.alloc();
+      const Handle tail_id = staged_.coedge_alloc_.alloc();
+      if (head_id.is_null() || tail_id.is_null()) {
+        if (!head_id.is_null()) staged_.coedge_alloc_.release(head_id);
+        if (!tail_id.is_null()) staged_.coedge_alloc_.release(tail_id);
+        return capacity_error();
+      }
+      Coedge head;
+      head.face = old.face;
+      head.loop = old.loop;
+      head.reversed = old.reversed;
+      head.tol = old.tol;
+      head.next = tail_id;
+      if (old.reversed) {
+        head.edge = second_edge;
+        head.pcurve = high_pcurves[i];
+      } else {
+        head.edge = first_edge;
+        head.pcurve = low_pcurves[i];
+      }
+      Coedge tail = head;
+      tail.next = Handle{};
+      tail.prev = head_id;
+      if (old.reversed) {
+        tail.edge = first_edge;
+        tail.pcurve = low_pcurves[i];
+      } else {
+        tail.edge = second_edge;
+        tail.pcurve = high_pcurves[i];
+      }
+      place(staged_.coedges_, head_id, head);
+      place(staged_.coedges_, tail_id, tail);
+      pairs.emplace_back(head_id, tail_id);
+    }
+
+    const auto pair_of = [&uses, &pairs](Handle id) -> const std::pair<Handle, Handle>* {
+      for (std::size_t i = 0; i < uses.size(); ++i) {
+        if (uses[i] == id) return &pairs[i];
+      }
+      return nullptr;
+    };
+    for (std::uint32_t i = 0; i < use_count; ++i) {
+      const Coedge& old = old_coedges[i];
+      const Handle head_id = pairs[i].first;
+      const Handle tail_id = pairs[i].second;
+      const std::pair<Handle, Handle>* pred_pair = pair_of(old.prev);
+      if (pred_pair != nullptr) {
+        staged_.coedges_[head_id.index()].prev = pred_pair->second;
+      } else {
+        staged_.coedges_[head_id.index()].prev = old.prev;
+        staged_.coedges_[old.prev.index()].next = head_id;
+      }
+      const std::pair<Handle, Handle>* succ_pair = pair_of(old.next);
+      if (succ_pair != nullptr) {
+        staged_.coedges_[tail_id.index()].next = succ_pair->first;
+      } else {
+        staged_.coedges_[tail_id.index()].next = old.next;
+        staged_.coedges_[old.next.index()].prev = tail_id;
+      }
+      Loop& loop = staged_.loops_[old.loop.index()];
+      if (loop.start == uses[i]) loop.start = head_id;
+    }
+    staged_.edge_alloc_.release(edge);
+    return vertex_id;
+  }
+
+  // KEV: joins the two edges meeting at `vertex` into one edge. The vertex must
+  // be alive, be an endpoint of exactly two edges, and be used by exactly two
+  // coedges (one per edge) that run through it head-to-tail inside one loop.
+  // The edges must share one curve, their parameter intervals must meet exactly
+  // at the vertex, and the curve tangents there must point the same way (dot >
+  // 0). The merged edge keeps the lower interval's start and curve, extends to
+  // the upper interval's end, and takes the larger of the two tolerances; the
+  // two coedges collapse into one, and the vertex and the other edge are
+  // released. Nothing is staged unless every check passes.
+  Result<bool> join_vertex(VertexId vertex) {
+    if (!staged_.vertex_alive(vertex)) {
+      return Error{Errc::index_out_of_range, "solid_editor: join vertex is not alive",
+                   vertex.index(), 0u};
+    }
+
+    std::vector<EdgeId> incident;
+    for (std::size_t i = 0; i < staged_.edges_.size(); ++i) {
+      const Handle id = staged_.edge_alloc_.handle_at(static_cast<std::uint32_t>(i));
+      if (id.is_null()) continue;
+      const Edge& edge = staged_.edges_[i];
+      if (edge.v0 == vertex || edge.v1 == vertex) incident.push_back(id);
+    }
+    if (incident.size() != 2u) {
+      return Error{Errc::invalid_topology,
+                   "solid_editor: join vertex does not have exactly two incident edges",
+                   vertex.index(), 0u};
+    }
+
+    std::vector<CoedgeId> uses;
+    for (std::size_t i = 0; i < staged_.coedges_.size(); ++i) {
+      const Handle id = staged_.coedge_alloc_.handle_at(static_cast<std::uint32_t>(i));
+      if (id.is_null()) continue;
+      const Handle used_edge = staged_.coedges_[i].edge;
+      if (used_edge == incident[0] || used_edge == incident[1]) uses.push_back(id);
+    }
+    if (uses.size() != 2u || staged_.coedge(uses[0]).edge == staged_.coedge(uses[1]).edge) {
+      return Error{Errc::invalid_topology,
+                   "solid_editor: join vertex does not have two incident coedges",
+                   vertex.index(), 0u};
+    }
+
+    const Coedge coedge_a = staged_.coedge(uses[0]);
+    const Coedge coedge_b = staged_.coedge(uses[1]);
+    const Edge edge_a = staged_.edge(coedge_a.edge);
+    const Edge edge_b = staged_.edge(coedge_b.edge);
+    const auto ends_at = [vertex](const Coedge& coedge, const Edge& edge) {
+      return (coedge.reversed ? edge.v0 : edge.v1) == vertex;
+    };
+    if (ends_at(coedge_a, edge_a) == ends_at(coedge_b, edge_b)) {
+      return Error{Errc::invalid_topology,
+                   "solid_editor: join coedges do not run in opposite directions at the vertex",
+                   vertex.index(), 0u};
+    }
+    const CoedgeId end_id = ends_at(coedge_a, edge_a) ? uses[0] : uses[1];
+    const CoedgeId start_id = ends_at(coedge_a, edge_a) ? uses[1] : uses[0];
+    const Coedge end_coedge = staged_.coedge(end_id);
+    const Coedge start_coedge = staged_.coedge(start_id);
+    const Edge end_edge = staged_.edge(end_coedge.edge);
+    const Edge start_edge = staged_.edge(start_coedge.edge);
+    if (end_coedge.loop != start_coedge.loop || end_coedge.next != start_id) {
+      return Error{Errc::invalid_topology,
+                   "solid_editor: join coedges are not adjacent in one loop", vertex.index(),
+                   0u};
+    }
+    if (end_edge.curve == kNoGeometry || start_edge.curve != end_edge.curve) {
+      return Error{Errc::degenerate, "solid_editor: join edges do not share one curve",
+                   start_edge.curve, end_edge.curve};
+    }
+
+    // Parameter order: the lower interval must end exactly where the upper
+    // interval starts. Orientations must agree, otherwise the loop doubles back
+    // at the vertex and there is no single merged interval.
+    Edge merged;
+    if (!end_coedge.reversed && !start_coedge.reversed) {
+      if (end_edge.t1 != start_edge.t0) {
+        return Error{Errc::degenerate,
+                     "solid_editor: join edge intervals do not meet at the vertex",
+                     vertex.index(), 0u};
+      }
+      merged = end_edge;
+      merged.t1 = start_edge.t1;
+      merged.v1 = start_edge.v1;
+    } else if (end_coedge.reversed && start_coedge.reversed) {
+      if (start_edge.t1 != end_edge.t0) {
+        return Error{Errc::degenerate,
+                     "solid_editor: join edge intervals do not meet at the vertex",
+                     vertex.index(), 0u};
+      }
+      merged = start_edge;
+      merged.t1 = end_edge.t1;
+      merged.v1 = end_edge.v1;
+    } else {
+      return Error{Errc::degenerate,
+                   "solid_editor: join coedges have inconsistent orientation", vertex.index(),
+                   0u};
+    }
+    merged.tol = end_edge.tol > start_edge.tol ? end_edge.tol : start_edge.tol;
+
+    if (static_cast<std::size_t>(merged.curve) >= staged_.geometry_.curves.size()) {
+      return Error{Errc::index_out_of_range, "solid_editor: join curve index out of range",
+                   merged.curve, 0u};
+    }
+    const double end_parameter = end_coedge.reversed ? end_edge.t0 : end_edge.t1;
+    const double start_parameter = start_coedge.reversed ? start_edge.t1 : start_edge.t0;
+    const Vec3d end_tangent =
+        curve_derivative(staged_.geometry_.curves[merged.curve], end_parameter);
+    const Vec3d start_tangent =
+        curve_derivative(staged_.geometry_.curves[merged.curve], start_parameter);
+    if (!vec_is_finite(end_tangent) || !vec_is_finite(start_tangent) ||
+        !(dot(end_tangent, start_tangent) > 0.0)) {
+      return Error{Errc::degenerate, "solid_editor: join edges are not tangent at the vertex",
+                   vertex.index(), 0u};
+    }
+
+    const bool end_is_lower = !end_coedge.reversed;
+    const EdgeId kept_edge = end_is_lower ? end_coedge.edge : start_coedge.edge;
+    const EdgeId dropped_edge = end_is_lower ? start_coedge.edge : end_coedge.edge;
+    staged_.edges_[kept_edge.index()] = merged;
+
+    Coedge survivor = end_coedge;
+    survivor.edge = kept_edge;
+    survivor.next = start_coedge.next;
+    if (survivor.prev == start_id) survivor.prev = end_id;
+    staged_.coedges_[end_id.index()] = survivor;
+    staged_.coedges_[start_coedge.next.index()].prev = end_id;
+    Loop& loop = staged_.loops_[end_coedge.loop.index()];
+    if (loop.start == start_id) loop.start = end_id;
+    staged_.coedge_alloc_.release(start_id);
+    staged_.edge_alloc_.release(dropped_edge);
+    staged_.vertex_alloc_.release(vertex);
+    return true;
+  }
+
   // Validates the staging copy and returns it as a fresh Brep. Topology and
   // tolerance validation are delegated to validate_topology() and
   // validate_tolerances() so commit() and a direct validator call cannot
@@ -347,6 +656,22 @@ class SolidEditor {
  private:
   static Error capacity_error() noexcept {
     return Error{Errc::unsupported, "solid_editor: entity capacity exhausted", 0u, 0u};
+  }
+
+  static bool point_is_finite(const Point3d& point) noexcept {
+    return std::isfinite(point[0]) && std::isfinite(point[1]) && std::isfinite(point[2]);
+  }
+
+  static bool vec_is_finite(const Vec3d& vector) noexcept {
+    return std::isfinite(vector[0]) && std::isfinite(vector[1]) && std::isfinite(vector[2]);
+  }
+
+  static Point3d evaluate_curve(const CurveGeometry& curve, double t) {
+    return std::visit([t](const auto& geometry) { return geometry.eval(t); }, curve);
+  }
+
+  static Vec3d curve_derivative(const CurveGeometry& curve, double t) {
+    return std::visit([t](const auto& geometry) { return geometry.derivative(t); }, curve);
   }
 
   static bool can_alloc(const HandleAllocator& allocator, std::uint32_t count) noexcept {
