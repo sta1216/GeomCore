@@ -319,6 +319,12 @@ inline Result<Brep> make_cylinder(Point3d base, Vec3d axis, double radius, doubl
 // two faces are the base cap (plane normal -axis, circle reversed) and the
 // lateral face (Cone3). V = 2, E = 2, F = 2 (chi = 2).
 //
+// The apex is a singular point of the lateral face: Cone3::du = (base_radius -
+// v * tan(half_angle)) * tangent vanishes there, so the face degenerates to a
+// point where the two seam coedges meet. The loop is still topologically valid
+// (the seam is used once up and once down), but callers evaluating the lateral
+// derivatives at the apex must expect du = 0.
+//
 // Frame: the same candidate rule as make_cylinder, x is the unit perpendicular
 // to axis and y = cross(axis, x), so (x, y, axis) is right handed.
 //
@@ -327,7 +333,8 @@ inline Result<Brep> make_cylinder(Point3d base, Vec3d axis, double radius, doubl
 //   - non-finite or negative tolerance            -> Errc::tolerance_violation
 //   - axis not unit length, base_radius <= 0 or
 //     height <= 0                                 -> Errc::degenerate
-//   - a derived half angle that rounds to zero    -> Errc::degenerate
+//   - a derived half angle that rounds to zero
+//     or to pi/2                                  -> Errc::degenerate
 //   - an apex or seam point that is not
 //     representable, or a seam whose endpoints
 //     round to one point                          -> Errc::degenerate
@@ -356,6 +363,12 @@ inline Result<Brep> make_cone(Point3d base, Vec3d axis, double base_radius, doub
   const double half_angle = std::atan2(base_radius, height);
   if (!(half_angle > 0.0)) {
     return Error{Errc::degenerate, "make_cone: half angle is not representable", 0u, 0u};
+  }
+  // atan2 rounds to exactly pi/2 when base_radius is many orders of magnitude
+  // larger than height; Cone3::is_valid rejects pi/2, so reject the input here
+  // rather than building a Brep that commit() would refuse.
+  if (!(half_angle < 0.5 * std::numbers::pi_v<double>)) {
+    return Error{Errc::degenerate, "make_cone: half angle must be below pi/2", 0u, 0u};
   }
 
   // Any candidate works as long as it is not parallel to the axis.

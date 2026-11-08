@@ -85,6 +85,9 @@ TEST_CASE("cone topology shares the base circle and the seam") {
   CHECK(b.coedge_count() == 4);
   CHECK(geom::validate_topology(b).ok());
   CHECK(geom::euler_characteristic(b, b.solid_ids().front()) == 2);
+  REQUIRE(b.shell_ids().size() == 1);
+  CHECK(b.shell(b.shell_ids().front()).closed == true);
+  for (const geom::LoopId id : b.loop_ids()) CHECK(b.loop(id).outer == true);
 }
 
 TEST_CASE("sphere is a single face with a two-sided seam") {
@@ -97,6 +100,9 @@ TEST_CASE("sphere is a single face with a two-sided seam") {
   CHECK(b.coedge_count() == 2);
   CHECK(geom::validate_topology(b).ok());
   CHECK(geom::euler_characteristic(b, b.solid_ids().front()) == 2);
+  REQUIRE(b.shell_ids().size() == 1);
+  CHECK(b.shell(b.shell_ids().front()).closed == true);
+  for (const geom::LoopId id : b.loop_ids()) CHECK(b.loop(id).outer == true);
 }
 
 TEST_CASE("cone and sphere reject degenerate parameters") {
@@ -199,6 +205,12 @@ TEST_CASE("cone surface and seam follow the derived half angle") {
       CHECK(surface_point[i] == doctest::Approx(seam_point[i]).epsilon(1e-12));
     }
   }
+
+  // The apex is singular: Cone3::du = rho * tangent with rho = radius -
+  // height * tan(half_angle) = 0 in exact arithmetic, so du vanishes there and
+  // the lateral face's parameterization collapses to the apex point.
+  const geom::Vec3d apex_du = cone->du(0.0, height);
+  CHECK(std::hypot(apex_du[0], apex_du[1], apex_du[2]) < 1e-12);
 }
 
 TEST_CASE("cone cap and lateral loops bound an outward solid") {
@@ -270,6 +282,83 @@ TEST_CASE("cone cap and lateral loops bound an outward solid") {
   CHECK(geom::dot(normal, geom::cross(du, dv)) > 0.0);
   CHECK(normal[0] > 0.0);
   CHECK(normal[2] > 0.0);
+}
+
+TEST_CASE("cone builds an orthonormal frame for a non-z axis") {
+  const geom::Point3d base{1.0, -2.0, 0.5};
+  const geom::Vec3d axis{1.0, 0.0, 0.0};  // |axis[0]| >= 0.9 uses the y candidate
+  const double radius = 2.0;
+  const double height = 3.0;
+  const auto r = geom::make_cone(base, axis, radius, height, 0.0);
+  REQUIRE(r.has_value());
+  const geom::Brep& b = r.value();
+  CHECK(geom::validate_topology(b).ok());
+  CHECK(geom::euler_characteristic(b, b.solid_ids().front()) == 2);
+
+  const geom::Cone3* cone = nullptr;
+  const geom::Plane3* cap_plane = nullptr;
+  for (const geom::FaceId id : b.face_ids()) {
+    const geom::SurfaceGeometry& surface = b.geometry().surfaces[b.face(id).surface];
+    if (const auto* candidate = std::get_if<geom::Cone3>(&surface)) cone = candidate;
+    if (const auto* candidate = std::get_if<geom::Plane3>(&surface)) cap_plane = candidate;
+  }
+  REQUIRE(cone != nullptr);
+  REQUIRE(cap_plane != nullptr);
+  CHECK(cone->is_valid());
+  for (int i = 0; i < 3; ++i) CHECK(cone->axis[i] == axis[i]);
+
+  // The y candidate yields x_axis = +y and a right-handed frame about the axis.
+  const geom::Vec3d expected_x{0.0, 1.0, 0.0};
+  for (int i = 0; i < 3; ++i) {
+    CHECK(cone->x_axis[i] == doctest::Approx(expected_x[i]).epsilon(1e-15));
+  }
+  CHECK(std::hypot(cone->x_axis[0], cone->x_axis[1], cone->x_axis[2]) ==
+        doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(geom::dot(cone->x_axis, cone->axis) == doctest::Approx(0.0).epsilon(1e-12));
+  const geom::Vec3d y_axis = geom::cross(axis, cone->x_axis);
+  CHECK(geom::dot(cone->x_axis, y_axis) == doctest::Approx(0.0).epsilon(1e-12));
+
+  // The cap faces -axis and contains the base point.
+  CHECK(geom::dot(cap_plane->normal, axis) == doctest::Approx(-1.0).epsilon(1e-12));
+  CHECK(cap_plane->signed_distance(base) == doctest::Approx(0.0).epsilon(1e-12));
+
+  // Apex and seam point follow the tilted frame, and both lie on the lateral
+  // surface: eval(0, 0) is the seam point, eval(0, height) is the apex.
+  const geom::Point3d apex{base[0] + height * axis[0], base[1] + height * axis[1],
+                           base[2] + height * axis[2]};
+  CHECK(apex[0] == doctest::Approx(4.0).epsilon(1e-15));
+  CHECK(apex[1] == doctest::Approx(-2.0).epsilon(1e-15));
+  CHECK(apex[2] == doctest::Approx(0.5).epsilon(1e-15));
+  const geom::Point3d p0{base[0] + radius * cone->x_axis[0],
+                         base[1] + radius * cone->x_axis[1],
+                         base[2] + radius * cone->x_axis[2]};
+  for (int i = 0; i < 3; ++i) {
+    CHECK(cone->eval(0.0, 0.0)[i] == doctest::Approx(p0[i]).epsilon(1e-12));
+    CHECK(cone->eval(0.0, height)[i] == doctest::Approx(apex[i]).epsilon(1e-12));
+  }
+
+  // The seam edge is exactly the u = 0 generatrix between those two points.
+  geom::EdgeId seam{};
+  for (const geom::EdgeId id : b.edge_ids()) {
+    const geom::Edge& edge = b.edge(id);
+    if (edge.v0 != edge.v1) seam = id;
+  }
+  REQUIRE_FALSE(seam.is_null());
+  const geom::Edge& seam_edge = b.edge(seam);
+  const geom::Point3d seam_v0 = b.vertex(seam_edge.v0).point;
+  const geom::Point3d seam_v1 = b.vertex(seam_edge.v1).point;
+  for (int i = 0; i < 3; ++i) {
+    CHECK(seam_v0[i] == doctest::Approx(p0[i]).epsilon(1e-12));
+    CHECK(seam_v1[i] == doctest::Approx(apex[i]).epsilon(1e-12));
+  }
+  const auto& seam_line = std::get<geom::LineCurve3>(b.geometry().curves[seam_edge.curve]);
+  for (const double v : {0.0, 0.5 * height, height}) {
+    const geom::Point3d surface_point = cone->eval(0.0, v);
+    const geom::Point3d seam_point = seam_line.eval(v / std::cos(cone->half_angle));
+    for (int i = 0; i < 3; ++i) {
+      CHECK(surface_point[i] == doctest::Approx(seam_point[i]).epsilon(1e-12));
+    }
+  }
 }
 
 TEST_CASE("sphere seam is a half great circle") {
@@ -405,6 +494,10 @@ TEST_CASE("cone and sphere reject non-finite, invalid tolerance and collapsing g
   const auto flat_cone = geom::make_cone({0, 0, 0}, {0, 0, 1}, 1e-300, 1e308, 0.0);
   REQUIRE_FALSE(flat_cone.has_value());
   CHECK(flat_cone.error().code == geom::Errc::degenerate);
+  // atan2 rounds to exactly pi/2, which Cone3::is_valid rejects.
+  const auto wide_cone = geom::make_cone({0, 0, 0}, {0, 0, 1}, 1.0, 1e-300, 0.0);
+  REQUIRE_FALSE(wide_cone.has_value());
+  CHECK(wide_cone.error().code == geom::Errc::degenerate);
   // The seam point base + radius * x overflows.
   const auto wide_seam = geom::make_cone({1e308, 0, 0}, {0, 0, 1}, 1e308, 1.0, 0.0);
   REQUIRE_FALSE(wide_seam.has_value());
