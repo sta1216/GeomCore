@@ -33,6 +33,82 @@ std::vector<geom::Coedge> loop_uses(const geom::Brep& b, geom::LoopId loop) {
   return uses;
 }
 
+struct CylinderParts {
+  geom::FaceId lateral{};
+  geom::FaceId bottom_cap{};
+  geom::FaceId top_cap{};
+  geom::EdgeId bottom_circle{};
+  geom::EdgeId top_circle{};
+  geom::EdgeId seam{};
+};
+
+// Faces of a freshly built cylinder and the lateral loop's three distinct
+// edges; the lateral loop is bottom circle -> seam -> top circle -> seam.
+CylinderParts cylinder_parts(const geom::Brep& b, const geom::Vec3d& axis) {
+  CylinderParts parts;
+  for (const geom::FaceId id : b.face_ids()) {
+    const geom::Face& face = b.face(id);
+    const auto& surface = b.geometry().surfaces[face.surface];
+    if (std::holds_alternative<geom::Cylinder3>(surface)) {
+      parts.lateral = id;
+      continue;
+    }
+    const auto& plane = std::get<geom::Plane3>(surface);
+    if (geom::dot(plane.normal, axis) < 0.0) {
+      parts.bottom_cap = id;
+    } else {
+      parts.top_cap = id;
+    }
+  }
+  if (parts.lateral.is_null()) return parts;
+  const std::vector<geom::Coedge> uses = loop_uses(b, b.face(parts.lateral).first_loop);
+  if (uses.size() == 4) {
+    parts.bottom_circle = uses[0].edge;
+    parts.seam = uses[1].edge;
+    parts.top_circle = uses[2].edge;
+  }
+  return parts;
+}
+
+// Samples the loop's traversal in order. Closed curves are sampled at several
+// parameters per coedge so the Newell sum sees the actual polygon.
+std::vector<geom::Point3d> loop_polyline(const geom::Brep& b, geom::LoopId loop,
+                                         int samples_per_edge = 16) {
+  std::vector<geom::Point3d> points;
+  for (const geom::Coedge& use : loop_uses(b, loop)) {
+    const geom::Edge& edge = b.edge(use.edge);
+    if (edge.curve == geom::kNoGeometry) {
+      points.push_back(b.vertex(use.reversed ? edge.v1 : edge.v0).point);
+      continue;
+    }
+    const geom::CurveGeometry& curve = b.geometry().curves[edge.curve];
+    for (int i = 0; i < samples_per_edge; ++i) {
+      const double s = static_cast<double>(i) / samples_per_edge;
+      const double t = use.reversed ? edge.t1 - s * (edge.t1 - edge.t0)
+                                    : edge.t0 + s * (edge.t1 - edge.t0);
+      points.push_back(std::visit([t](const auto& c) { return c.eval(t); }, curve));
+    }
+  }
+  return points;
+}
+
+// Newell normal of a closed polygon: it points along the polygon's
+// counter-clockwise normal, so a planar loop wound CCW about its outward face
+// normal gives a positive dot product with that normal.
+geom::Vec3d newell_normal(const std::vector<geom::Point3d>& points) {
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    const geom::Point3d& a = points[i];
+    const geom::Point3d& c = points[(i + 1) % points.size()];
+    x += a[1] * c[2] - a[2] * c[1];
+    y += a[2] * c[0] - a[0] * c[2];
+    z += a[0] * c[1] - a[1] * c[0];
+  }
+  return geom::Vec3d{x, y, z};
+}
+
 }  // namespace
 
 TEST_CASE("cylinder topology uses a seam edge twice") {
@@ -157,6 +233,11 @@ TEST_CASE("cylinder circles and seam match the frame") {
   CHECK(seam_edge.t1 == 5.0);
   for (int i = 0; i < 3; ++i) CHECK(seam_line.origin[i] == p0[i]);
   for (int i = 0; i < 3; ++i) CHECK(seam_line.direction[i] == axis[i]);
+  // The line's far end is the top vertex.
+  const geom::Point3d seam_top = b.vertex(upper).point;
+  for (int i = 0; i < 3; ++i) {
+    CHECK(seam_line.eval(seam_edge.t1)[i] == doctest::Approx(seam_top[i]).epsilon(1e-12));
+  }
 }
 
 TEST_CASE("cylinder loops use every edge twice in opposite directions") {
@@ -338,4 +419,86 @@ TEST_CASE("cylinder errors carry specific codes") {
   CHECK(negative_tol.error().code == geom::Errc::tolerance_violation);
 
   CHECK_FALSE(geom::make_cylinder({0, 0, 0}, {0, 0, 1}, 1.0, 1.0, nan).has_value());
+}
+
+TEST_CASE("cylinder frame adapts to tilted axes") {
+  const geom::Point3d base{1.0, 2.0, 3.0};
+  const double radius = 2.0;
+  const double height = 5.0;
+  const double diagonal = 1.0 / std::sqrt(3.0);
+  const geom::Vec3d axes[2] = {{1.0, 0.0, 0.0}, {diagonal, diagonal, diagonal}};
+  for (const geom::Vec3d& axis : axes) {
+    INFO("axis = (", axis[0], ", ", axis[1], ", ", axis[2], ")");
+    const auto r = geom::make_cylinder(base, axis, radius, height, 0.0);
+    REQUIRE(r.has_value());
+    const geom::Brep& b = r.value();
+    const CylinderParts parts = cylinder_parts(b, axis);
+    REQUIRE_FALSE(parts.lateral.is_null());
+    REQUIRE_FALSE(parts.bottom_cap.is_null());
+    REQUIRE_FALSE(parts.top_cap.is_null());
+    REQUIRE_FALSE(parts.bottom_circle.is_null());
+    REQUIRE_FALSE(parts.top_circle.is_null());
+    REQUIRE_FALSE(parts.seam.is_null());
+    CHECK(geom::validate_topology(b).ok());
+
+    const auto& cyl = std::get<geom::Cylinder3>(
+        b.geometry().surfaces[b.face(parts.lateral).surface]);
+    CHECK(cyl.radius == radius);
+    CHECK(geom::dot(cyl.axis, axis) == doctest::Approx(1.0).epsilon(1e-12));
+    const geom::Vec3d x = cyl.x_axis;
+    CHECK(std::hypot(x[0], x[1], x[2]) == doctest::Approx(1.0).epsilon(1e-12));
+    CHECK(geom::dot(x, axis) == doctest::Approx(0.0).epsilon(1e-12));
+    // When the axis is x-aligned the candidate rule must pick (0,1,0), which is
+    // the branch a non-x-aligned axis does not exercise.
+    if (axis[0] == 1.0) {
+      CHECK(geom::dot(x, geom::Vec3d{0.0, 1.0, 0.0}) == doctest::Approx(1.0).epsilon(1e-12));
+    }
+    const geom::Edge& bottom_edge = b.edge(parts.bottom_circle);
+    const auto& bottom_circle =
+        std::get<geom::CircleCurve3>(b.geometry().curves[bottom_edge.curve]);
+    const geom::Vec3d y_axis = bottom_circle.y_axis;
+    const geom::Vec3d frame_y = geom::cross(axis, x);
+    for (int i = 0; i < 3; ++i) {
+      CHECK(y_axis[i] == doctest::Approx(frame_y[i]).epsilon(1e-12));
+    }
+    // The bottom circle starts at base + radius * x.
+    const geom::Point3d expected_p0{base[0] + radius * x[0], base[1] + radius * x[1],
+                                    base[2] + radius * x[2]};
+    for (int i = 0; i < 3; ++i) {
+      CHECK(bottom_circle.eval(0.0)[i] == doctest::Approx(expected_p0[i]).epsilon(1e-12));
+    }
+
+    // The cap planes carry the outward unit normals -axis and +axis and contain
+    // base and top respectively.
+    const auto& bottom_plane = std::get<geom::Plane3>(
+        b.geometry().surfaces[b.face(parts.bottom_cap).surface]);
+    const auto& top_plane =
+        std::get<geom::Plane3>(b.geometry().surfaces[b.face(parts.top_cap).surface]);
+    const geom::Point3d top{base[0] + height * axis[0], base[1] + height * axis[1],
+                            base[2] + height * axis[2]};
+    CHECK(std::hypot(bottom_plane.normal[0], bottom_plane.normal[1], bottom_plane.normal[2]) ==
+          doctest::Approx(1.0).epsilon(1e-12));
+    CHECK(std::hypot(top_plane.normal[0], top_plane.normal[1], top_plane.normal[2]) ==
+          doctest::Approx(1.0).epsilon(1e-12));
+    CHECK(geom::dot(bottom_plane.normal, axis) == doctest::Approx(-1.0).epsilon(1e-12));
+    CHECK(geom::dot(top_plane.normal, axis) == doctest::Approx(1.0).epsilon(1e-12));
+    CHECK(bottom_plane.signed_distance(base) == doctest::Approx(0.0).epsilon(1e-12));
+    CHECK(top_plane.signed_distance(top) == doctest::Approx(0.0).epsilon(1e-12));
+
+    // The seam line reaches the top vertex exactly.
+    const geom::Edge& seam_edge = b.edge(parts.seam);
+    const auto& seam_line = std::get<geom::LineCurve3>(b.geometry().curves[seam_edge.curve]);
+    const geom::Point3d top_point = b.vertex(seam_edge.v1).point;
+    for (int i = 0; i < 3; ++i) {
+      CHECK(seam_line.eval(height)[i] == doctest::Approx(top_point[i]).epsilon(1e-12));
+    }
+
+    // Both caps wind counter-clockwise about their outward normal.
+    for (const geom::FaceId cap : {parts.bottom_cap, parts.top_cap}) {
+      const geom::Face& face = b.face(cap);
+      const auto& plane = std::get<geom::Plane3>(b.geometry().surfaces[face.surface]);
+      const geom::Vec3d newell = newell_normal(loop_polyline(b, face.first_loop));
+      CHECK(geom::dot(newell, plane.normal) > 0.0);
+    }
+  }
 }
