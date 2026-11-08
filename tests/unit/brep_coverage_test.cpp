@@ -125,7 +125,6 @@ Square make_square(const SquareOptions& options = {}) {
   s.surface = s.editor.add_surface(options.plane);
   for (int i = 0; i < 4; ++i) {
     const geom::Point3d from = pts[i];
-    const geom::Point3d to = pts[(i + 1) % 4];
     const std::uint32_t curve = s.editor.add_curve(geom::LineCurve3{from, {1.0, 0.0, 0.0}});
     s.edges[i] =
         s.editor.add_edge(s.vertices[i], s.vertices[(i + 1) % 4], curve, 0.0, 1.0, options.edge_tol)
@@ -629,7 +628,6 @@ TEST_CASE("SolidEditor split_edge splits pcurves along the edge") {
   std::array<geom::EdgeId, 4> edges{};
   for (int i = 0; i < 4; ++i) {
     const geom::Point3d from = pts[i];
-    const geom::Point3d to = pts[(i + 1) % 4];
     const std::uint32_t curve = editor.add_curve(geom::LineCurve3{from, {1.0, 0.0, 0.0}});
     edges[static_cast<std::size_t>(i)] =
         editor.add_edge(vertices[static_cast<std::size_t>(i)],
