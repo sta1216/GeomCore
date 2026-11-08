@@ -38,6 +38,13 @@ set(GEOM_TEST_SOURCES
   unit/delaunay2_test.cpp
   unit/bvh_test.cpp
   unit/coverage_gaps_test.cpp
+  unit/polygon2_test.cpp
+  unit/kdtree_test.cpp
+  unit/triangulate2_test.cpp
+  unit/arrangement2_test.cpp
+  unit/boolean2_test.cpp
+  unit/cdt2_test.cpp
+  unit/qa_concurrency_test.cpp
 )
 
 list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)

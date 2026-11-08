@@ -199,7 +199,9 @@ std::uint64_t wide_mul64(std::uint64_t a, std::uint64_t b, std::uint64_t* hi) {
 #if defined(_MSC_VER)
   return _umul128(a, b, hi);
 #else
-  const unsigned __int128 product = static_cast<unsigned __int128>(a) * b;
+  // GCC/Clang extension; __extension__ keeps -Wpedantic quiet under -Werror.
+  __extension__ typedef unsigned __int128 uint128;
+  const uint128 product = static_cast<uint128>(a) * b;
   *hi = static_cast<std::uint64_t>(product >> 64);
   return static_cast<std::uint64_t>(product);
 #endif

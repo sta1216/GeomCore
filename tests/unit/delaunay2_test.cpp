@@ -115,7 +115,7 @@ TEST_CASE("Delaunay perturbed grids satisfy all structural invariants") {
         if (i == t[0] || i == t[1] || i == t[2]) continue;
         CHECK(incircle_perm(pts, t[0], t[1], t[2], i) <= 0);
       }
-      for (int e = 0; e < 3; ++e) {
+      for (std::size_t e = 0; e < 3; ++e) {
         std::uint32_t a = t[e];
         std::uint32_t b = t[(e + 1) % 3];
         if (a > b) std::swap(a, b);
