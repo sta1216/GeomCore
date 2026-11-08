@@ -230,6 +230,7 @@ TEST_CASE("edge that no coedge uses is rejected") {
   const auto r = s.editor.commit();
   REQUIRE_FALSE(r.has_value());
   CHECK(r.error().code == geom::Errc::invalid_topology);
+  CHECK(r.error().context_a == 4);  // the unused edge's index; no coedge shares it
 }
 
 TEST_CASE("closed shell with a boundary edge reports not_closed") {
