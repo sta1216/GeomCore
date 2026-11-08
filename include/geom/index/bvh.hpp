@@ -160,7 +160,7 @@ class Bvh {
   bool raycast(const Ray3d& ray, double tmax, Hit& hit) const {
     if (nodes_.empty()) return false;
     const Vec3d inv{inverse_dir(ray.dir[0]), inverse_dir(ray.dir[1]), inverse_dir(ray.dir[2])};
-    std::array<std::int32_t, 128> stack{};
+    std::array<std::int32_t, 128> stack;
     int sp = 0;
     stack[static_cast<std::size_t>(sp++)] = 0;
     bool found = false;
@@ -207,7 +207,7 @@ class Bvh {
       best_d2 = std::numeric_limits<double>::infinity();
       return 0xFFFFFFFFu;
     }
-    std::array<std::int32_t, 128> stack{};
+    std::array<std::int32_t, 128> stack;
     int sp = 0;
     stack[static_cast<std::size_t>(sp++)] = 0;
     best_d2 = std::numeric_limits<double>::infinity();
@@ -326,14 +326,20 @@ class Bvh {
     }
 
     // Candidate 2: median split by centroid, deterministic via (axis, index).
-    std::sort(order_.begin() + begin, order_.begin() + end,
-              [&](std::uint32_t x, std::uint32_t y) {
-                const double cx = prims_[x].centroid[axis];
-                const double cy = prims_[y].centroid[axis];
-                if (cx != cy) return cx < cy;
-                return x < y;
-              });
+    // nth_element places the same order statistic that a full sort would, so the
+    // resulting partition (and therefore the tree) is unchanged, but the build
+    // stays O(n) per level instead of sorting every node.
     const std::uint32_t median_mid = begin + count / 2;
+    if (count > 1) {
+      std::nth_element(order_.begin() + begin, order_.begin() + median_mid,
+                       order_.begin() + end,
+                       [&](std::uint32_t x, std::uint32_t y) {
+                         const double cx = prims_[x].centroid[axis];
+                         const double cy = prims_[y].centroid[axis];
+                         if (cx != cy) return cx < cy;
+                         return x < y;
+                       });
+    }
     double median_cost = std::numeric_limits<double>::infinity();
     if (area > 0.0) {
       Box3d lb = Box3d::empty();
