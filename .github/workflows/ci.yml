@@ -29,7 +29,10 @@ jobs:
       - name: Install gcovr
         run: sudo apt-get update && sudo apt-get install -y gcovr
       - name: Configure
-        run: cmake -S . -B build-cov -DGEOM_COVERAGE=ON -DGEOM_WERROR=ON -DCMAKE_BUILD_TYPE=Debug
+        # Release (NDEBUG) so assert() branches do not inflate the branch
+        # denominator: a failed assert is a contract violation, not a path the
+        # suite is supposed to exercise.
+        run: cmake -S . -B build-cov -DGEOM_COVERAGE=ON -DGEOM_WERROR=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build-cov -j 4
       - name: Test
