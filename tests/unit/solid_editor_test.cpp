@@ -99,22 +99,27 @@ TEST_CASE("rollback restores the construction base") {
   geom::SolidEditor ed(committed.value());
   const std::size_t base_curves = ed.brep().geometry().curves.size();
   const std::size_t base_surfaces = ed.brep().geometry().surfaces.size();
+  const std::size_t base_pcurves = ed.brep().geometry().pcurves.size();
   REQUIRE(base_curves == 1u);
   REQUIRE(base_surfaces == 1u);
+  REQUIRE(base_pcurves == 0u);
   REQUIRE(ed.add_vertex({2, 2, 2}, 0.0).has_value());
   const std::uint32_t curve = ed.add_curve(geom::LineCurve3{{0, 0, 0}, {0, 1, 0}});
   const std::uint32_t surface = ed.add_surface(geom::Plane3{{1, 0, 0}, 0.0});
+  const std::uint32_t pcurve = ed.add_pcurve(geom::Pcurve2d{{0, 0}, {1, 1}});
   CHECK(curve == static_cast<std::uint32_t>(base_curves));
   CHECK(surface == static_cast<std::uint32_t>(base_surfaces));
+  CHECK(pcurve == static_cast<std::uint32_t>(base_pcurves));
   CHECK(ed.brep().vertex_count() == 5);
   CHECK(ed.brep().geometry().curves.size() == base_curves + 1u);
   CHECK(ed.brep().geometry().surfaces.size() == base_surfaces + 1u);
+  CHECK(ed.brep().geometry().pcurves.size() == base_pcurves + 1u);
   ed.rollback();
   CHECK(ed.brep().vertex_count() == 4);
   CHECK(ed.brep().face_count() == 1);
   CHECK(ed.brep().geometry().curves.size() == base_curves);
   CHECK(ed.brep().geometry().surfaces.size() == base_surfaces);
-  CHECK(ed.brep().geometry().pcurves.empty());
+  CHECK(ed.brep().geometry().pcurves.size() == base_pcurves);
 }
 
 TEST_CASE("editor rejects non-finite vertex positions") {
@@ -222,15 +227,27 @@ TEST_CASE("editor rejects an out-of-range pcurve index") {
 }
 
 TEST_CASE("editor rejects shells and solids with dead members") {
-  geom::SolidEditor ed;
+  SquareFace s = make_square_face();
+  geom::SolidEditor& ed = s.editor;
+  // The populated editor owns face 0 and shell 0, so make(0, 2) points at a live
+  // slot with the wrong generation: the rejection must come from the generation
+  // check, not from an index-versus-size check.
+  REQUIRE(ed.brep().face_alive(geom::FaceId::make(0, 1)));
+  REQUIRE(ed.brep().shell_alive(geom::ShellId::make(0, 1)));
+  const std::size_t base_shells = ed.brep().shell_count();
+  const std::size_t base_solids = ed.brep().solid_count();
+  REQUIRE(base_shells == 1u);
+  REQUIRE(base_solids == 1u);
+
   const auto shell = ed.add_shell(std::array<geom::FaceId, 1>{geom::FaceId::make(0, 2)}, false);
   CHECK_FALSE(shell.has_value());
   CHECK(shell.error().code == geom::Errc::index_out_of_range);
-  CHECK(ed.brep().shell_count() == 0);
+  CHECK(ed.brep().shell_count() == base_shells);
+
   const auto solid = ed.add_solid(std::array<geom::ShellId, 1>{geom::ShellId::make(0, 2)}, 0.0);
   CHECK_FALSE(solid.has_value());
   CHECK(solid.error().code == geom::Errc::index_out_of_range);
-  CHECK(ed.brep().solid_count() == 0);
+  CHECK(ed.brep().solid_count() == base_solids);
 }
 
 TEST_CASE("empty editor commits an empty brep") {
