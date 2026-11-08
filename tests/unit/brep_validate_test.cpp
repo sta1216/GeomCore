@@ -43,11 +43,13 @@ SquareFace make_square_face() {
 struct Box {
   geom::SolidEditor editor;
   geom::SolidId solid;
+  geom::ShellId shell;
 };
 
 // Closed box built only from topology (no curve geometry): 8 vertices, 12 edges,
-// 6 quad faces, one closed shell. Every edge is used once per direction.
-Box make_box() {
+// 6 quad faces, one closed shell. Every edge is used once per direction. With
+// `split_shells` the six faces are split into two closed three-face shells.
+Box make_box(bool split_shells = false) {
   geom::SolidEditor ed;
   const geom::Point3d pts[8] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
                                 {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
@@ -79,9 +81,25 @@ Box make_box() {
     }
     ed.add_loop(faces[i], specs, true).value();
   }
-  const geom::ShellId shell = ed.add_shell(faces, true).value();
-  Box box{std::move(ed), {}};
-  box.solid = box.editor.add_solid(std::array<geom::ShellId, 1>{shell}, 0.0).value();
+  Box box{std::move(ed), {}, {}};
+  if (split_shells) {
+    const geom::ShellId first = box.editor
+                                    .add_shell(std::array<geom::FaceId, 3>{
+                                                   faces[0], faces[1], faces[2]},
+                                               true)
+                                    .value();
+    const geom::ShellId second = box.editor
+                                     .add_shell(std::array<geom::FaceId, 3>{
+                                                    faces[3], faces[4], faces[5]},
+                                                true)
+                                     .value();
+    box.shell = first;
+    box.solid =
+        box.editor.add_solid(std::array<geom::ShellId, 2>{first, second}, 0.0).value();
+  } else {
+    box.shell = box.editor.add_shell(faces, true).value();
+    box.solid = box.editor.add_solid(std::array<geom::ShellId, 1>{box.shell}, 0.0).value();
+  }
   return box;
 }
 
@@ -116,6 +134,15 @@ TEST_CASE("dangling edge reference is rejected at commit") {
   REQUIRE(s.editor.erase_edge(e0).has_value());
   CHECK(s.editor.brep().edge_count() == 3);
   const auto r = s.editor.commit();
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::invalid_topology);
+  CHECK(r.error().context_a == e0.index());
+}
+
+TEST_CASE("face without loops is rejected") {
+  geom::SolidEditor ed;
+  ed.add_face(geom::kNoGeometry, false, 0.0).value();
+  const auto r = ed.commit();
   REQUIRE_FALSE(r.has_value());
   CHECK(r.error().code == geom::Errc::invalid_topology);
 }
@@ -225,4 +252,51 @@ TEST_CASE("closed shell with a boundary edge reports not_closed") {
   const auto r = ed.commit();
   REQUIRE_FALSE(r.has_value());
   CHECK(r.error().code == geom::Errc::not_closed);
+}
+
+TEST_CASE("two open sheets in closed shells are not closed shells") {
+  SquareFace s = make_square_face();
+  const geom::Loop loop = s.editor.brep().loop(s.loop);
+  std::array<geom::CoedgeSpec, 4> specs{};
+  geom::CoedgeId current = loop.start;
+  for (int i = 0; i < 4; ++i) {
+    const geom::Coedge& coedge = s.editor.brep().coedge(current);
+    specs[i] = geom::CoedgeSpec{coedge.edge, true};
+    current = coedge.next;
+  }
+  const geom::FaceId back = s.editor.add_face(geom::kNoGeometry, false, 0.0).value();
+  REQUIRE(s.editor.add_loop(back, specs, true).has_value());
+  const geom::ShellId front_shell =
+      s.editor.add_shell(std::array<geom::FaceId, 1>{s.face}, true).value();
+  const geom::ShellId back_shell =
+      s.editor.add_shell(std::array<geom::FaceId, 1>{back}, true).value();
+  REQUIRE(s.editor.add_solid(std::array<geom::ShellId, 2>{front_shell, back_shell}, 0.0)
+              .has_value());
+  const auto r = s.editor.commit();
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::not_closed);
+}
+
+TEST_CASE("box split into two closed three-face shells is not closed") {
+  Box box = make_box(true);
+  const auto r = box.editor.commit();
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::not_closed);
+}
+
+TEST_CASE("shell listing a face twice is rejected") {
+  SquareFace s = make_square_face();
+  REQUIRE(s.editor.add_shell(std::array<geom::FaceId, 2>{s.face, s.face}, true).has_value());
+  const auto r = s.editor.commit();
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::invalid_topology);
+}
+
+TEST_CASE("solid listing a shell twice is rejected") {
+  Box box = make_box();
+  REQUIRE(box.editor.add_solid(std::array<geom::ShellId, 2>{box.shell, box.shell}, 0.0)
+              .has_value());
+  const auto r = box.editor.commit();
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::invalid_topology);
 }

@@ -39,11 +39,14 @@ inline constexpr std::size_t kMaxValidationIssues = 8;
 //     geometry-store entries;
 //  2. every loop's coedge chain is a closed next-cycle with a consistent prev
 //     link, and each coedge agrees with its loop's face and loop id;
-//  3. every face owns at most one outer loop and its loop chain is acyclic;
+//  3. every face has a loop, owns at most one outer loop and its loop chain is
+//     acyclic;
 //  4. every edge is used by one or two coedges, and two uses run in opposite
 //     directions (a cylinder seam is exactly this two-direction use);
-//  5. every closed==true shell has only interior edges (two coedges each);
-//     closed==false shells may have boundary edges (an open sheet).
+//  5. every closed==true shell has only interior edges: each edge its faces use
+//     is used twice inside that shell; closed==false shells may have boundary
+//     edges (an open sheet). Shell contents are also validated to list no face
+//     twice, and a solid may not list a shell twice.
 //
 // A null Loop::next is the legitimate end of a face's loop chain, and a null
 // Face::first_loop denotes a face with no loops, so neither is a dangling
@@ -129,6 +132,19 @@ inline ValidationReport validate_topology(const Brep& brep) {
       fail(Errc::invalid_topology, id.index(), "shell face range is out of bounds");
       continue;
     }
+    bool duplicate_face = false;
+    for (std::size_t i = 0; i < faces.size() && !duplicate_face; ++i) {
+      for (std::size_t j = 0; j < i; ++j) {
+        if (faces[i] == faces[j]) {
+          duplicate_face = true;
+          break;
+        }
+      }
+    }
+    if (duplicate_face) {
+      fail(Errc::invalid_topology, id.index(), "shell lists a face more than once");
+      continue;
+    }
     for (const FaceId face : faces) {
       if (!brep.face_alive(face)) {
         fail(Errc::invalid_topology, id.index(), "shell face is not alive");
@@ -140,6 +156,19 @@ inline ValidationReport validate_topology(const Brep& brep) {
     const auto shells = brep.solid_shells(id);
     if (shells.size() != solid.shell_count) {
       fail(Errc::invalid_topology, id.index(), "solid shell range is out of bounds");
+      continue;
+    }
+    bool duplicate_shell = false;
+    for (std::size_t i = 0; i < shells.size() && !duplicate_shell; ++i) {
+      for (std::size_t j = 0; j < i; ++j) {
+        if (shells[i] == shells[j]) {
+          duplicate_shell = true;
+          break;
+        }
+      }
+    }
+    if (duplicate_shell) {
+      fail(Errc::invalid_topology, id.index(), "solid lists a shell more than once");
       continue;
     }
     for (const ShellId shell : shells) {
@@ -189,10 +218,16 @@ inline ValidationReport validate_topology(const Brep& brep) {
   }
   if (full()) return report;
 
-  // 3. Every face has at most one outer loop and an acyclic loop chain.
+  // 3. Every face has at least one loop, at most one outer loop, and an acyclic
+  // loop chain. A loopless face would otherwise pass check 5 and contribute an
+  // Euler term without any boundary.
   const std::size_t loop_limit = brep.loop_count();
   for (const FaceId face_id : brep.face_ids()) {
     const Face& face = brep.face(face_id);
+    if (face.first_loop.is_null()) {
+      fail(Errc::invalid_topology, face_id.index(), "face has no loops");
+      continue;
+    }
     std::size_t outer_loops = 0;
     std::size_t steps = 0;
     LoopId current = face.first_loop;
@@ -247,13 +282,20 @@ inline ValidationReport validate_topology(const Brep& brep) {
   }
   if (full()) return report;
 
-  // 5. A closed shell may not have a boundary edge: every edge on one of its
-  // faces must carry two coedges. Open shells deliberately allow boundary edges.
+  // 5. A closed shell may not have a boundary edge: every edge used by one of
+  // its faces must be used exactly twice inside that same shell. The count is
+  // per shell, not global: two closed shells each contributing one coedge to a
+  // shared edge are two open sheets, not one closed surface. Open shells
+  // deliberately allow boundary edges.
+  std::vector<std::uint32_t> shell_uses(brep.edges().size(), 0u);
+  std::vector<std::uint32_t> touched_edges;
   for (const ShellId shell_id : brep.shell_ids()) {
     const Shell& shell = brep.shell(shell_id);
     if (!shell.closed) continue;
     const auto faces = brep.shell_faces(shell_id);
     if (faces.size() != shell.face_count) continue;  // reported above
+    for (const std::uint32_t index : touched_edges) shell_uses[index] = 0u;
+    touched_edges.clear();
     for (const FaceId face_id : faces) {
       if (!brep.face_alive(face_id)) continue;  // reported above
       LoopId loop_id = brep.face(face_id).first_loop;
@@ -268,10 +310,10 @@ inline ValidationReport validate_topology(const Brep& brep) {
             const Coedge& coedge = brep.coedge(current);
             if (brep.edge_alive(coedge.edge)) {
               const std::size_t index = coedge.edge.index();
-              if (index < forward.size() &&
-                  forward[index] + reversed[index] != 2u) {
-                fail(Errc::not_closed, coedge.edge.index(),
-                     "closed shell has an edge without two coedges");
+              if (index < shell_uses.size()) {
+                if (shell_uses[index]++ == 0u) {
+                  touched_edges.push_back(static_cast<std::uint32_t>(index));
+                }
               }
             }
             const CoedgeId next = coedge.next;
@@ -282,6 +324,11 @@ inline ValidationReport validate_topology(const Brep& brep) {
         }
         loop_id = loop.next;
         ++loop_steps;
+      }
+    }
+    for (const std::uint32_t index : touched_edges) {
+      if (shell_uses[index] != 2u) {
+        fail(Errc::not_closed, index, "closed shell has an edge without two coedges");
       }
     }
     if (full()) return report;
