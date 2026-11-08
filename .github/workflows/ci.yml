@@ -37,20 +37,22 @@ jobs:
       - name: Coverage summary by file (branch)
         run: |
           gcovr -r . --gcov-ignore-parse-errors negative_hits.warn_once_per_file --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
-                --json -o coverage.json
+                --csv -o coverage.csv
           python3 - <<'PY'
-          import json
-          d = json.load(open('coverage.json'))
-          rows = []
-          for f in d['files']:
-              total = f.get('branch_total', 0)
-              if total:
-                  covered = f.get('branch_covered', 0)
-                  rows.append((100.0 * covered / total, f['filename'], covered, total))
+          import csv
+          rows, covered_sum, total_sum = [], 0, 0
+          for r in csv.DictReader(open('coverage.csv')):
+              total = int(r['branch_total'])
+              if not total:
+                  continue
+              covered = int(r['branch_covered'])
+              covered_sum += covered
+              total_sum += total
+              rows.append((100.0 * covered / total, r['filename'], covered, total))
           rows.sort()
           for pct, name, cov, total in rows[:30]:
               print(f"{pct:6.1f}% {cov:5d}/{total:<5d} {name}")
-          print("TOTAL", d.get('branch_covered', 0), d.get('branch_total', 0))
+          print(f"TOTAL {covered_sum} {total_sum} ({100.0*covered_sum/total_sum:.1f}%)")
           PY
       - name: Coverage gate (global)
         run: |
