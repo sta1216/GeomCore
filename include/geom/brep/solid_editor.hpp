@@ -95,6 +95,10 @@ class SolidEditor {
       return Error{Errc::index_out_of_range, "solid_editor: edge vertex is not alive",
                    v0.index(), v1.index()};
     }
+    if (tol < 0.0 || !std::isfinite(tol)) {
+      return Error{Errc::tolerance_violation,
+                   "solid_editor: edge tolerance must be finite and non-negative", 0u, 0u};
+    }
     if (!(std::isfinite(t0) && std::isfinite(t1)) || !(t0 < t1)) {
       return Error{Errc::degenerate,
                    "solid_editor: edge parameter interval is empty or non-finite", 0u, 0u};
@@ -123,6 +127,10 @@ class SolidEditor {
       return Error{Errc::index_out_of_range, "solid_editor: face surface index out of range",
                    surface, 0u};
     }
+    if (tol < 0.0 || !std::isfinite(tol)) {
+      return Error{Errc::tolerance_violation,
+                   "solid_editor: face tolerance must be finite and non-negative", 0u, 0u};
+    }
     const Handle id = staged_.face_alloc_.alloc();
     if (id.is_null()) return capacity_error();
     Face face;
@@ -149,6 +157,11 @@ class SolidEditor {
     for (const CoedgeSpec& spec : coedges) {
       if (!staged_.edge_alive(spec.edge)) {
         return Error{Errc::index_out_of_range, "solid_editor: loop coedge edge is not alive",
+                     spec.edge.index(), 0u};
+      }
+      if (spec.tol < 0.0 || !std::isfinite(spec.tol)) {
+        return Error{Errc::tolerance_violation,
+                     "solid_editor: coedge tolerance must be finite and non-negative",
                      spec.edge.index(), 0u};
       }
       if (spec.pcurve != kNoGeometry &&
@@ -268,6 +281,10 @@ class SolidEditor {
                      shell.index(), 0u};
       }
     }
+    if (tol < 0.0 || !std::isfinite(tol)) {
+      return Error{Errc::tolerance_violation,
+                   "solid_editor: solid tolerance must be finite and non-negative", 0u, 0u};
+    }
     const std::size_t first = staged_.solid_shells_.size();
     if (first > kNoGeometry || shells.size() > static_cast<std::size_t>(kNoGeometry) - first ||
         !can_alloc(staged_.solid_alloc_, 1u)) {
@@ -307,14 +324,15 @@ class SolidEditor {
     return {};
   }
 
-  // Validates the staging copy and returns it as a fresh Brep. Topology
-  // validation is delegated to validate_topology() so commit() and a direct
-  // validator call cannot disagree; the first issue's code and entity become
-  // the Result error's code and context_a. T6 will extend this with
-  // validate_tolerances().
+  // Validates the staging copy and returns it as a fresh Brep. Topology and
+  // tolerance validation are delegated to validate_topology() and
+  // validate_tolerances() so commit() and a direct validator call cannot
+  // disagree; the first issue's code, entity and message become the Result
+  // error's code, context_a and message.
   Result<Brep> commit() const {
     Brep candidate = staged_;
-    const ValidationReport report = validate_topology(candidate);
+    ValidationReport report = validate_topology(candidate);
+    if (report.ok()) report = validate_tolerances(candidate);
     if (!report.ok()) {
       const ValidationIssue& issue = report.issues.front();
       return Error{issue.code, issue.message, issue.entity, 0u};

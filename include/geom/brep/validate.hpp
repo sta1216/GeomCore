@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -31,6 +32,10 @@ namespace detail {
 // need the first one (SolidEditor::commit() reports it).
 inline constexpr std::size_t kMaxValidationIssues = 8;
 }  // namespace detail
+
+// A positive parent tolerance more than this factor above a positive child
+// tolerance is suspicious growth rather than a legitimate refinement (§4.6).
+inline constexpr double kToleranceGrowthFactor = 10.0;
 
 // Checks the M2 topology invariants of `brep`:
 //
@@ -332,6 +337,179 @@ inline ValidationReport validate_topology(const Brep& brep) {
       }
     }
     if (full()) return report;
+  }
+
+  return report;
+}
+
+// Checks the M2 tolerance chain (§4.6):
+//
+//  1. every tolerance is finite and non-negative;
+//  2. an edge's tolerance is at least the tolerance of either of its vertices;
+//  3. for every coedge, its face's tolerance is at least the edge's tolerance,
+//     and the coedge's own tolerance is at most the face's tolerance (a pcurve
+//     tolerance is a face-local quantity, so it may not exceed its face);
+//  4. a solid's tolerance is at least every face tolerance in its shells;
+//  5. growth: a positive parent tolerance greater than kToleranceGrowthFactor
+//     times a positive child tolerance is suspicious, with message
+//     "tolerance growth exceeds 10x".
+//
+// Each finding is attributed to the finer (child) entity of the failing
+// relation: the vertex for rule 2, the edge for the face/edge half of rule 3,
+// the coedge for the coedge/face half, the face for rule 4, and the child of the
+// growing pair for rule 5. Dangling references are left to validate_topology()
+// and skipped here instead of asserted. Like validate_topology(), this function
+// allocates and collects at most detail::kMaxValidationIssues findings, ordered
+// by rule and then by entity index.
+inline ValidationReport validate_tolerances(const Brep& brep) {
+  ValidationReport report;
+  const auto fail = [&report](Errc code, std::uint32_t entity, const char* message) {
+    if (report.issues.size() >= detail::kMaxValidationIssues) return;
+    report.issues.push_back(ValidationIssue{code, entity, message});
+  };
+  const auto full = [&report] {
+    return report.issues.size() >= detail::kMaxValidationIssues;
+  };
+
+  // 1. Tolerances must be finite and non-negative.
+  for (const VertexId id : brep.vertex_ids()) {
+    const double tol = brep.vertex(id).tol;
+    if (!std::isfinite(tol) || tol < 0.0) {
+      fail(Errc::tolerance_violation, id.index(), "tolerance must be finite and non-negative");
+    }
+  }
+  for (const EdgeId id : brep.edge_ids()) {
+    const double tol = brep.edge(id).tol;
+    if (!std::isfinite(tol) || tol < 0.0) {
+      fail(Errc::tolerance_violation, id.index(), "tolerance must be finite and non-negative");
+    }
+  }
+  for (const CoedgeId id : brep.coedge_ids()) {
+    const double tol = brep.coedge(id).tol;
+    if (!std::isfinite(tol) || tol < 0.0) {
+      fail(Errc::tolerance_violation, id.index(), "tolerance must be finite and non-negative");
+    }
+  }
+  for (const FaceId id : brep.face_ids()) {
+    const double tol = brep.face(id).tol;
+    if (!std::isfinite(tol) || tol < 0.0) {
+      fail(Errc::tolerance_violation, id.index(), "tolerance must be finite and non-negative");
+    }
+  }
+  for (const SolidId id : brep.solid_ids()) {
+    const double tol = brep.solid(id).tol;
+    if (!std::isfinite(tol) || tol < 0.0) {
+      fail(Errc::tolerance_violation, id.index(), "tolerance must be finite and non-negative");
+    }
+  }
+  if (full()) return report;
+
+  // 2. Edge tolerances dominate their bounding vertices. One finding per edge,
+  // attributed to the vertex with the largest offending tolerance.
+  for (const EdgeId id : brep.edge_ids()) {
+    const Edge& edge = brep.edge(id);
+    VertexId offender{};
+    bool has_offender = false;
+    const auto consider = [&](VertexId vertex_id) {
+      if (!brep.vertex_alive(vertex_id)) return;
+      const double vertex_tol = brep.vertex(vertex_id).tol;
+      if (vertex_tol > edge.tol && (!has_offender || vertex_tol > brep.vertex(offender).tol)) {
+        offender = vertex_id;
+        has_offender = true;
+      }
+    };
+    consider(edge.v0);
+    consider(edge.v1);
+    if (has_offender) {
+      fail(Errc::tolerance_violation, offender.index(),
+           "vertex tolerance exceeds the edge tolerance");
+    }
+  }
+  if (full()) return report;
+
+  // 3. Face tolerances dominate the tolerances of the edges they use, and a
+  // coedge tolerance stays inside its face. Each failing coedge use is reported:
+  // the same edge may be used by two faces with different tolerances.
+  for (const CoedgeId id : brep.coedge_ids()) {
+    const Coedge& coedge = brep.coedge(id);
+    if (!brep.edge_alive(coedge.edge) || !brep.face_alive(coedge.face)) continue;
+    const double edge_tol = brep.edge(coedge.edge).tol;
+    const double face_tol = brep.face(coedge.face).tol;
+    if (face_tol < edge_tol) {
+      fail(Errc::tolerance_violation, coedge.edge.index(),
+           "edge tolerance exceeds the face tolerance");
+    }
+    if (coedge.tol > face_tol) {
+      fail(Errc::tolerance_violation, id.index(), "coedge tolerance exceeds the face tolerance");
+    }
+  }
+  if (full()) return report;
+
+  // 4. Solid tolerances dominate every face tolerance in their shells. One
+  // finding per solid, attributed to the face with the largest offending
+  // tolerance.
+  for (const SolidId id : brep.solid_ids()) {
+    const SolidEntity& solid = brep.solid(id);
+    const auto shells = brep.solid_shells(id);
+    if (shells.size() != solid.shell_count) continue;  // reported by rule-check 1
+    FaceId offender{};
+    double worst = -1.0;
+    bool has_offender = false;
+    for (const ShellId shell_id : shells) {
+      if (!brep.shell_alive(shell_id)) continue;
+      for (const FaceId face_id : brep.shell_faces(shell_id)) {
+        if (!brep.face_alive(face_id)) continue;
+        const double face_tol = brep.face(face_id).tol;
+        if (!has_offender || face_tol > worst) {
+          worst = face_tol;
+          offender = face_id;
+          has_offender = true;
+        }
+      }
+    }
+    if (has_offender && worst > solid.tol) {
+      fail(Errc::tolerance_violation, offender.index(),
+           "face tolerance exceeds the solid tolerance");
+    }
+  }
+  if (full()) return report;
+
+  // 5. Growth. A parent that needs a tolerance an order of magnitude larger
+  // than its child suggests the child was modeled at the wrong scale.
+  for (const EdgeId id : brep.edge_ids()) {
+    const Edge& edge = brep.edge(id);
+    if (!(edge.tol > 0.0)) continue;
+    const VertexId ends[2] = {edge.v0, edge.v1};
+    for (const VertexId vertex_id : ends) {
+      if (!brep.vertex_alive(vertex_id)) continue;
+      const double vertex_tol = brep.vertex(vertex_id).tol;
+      if (vertex_tol > 0.0 && edge.tol > kToleranceGrowthFactor * vertex_tol) {
+        fail(Errc::tolerance_violation, vertex_id.index(), "tolerance growth exceeds 10x");
+      }
+    }
+  }
+  for (const CoedgeId id : brep.coedge_ids()) {
+    const Coedge& coedge = brep.coedge(id);
+    if (!brep.edge_alive(coedge.edge) || !brep.face_alive(coedge.face)) continue;
+    const double edge_tol = brep.edge(coedge.edge).tol;
+    const double face_tol = brep.face(coedge.face).tol;
+    if (edge_tol > 0.0 && face_tol > 0.0 && face_tol > kToleranceGrowthFactor * edge_tol) {
+      fail(Errc::tolerance_violation, coedge.edge.index(), "tolerance growth exceeds 10x");
+    }
+  }
+  for (const SolidId id : brep.solid_ids()) {
+    const SolidEntity& solid = brep.solid(id);
+    if (!(solid.tol > 0.0)) continue;
+    for (const ShellId shell_id : brep.solid_shells(id)) {
+      if (!brep.shell_alive(shell_id)) continue;
+      for (const FaceId face_id : brep.shell_faces(shell_id)) {
+        if (!brep.face_alive(face_id)) continue;
+        const double face_tol = brep.face(face_id).tol;
+        if (face_tol > 0.0 && solid.tol > kToleranceGrowthFactor * face_tol) {
+          fail(Errc::tolerance_violation, face_id.index(), "tolerance growth exceeds 10x");
+        }
+      }
+    }
   }
 
   return report;
