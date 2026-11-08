@@ -306,5 +306,221 @@ inline Result<Brep> make_cylinder(Point3d base, Vec3d axis, double radius, doubl
   return editor.commit();
 }
 
+// Right circular cone: the circle of `base_radius` around `base`, tapering to
+// the apex at base + height * axis. The half angle is derived as
+// atan2(base_radius, height) rather than taken as an independent parameter, so
+// the apex is exactly where the Cone3 lateral surface closes and the base
+// circle is exactly its v = 0 cross-section; no second parameter can contradict
+// the first.
+//
+// The lateral surface is cut along u = 0. The base circle is a single closed
+// edge whose only vertex is the seam point base + base_radius * x, the seam is
+// the slant line from that point to the apex (used twice, up and down), and the
+// two faces are the base cap (plane normal -axis, circle reversed) and the
+// lateral face (Cone3). V = 2, E = 2, F = 2 (chi = 2).
+//
+// Frame: the same candidate rule as make_cylinder, x is the unit perpendicular
+// to axis and y = cross(axis, x), so (x, y, axis) is right handed.
+//
+// Validation:
+//   - non-finite base, axis, base_radius or height -> Errc::non_finite
+//   - non-finite or negative tolerance            -> Errc::tolerance_violation
+//   - axis not unit length, base_radius <= 0 or
+//     height <= 0                                 -> Errc::degenerate
+//   - a derived half angle that rounds to zero    -> Errc::degenerate
+//   - an apex or seam point that is not
+//     representable, or a seam whose endpoints
+//     round to one point                          -> Errc::degenerate
+// Any error from a SolidEditor add_* call is propagated unchanged; commit()
+// performs the final validation.
+inline Result<Brep> make_cone(Point3d base, Vec3d axis, double base_radius, double height,
+                              double tol) {
+  if (!detail::primitive_point_finite(base) || !detail::primitive_vec_finite(axis) ||
+      !std::isfinite(base_radius) || !std::isfinite(height)) {
+    return Error{Errc::non_finite, "make_cone: input is not finite", 0u, 0u};
+  }
+  if (!std::isfinite(tol) || tol < 0.0) {
+    return Error{Errc::tolerance_violation,
+                 "make_cone: tolerance must be finite and non-negative", 0u, 0u};
+  }
+  const double axis_length = std::hypot(axis[0], axis[1], axis[2]);
+  if (!(std::fabs(axis_length - 1.0) <= detail::kAnalyticSurfaceUnitTolerance)) {
+    return Error{Errc::degenerate, "make_cone: axis must be unit length", 0u, 0u};
+  }
+  if (!(base_radius > 0.0)) {
+    return Error{Errc::degenerate, "make_cone: base radius must be positive", 0u, 0u};
+  }
+  if (!(height > 0.0)) {
+    return Error{Errc::degenerate, "make_cone: height must be positive", 0u, 0u};
+  }
+  const double half_angle = std::atan2(base_radius, height);
+  if (!(half_angle > 0.0)) {
+    return Error{Errc::degenerate, "make_cone: half angle is not representable", 0u, 0u};
+  }
+
+  // Any candidate works as long as it is not parallel to the axis.
+  const Vec3d candidate =
+      std::fabs(axis[0]) < 0.9 ? Vec3d{1.0, 0.0, 0.0} : Vec3d{0.0, 1.0, 0.0};
+  const Vec3d perpendicular = cross(cross(axis, candidate), axis);
+  const double perpendicular_length =
+      std::hypot(perpendicular[0], perpendicular[1], perpendicular[2]);
+  if (!std::isfinite(perpendicular_length) || !(perpendicular_length > 0.0)) {
+    return Error{Errc::degenerate, "make_cone: axis frame is degenerate", 0u, 0u};
+  }
+  const Vec3d x_axis{perpendicular[0] / perpendicular_length,
+                     perpendicular[1] / perpendicular_length,
+                     perpendicular[2] / perpendicular_length};
+
+  const Point3d apex{base[0] + height * axis[0], base[1] + height * axis[1],
+                     base[2] + height * axis[2]};
+  if (!detail::primitive_point_finite(apex)) {
+    return Error{Errc::degenerate, "make_cone: apex is not representable", 0u, 0u};
+  }
+  const Point3d p0{base[0] + base_radius * x_axis[0], base[1] + base_radius * x_axis[1],
+                   base[2] + base_radius * x_axis[2]};
+  if (!detail::primitive_point_finite(p0)) {
+    return Error{Errc::degenerate, "make_cone: seam point is not representable", 0u, 0u};
+  }
+  if (detail::primitive_point_equal(p0, apex)) {
+    return Error{Errc::degenerate, "make_cone: seam has zero length", 0u, 0u};
+  }
+  // The slant direction is formed from the parameters, not from the rounded
+  // endpoints, so the LineCurve3 is exactly the u = 0 generatrix of Cone3.
+  const Vec3d delta{height * axis[0] - base_radius * x_axis[0],
+                    height * axis[1] - base_radius * x_axis[1],
+                    height * axis[2] - base_radius * x_axis[2]};
+  if (!detail::primitive_vec_finite(delta)) {
+    return Error{Errc::degenerate, "make_cone: seam is not representable", 0u, 0u};
+  }
+  const double slant = std::hypot(delta[0], delta[1], delta[2]);
+  if (!std::isfinite(slant) || !(slant > 0.0)) {
+    return Error{Errc::degenerate, "make_cone: seam has zero length", 0u, 0u};
+  }
+  const Vec3d seam_direction{delta[0] / slant, delta[1] / slant, delta[2] / slant};
+
+  constexpr double kTwoPi = 2.0 * std::numbers::pi_v<double>;
+
+  SolidEditor editor;
+  const Result<VertexId> base_vertex = editor.add_vertex(p0, tol);
+  if (!base_vertex.has_value()) return base_vertex.error();
+  const Result<VertexId> apex_vertex = editor.add_vertex(apex, tol);
+  if (!apex_vertex.has_value()) return apex_vertex.error();
+
+  const Vec3d y_axis = cross(axis, x_axis);
+  const std::uint32_t base_circle =
+      editor.add_curve(CircleCurve3{base, x_axis, y_axis, base_radius});
+  const Result<EdgeId> base_edge = editor.add_edge(
+      base_vertex.value(), base_vertex.value(), base_circle, 0.0, kTwoPi, tol);
+  if (!base_edge.has_value()) return base_edge.error();
+
+  const std::uint32_t seam_curve = editor.add_curve(LineCurve3{p0, seam_direction});
+  const Result<EdgeId> seam_edge = editor.add_edge(base_vertex.value(), apex_vertex.value(),
+                                                   seam_curve, 0.0, slant, tol);
+  if (!seam_edge.has_value()) return seam_edge.error();
+
+  const Vec3d down{-axis[0], -axis[1], -axis[2]};
+  const Vec3d base_vector{base[0], base[1], base[2]};
+  const std::uint32_t cap_surface = editor.add_surface(Plane3{down, dot(down, base_vector)});
+  const Result<FaceId> cap_face = editor.add_face(cap_surface, false, tol);
+  if (!cap_face.has_value()) return cap_face.error();
+  const std::array<CoedgeSpec, 1> cap_loop{CoedgeSpec{base_edge.value(), true}};
+  const Result<LoopId> cap_loop_id = editor.add_loop(cap_face.value(), cap_loop, true);
+  if (!cap_loop_id.has_value()) return cap_loop_id.error();
+
+  const std::uint32_t lateral_surface =
+      editor.add_surface(Cone3{base, axis, x_axis, base_radius, half_angle});
+  const Result<FaceId> lateral_face = editor.add_face(lateral_surface, false, tol);
+  if (!lateral_face.has_value()) return lateral_face.error();
+  const std::array<CoedgeSpec, 3> lateral_loop{
+      CoedgeSpec{base_edge.value(), false}, CoedgeSpec{seam_edge.value(), false},
+      CoedgeSpec{seam_edge.value(), true}};
+  const Result<LoopId> lateral_loop_id =
+      editor.add_loop(lateral_face.value(), lateral_loop, true);
+  if (!lateral_loop_id.has_value()) return lateral_loop_id.error();
+
+  const std::array<FaceId, 2> faces{cap_face.value(), lateral_face.value()};
+  const Result<ShellId> shell = editor.add_shell(faces, true);
+  if (!shell.has_value()) return shell.error();
+  const std::array<ShellId, 1> shells{shell.value()};
+  const Result<SolidId> solid = editor.add_solid(shells, tol);
+  if (!solid.has_value()) return solid.error();
+  return editor.commit();
+}
+
+// Sphere of `radius` around `center`, cut along the meridian half great circle
+// in the plane that contains the canonical x axis (1, 0, 0) and axis
+// (0, 0, 1). The seam is CircleCurve3{center, x_axis, axis, radius} over
+// [-pi/2, pi/2], running from the south pole to the north pole, and the single
+// face's loop uses it once in each direction. V = 2, E = 1, F = 1 (chi = 2).
+//
+// The frame is canonical because make_sphere has no frame parameter: axis is
+// (0, 0, 1) and x_axis is (1, 0, 0), so Sphere3::eval(0, v) is exactly the
+// seam curve and the poles are the two vertices.
+//
+// Validation:
+//   - non-finite center or radius      -> Errc::non_finite
+//   - non-finite or negative tolerance -> Errc::tolerance_violation
+//   - radius <= 0                      -> Errc::degenerate
+//   - a pole that is not representable,
+//     or two poles rounding to one point -> Errc::degenerate
+// Any error from a SolidEditor add_* call is propagated unchanged; commit()
+// performs the final validation.
+inline Result<Brep> make_sphere(Point3d center, double radius, double tol) {
+  if (!detail::primitive_point_finite(center) || !std::isfinite(radius)) {
+    return Error{Errc::non_finite, "make_sphere: input is not finite", 0u, 0u};
+  }
+  if (!std::isfinite(tol) || tol < 0.0) {
+    return Error{Errc::tolerance_violation,
+                 "make_sphere: tolerance must be finite and non-negative", 0u, 0u};
+  }
+  if (!(radius > 0.0)) {
+    return Error{Errc::degenerate, "make_sphere: radius must be positive", 0u, 0u};
+  }
+
+  const Vec3d axis{0.0, 0.0, 1.0};
+  const Vec3d x_axis{1.0, 0.0, 0.0};
+  const Point3d south{center[0] - radius * axis[0], center[1] - radius * axis[1],
+                      center[2] - radius * axis[2]};
+  const Point3d north{center[0] + radius * axis[0], center[1] + radius * axis[1],
+                      center[2] + radius * axis[2]};
+  if (!detail::primitive_point_finite(south) || !detail::primitive_point_finite(north)) {
+    return Error{Errc::degenerate, "make_sphere: pole is not representable", 0u, 0u};
+  }
+  if (detail::primitive_point_equal(south, north)) {
+    return Error{Errc::degenerate, "make_sphere: seam has zero length", 0u, 0u};
+  }
+
+  constexpr double kHalfPi = std::numbers::pi_v<double> / 2.0;
+
+  SolidEditor editor;
+  const Result<VertexId> south_vertex = editor.add_vertex(south, tol);
+  if (!south_vertex.has_value()) return south_vertex.error();
+  const Result<VertexId> north_vertex = editor.add_vertex(north, tol);
+  if (!north_vertex.has_value()) return north_vertex.error();
+
+  const std::uint32_t seam_curve =
+      editor.add_curve(CircleCurve3{center, x_axis, axis, radius});
+  const Result<EdgeId> seam_edge = editor.add_edge(
+      south_vertex.value(), north_vertex.value(), seam_curve, -kHalfPi, kHalfPi, tol);
+  if (!seam_edge.has_value()) return seam_edge.error();
+
+  const std::uint32_t sphere_surface =
+      editor.add_surface(Sphere3{center, axis, x_axis, radius});
+  const Result<FaceId> face = editor.add_face(sphere_surface, false, tol);
+  if (!face.has_value()) return face.error();
+  const std::array<CoedgeSpec, 2> loop{CoedgeSpec{seam_edge.value(), false},
+                                        CoedgeSpec{seam_edge.value(), true}};
+  const Result<LoopId> loop_id = editor.add_loop(face.value(), loop, true);
+  if (!loop_id.has_value()) return loop_id.error();
+
+  const std::array<FaceId, 1> faces{face.value()};
+  const Result<ShellId> shell = editor.add_shell(faces, true);
+  if (!shell.has_value()) return shell.error();
+  const std::array<ShellId, 1> shells{shell.value()};
+  const Result<SolidId> solid = editor.add_solid(shells, tol);
+  if (!solid.has_value()) return solid.error();
+  return editor.commit();
+}
+
 }  // namespace v1
 }  // namespace geom
