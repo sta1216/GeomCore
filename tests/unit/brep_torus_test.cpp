@@ -145,6 +145,15 @@ TEST_CASE("torus loop uses both seams in both directions") {
 
   const std::vector<geom::Coedge> uses = loop_uses(b, loop);
   REQUIRE(uses.size() == 4);
+  CHECK(b.face(face).reversed == false);
+  // The loop starts at the forward use of the u seam (outer equator, R + r).
+  const geom::Coedge& first = b.coedge(b.loop(loop).start);
+  CHECK(first.edge == uses[0].edge);
+  CHECK(first.reversed == false);
+  const auto* first_circle =
+      std::get_if<geom::CircleCurve3>(&b.geometry().curves[b.edge(first.edge).curve]);
+  REQUIRE(first_circle != nullptr);
+  CHECK(first_circle->radius == 4.0);
   CHECK(uses[0].reversed == false);
   CHECK(uses[1].reversed == false);
   CHECK(uses[2].reversed == true);
@@ -308,7 +317,21 @@ TEST_CASE("torus errors carry specific codes") {
   REQUIRE_FALSE(negative_tol.has_value());
   CHECK(negative_tol.error().code == geom::Errc::tolerance_violation);
 
-  CHECK_FALSE(geom::make_torus({0, 0, 0}, {0, 0, 1}, 3.0, 1.0, nan).has_value());
+  const auto nan_tol = geom::make_torus({0, 0, 0}, {0, 0, 1}, 3.0, 1.0, nan);
+  REQUIRE_FALSE(nan_tol.has_value());
+  CHECK(nan_tol.error().code == geom::Errc::tolerance_violation);
+}
+
+TEST_CASE("torus accepts an axis within the analytic unit tolerance") {
+  const auto accepted = geom::make_torus({0, 0, 0}, {0, 0, 1.0 + 5e-13}, 3.0, 1.0, 0.0);
+  REQUIRE(accepted.has_value());
+  CHECK(geom::validate_topology(accepted.value()).ok());
+  CHECK(geom::euler_characteristic(accepted.value(),
+                                   accepted.value().solid_ids().front()) == 0);
+
+  const auto rejected = geom::make_torus({0, 0, 0}, {0, 0, 1.0 + 3e-12}, 3.0, 1.0, 0.0);
+  REQUIRE_FALSE(rejected.has_value());
+  CHECK(rejected.error().code == geom::Errc::degenerate);
 }
 
 TEST_CASE("torus frame adapts to a tilted axis") {
