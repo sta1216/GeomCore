@@ -14,6 +14,13 @@ else()
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(geom_warnings INTERFACE -Wno-sign-conversion)
   endif()
+  # GCC 13 under -fsanitize=thread reports a false positive
+  # -Wmaybe-uninitialized for a std::variant moved through vector growth
+  # (SolidEditor::add_curve inlined into brep_cylinder_test). Ordinary GCC
+  # builds keep the warning; only the TSan configuration suppresses it.
+  if(GEOM_TSAN AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(geom_warnings INTERFACE -Wno-maybe-uninitialized)
+  endif()
 endif()
 
 if(GEOM_WERROR)
