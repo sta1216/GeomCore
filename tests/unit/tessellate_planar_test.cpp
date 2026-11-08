@@ -58,6 +58,28 @@ SquareFace make_square_face() {
   return make_square_face_with_plane(geom::Plane3{{0, 0, 1}, 0.0});
 }
 
+// Square face without surface geometry: pins the unsupported path now that the
+// analytic curved surfaces are tessellated.
+SquareFace make_square_face_without_surface() {
+  geom::SolidEditor ed;
+  SquareFace s{std::move(ed), {}, {}, {}};
+  const geom::Point3d pts[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+  for (int i = 0; i < 4; ++i) s.vertices[i] = s.editor.add_vertex(pts[i], 0.0).value();
+  const std::uint32_t line = s.editor.add_curve(geom::LineCurve3{{0, 0, 0}, {1, 0, 0}});
+  std::array<geom::EdgeId, 4> edges{};
+  for (int i = 0; i < 4; ++i) {
+    edges[i] = s.editor.add_edge(s.vertices[i], s.vertices[(i + 1) % 4], line, 0.0, 1.0, 0.0)
+                   .value();
+  }
+  s.face = s.editor.add_face(geom::kNoGeometry, false, 0.0).value();
+  std::array<geom::CoedgeSpec, 4> specs{};
+  for (int i = 0; i < 4; ++i) specs[i] = geom::CoedgeSpec{edges[i], false};
+  s.loop = s.editor.add_loop(s.face, specs, true).value();
+  auto shell = s.editor.add_shell(std::array<geom::FaceId, 1>{s.face}, false).value();
+  s.editor.add_solid(std::array<geom::ShellId, 1>{shell}, 0.0).value();
+  return s;
+}
+
 // Two unit squares sharing the edge (1,0,0)-(1,1,0), both wound CCW seen from
 // +z. The shared edge is one Edge used forward by the left face and reversed by
 // the right face; the tessellation must weld both uses to the same samples.
@@ -591,10 +613,11 @@ TEST_CASE("tessellation rejects non-finite and degenerate planes") {
   }
 }
 
-TEST_CASE("non-planar faces are not tessellated yet") {
-  const auto cylinder = geom::make_cylinder({0, 0, 0}, {0, 0, 1}, 1.0, 2.0, 0.0);
-  REQUIRE(cylinder.has_value());
-  const auto r = geom::tessellate(cylinder.value(), {});
+TEST_CASE("faces without surface geometry are rejected") {
+  SquareFace s = make_square_face_without_surface();
+  const auto b = s.editor.commit();
+  REQUIRE(b.has_value());
+  const auto r = geom::tessellate(b.value(), {});
   REQUIRE_FALSE(r.has_value());
   CHECK(r.error().code == geom::Errc::unsupported);
 }

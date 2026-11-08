@@ -45,6 +45,7 @@ set(GEOM_TEST_SOURCES
   unit/brep_validate_test.cpp
   unit/brep_tolerance_test.cpp
   unit/tessellate_planar_test.cpp
+  unit/tessellate_curved_test.cpp
   unit/surfaces_test.cpp
   unit/hull2d_test.cpp
   unit/delaunay2_test.cpp
