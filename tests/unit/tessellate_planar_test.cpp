@@ -196,7 +196,7 @@ struct Disk {
   VertexId seam;
 };
 
-Disk make_disk() {
+Disk make_disk(bool reversed = false) {
   geom::SolidEditor ed;
   Disk d{std::move(ed), {}, {}};
   const double tau = 2.0 * std::numbers::pi_v<double>;
@@ -205,7 +205,7 @@ Disk make_disk() {
       d.editor.add_curve(geom::CircleCurve3{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, 1.0});
   const EdgeId edge = d.editor.add_edge(d.seam, d.seam, circle, 0.0, tau, 0.0).value();
   const std::uint32_t plane = d.editor.add_surface(geom::Plane3{{0, 0, 1}, 0.0});
-  d.face = d.editor.add_face(plane, false, 0.0).value();
+  d.face = d.editor.add_face(plane, reversed, 0.0).value();
   d.editor.add_loop(d.face, std::array<CoedgeSpec, 1>{CoedgeSpec{edge, false}}, true).value();
   auto shell = d.editor.add_shell(std::array<FaceId, 1>{d.face}, false).value();
   d.editor.add_solid(std::array<geom::ShellId, 1>{shell}, 0.0).value();
@@ -490,6 +490,39 @@ TEST_CASE("reversed face keeps the outward winding") {
     REQUIRE(std::hypot(n[0], n[1], n[2]) > 0.0);
     const double expected_z = mesh.triangle_face[t] == l.faces[0].index() ? 1.0 : -1.0;
     CHECK(geom::dot(n, geom::Vec3d{0, 0, expected_z}) > 0.0);
+  }
+}
+
+TEST_CASE("reversed closed-circle disk keeps every seam sample") {
+  Disk d = make_disk(true);
+  const auto b = d.editor.commit();
+  REQUIRE(b.has_value());
+  const geom::TessellationOptions options{0.1, 0.35};
+  const auto result = geom::tessellate(b.value(), options);
+  REQUIRE(result.has_value());
+  const geom::TriMesh& mesh = result.value();
+  const double pi = std::numbers::pi_v<double>;
+  const double step = 2.0 * std::acos(1.0 - options.deflection);
+  const auto expected = static_cast<std::uint32_t>(std::ceil(2.0 * pi / step));
+  CHECK(expected == 7);
+  // A reversed walk that drops sample 0 of the closed edge would produce n-1
+  // positions and n-3 triangles, so pin the exact counts of the disc.
+  CHECK(mesh.positions.size() == expected);
+  CHECK(mesh.triangles.size() == expected - 2u);
+  std::size_t seam_count = 0;
+  for (const Point3d& p : mesh.positions) {
+    if (p[0] == 1.0 && p[1] == 0.0 && p[2] == 0.0) ++seam_count;
+  }
+  CHECK(seam_count == 1);
+  for (const auto& t : mesh.triangles) {
+    const geom::Vec3d ab = mesh.positions[t[1]] - mesh.positions[t[0]];
+    const geom::Vec3d ac = mesh.positions[t[2]] - mesh.positions[t[0]];
+    const geom::Vec3d n = geom::cross(ab, ac);
+    const double length = std::hypot(n[0], n[1], n[2]);
+    REQUIRE(length > 0.0);
+    CHECK(n[0] / length == doctest::Approx(0.0).epsilon(1e-12));
+    CHECK(n[1] / length == doctest::Approx(0.0).epsilon(1e-12));
+    CHECK(n[2] / length == doctest::Approx(-1.0).epsilon(1e-12));
   }
 }
 
