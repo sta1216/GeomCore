@@ -348,6 +348,144 @@ inline void split_update_residual(long double& max_residual, const Point2d& p,
   if (worst > max_residual) max_residual = worst;
 }
 
+// Cheap, non-exact rejection for the broad-phase candidate stream. When both
+// endpoints of one segment lie clearly on the same side of the other segment's
+// line, the two segments cannot touch. The threshold is deliberately far above
+// the rounding error of the double determinants (about 1e-16 relative), so a
+// pair is only rejected when the double evaluation is unambiguous; exact
+// collinearity, endpoint touches, overflow to infinity and underflow to zero all
+// fall through to the exact path. This removes the near-parallel disjoint pairs
+// that dominate a dense polygon-ring candidate set without weakening exactness.
+inline bool split_clearly_disjoint(const Point2d& a, const Point2d& b,
+                                   const Point2d& c, const Point2d& d) noexcept {
+  const double abx = b[0] - a[0];
+  const double aby = b[1] - a[1];
+  const double acx = c[0] - a[0];
+  const double acy = c[1] - a[1];
+  const double adx = d[0] - a[0];
+  const double ady = d[1] - a[1];
+  const double d1 = abx * acy - aby * acx;
+  const double d2 = abx * ady - aby * adx;
+  const double t1 = 1e-12 * (std::fabs(abx * acy) + std::fabs(aby * acx));
+  const double t2 = 1e-12 * (std::fabs(abx * ady) + std::fabs(aby * adx));
+  if ((d1 > t1 && d2 > t2) || (d1 < -t1 && d2 < -t2)) return true;
+
+  const double cdx = d[0] - c[0];
+  const double cdy = d[1] - c[1];
+  const double cax = a[0] - c[0];
+  const double cay = a[1] - c[1];
+  const double cbx = b[0] - c[0];
+  const double cby = b[1] - c[1];
+  const double d3 = cdx * cay - cdy * cax;
+  const double d4 = cdx * cby - cdy * cbx;
+  const double t3 = 1e-12 * (std::fabs(cdx * cay) + std::fabs(cdy * cax));
+  const double t4 = 1e-12 * (std::fabs(cdx * cby) + std::fabs(cdy * cbx));
+  return (d3 > t3 && d4 > t4) || (d3 < -t3 && d4 < -t4);
+}
+
+// Double-double arithmetic for the proper-crossing parameters. Four exact
+// determinant ratios dominate the cost of a dense arrangement (the Expansion
+// path allocates for every product), while the parameters only need enough
+// precision for the contact point and the residual check. Two doubles carry
+// about 106 bits, so a plain double-double evaluation of the orientation
+// determinants is far more accurate than the long double division that follows;
+// the exact signs still come from sign_orient2d. Overflow, underflow and any
+// cancellation fall back to the exact Expansion path.
+struct SplitDd {
+  double hi = 0.0;
+  double lo = 0.0;
+};
+
+inline SplitDd split_dd_add(SplitDd a, SplitDd b) noexcept {
+  const double s = a.hi + b.hi;
+  const double v = s - a.hi;
+  double e = (a.hi - (s - v)) + (b.hi - v);
+  e += a.lo + b.lo;
+  const double t = s + e;
+  e -= (t - s);
+  return SplitDd{t, e};
+}
+
+inline SplitDd split_dd_sub(SplitDd a, SplitDd b) noexcept {
+  return split_dd_add(a, SplitDd{-b.hi, -b.lo});
+}
+
+inline SplitDd split_dd_mul(SplitDd a, SplitDd b) noexcept {
+  const double p = a.hi * b.hi;
+  double e = std::fma(a.hi, b.hi, -p);
+  e += a.hi * b.lo + a.lo * b.hi;
+  const double t = p + e;
+  e -= (t - p);
+  return SplitDd{t, e};
+}
+
+inline SplitDd split_dd_diff(double x, double y) noexcept {
+  double s = 0.0;
+  double e = 0.0;
+  two_diff(x, y, s, e);
+  return SplitDd{s, e};
+}
+
+inline SplitDd split_det_dd(double ax, double ay, double bx, double by,
+                            double cx, double cy) noexcept {
+  const SplitDd abx = split_dd_diff(bx, ax);
+  const SplitDd aby = split_dd_diff(by, ay);
+  const SplitDd acx = split_dd_diff(cx, ax);
+  const SplitDd acy = split_dd_diff(cy, ay);
+  return split_dd_sub(split_dd_mul(abx, acy), split_dd_mul(aby, acx));
+}
+
+inline bool split_dd_finite(SplitDd v) noexcept {
+  return std::isfinite(v.hi) && std::isfinite(v.lo);
+}
+
+inline bool split_dd_params(double ax, double ay, double bx, double by, double cx,
+                            double cy, double dx, double dy, long double& t,
+                            long double& u) noexcept {
+  const SplitDd det1 = split_det_dd(ax, ay, bx, by, cx, cy);
+  const SplitDd det2 = split_det_dd(ax, ay, bx, by, dx, dy);
+  const SplitDd det3 = split_det_dd(cx, cy, dx, dy, ax, ay);
+  const SplitDd det4 = split_det_dd(cx, cy, dx, dy, bx, by);
+  if (!split_dd_finite(det1) || !split_dd_finite(det2) || !split_dd_finite(det3) ||
+      !split_dd_finite(det4)) {
+    return false;
+  }
+  const long double o1 = static_cast<long double>(det1.hi) + det1.lo;
+  const long double o2 = static_cast<long double>(det2.hi) + det2.lo;
+  const long double o3 = static_cast<long double>(det3.hi) + det3.lo;
+  const long double o4 = static_cast<long double>(det4.hi) + det4.lo;
+  // Subnormal determinants lose enough precision that the ratio is no longer
+  // trustworthy; the exact path handles those rare extreme-span pairs.
+  constexpr long double kMinDdMagnitude = 1e-290L;
+  if (std::fabs(o1) < kMinDdMagnitude || std::fabs(o2) < kMinDdMagnitude ||
+      std::fabs(o3) < kMinDdMagnitude || std::fabs(o4) < kMinDdMagnitude) {
+    return false;
+  }
+  // For a proper crossing the two endpoints of each segment lie on opposite
+  // sides, so the denominators are sums of two same-sign magnitudes: the
+  // subtraction below cannot cancel.
+  const long double denom_t = o3 - o4;
+  const long double denom_u = o1 - o2;
+  if (!(denom_t > 0.0L) && !(denom_t < 0.0L)) return false;
+  if (!(denom_u > 0.0L) && !(denom_u < 0.0L)) return false;
+  if (o1 == 0.0L || o2 == 0.0L || o3 == 0.0L || o4 == 0.0L) return false;
+
+  const long double tt = o3 / denom_t;
+  const long double uu = o1 / denom_u;
+  if (!std::isfinite(tt) || !std::isfinite(uu)) return false;
+  // Match the exact path: materialize as double and reject ratios that round to
+  // an endpoint, which would silently lose the split point.
+  const double t_double = static_cast<double>(tt);
+  const double u_double = static_cast<double>(uu);
+  if (!std::isfinite(t_double) || !std::isfinite(u_double)) return false;
+  if (t_double <= 0.0 || t_double >= 1.0 || u_double <= 0.0 || u_double >= 1.0) {
+    return false;
+  }
+  t = t_double;
+  u = u_double;
+  return true;
+}
+
 // Classifies one candidate pair with the four exact orientation signs and adds
 // the resulting split parameters. Returns true when the pair touches, overlaps
 // or crosses.
@@ -358,6 +496,40 @@ inline bool split_record_pair(const SplitInput& sa, std::vector<SplitParam>& pa,
   const Point2d& b = sa.seg.b;
   const Point2d& c = sb.seg.a;
   const Point2d& d = sb.seg.b;
+
+  if (split_clearly_disjoint(a, b, c, d)) return false;
+
+  // Fast path: two non-collinear segments that share an exact endpoint meet only
+  // at that point, which is already a vertex of both segments. Adjacent ring
+  // edges share an endpoint by construction and dominate the candidate count, so
+  // recording the pair here avoids four exact orientation tests per pair. A
+  // collinear pair still needs the general path below because the overlap can
+  // extend past the shared endpoint.
+  const Point2d* shared = nullptr;
+  const Point2d* far_a = nullptr;
+  const Point2d* far_b = nullptr;
+  if (a[0] == c[0] && a[1] == c[1]) {
+    shared = &a;
+    far_a = &b;
+    far_b = &d;
+  } else if (a[0] == d[0] && a[1] == d[1]) {
+    shared = &a;
+    far_a = &b;
+    far_b = &c;
+  } else if (b[0] == c[0] && b[1] == c[1]) {
+    shared = &b;
+    far_a = &a;
+    far_b = &d;
+  } else if (b[0] == d[0] && b[1] == d[1]) {
+    shared = &b;
+    far_a = &a;
+    far_b = &c;
+  }
+  if (shared != nullptr &&
+      sign_orient2d((*shared)[0], (*shared)[1], (*far_a)[0], (*far_a)[1],
+                    (*far_b)[0], (*far_b)[1]) != 0) {
+    return true;
+  }
 
   const int o1 = sign_orient2d(a[0], a[1], b[0], b[1], c[0], c[1]);
   const int o2 = sign_orient2d(a[0], a[1], b[0], b[1], d[0], d[1]);
@@ -408,38 +580,41 @@ inline bool split_record_pair(const SplitInput& sa, std::vector<SplitParam>& pa,
   // failure is visible instead of silently bending the geometry.
   if (((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) &&
       ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) {
-    const Expansion det1 =
-        split_orient_det(a[0], a[1], b[0], b[1], c[0], c[1]);
-    const Expansion det2 =
-        split_orient_det(a[0], a[1], b[0], b[1], d[0], d[1]);
-    const Expansion det3 =
-        split_orient_det(c[0], c[1], d[0], d[1], a[0], a[1]);
-    const Expansion det4 =
-        split_orient_det(c[0], c[1], d[0], d[1], b[0], b[1]);
-
     long double t = 0.0L;
     long double u = 0.0L;
-    bool have_params = split_exact_params(det1, det2, det3, det4, t, u);
+    bool have_params = split_dd_params(a[0], a[1], b[0], b[1], c[0], c[1], d[0], d[1], t, u);
     if (!have_params) {
-      const double max_coord = std::max(
-          {std::fabs(a[0]), std::fabs(a[1]), std::fabs(b[0]), std::fabs(b[1]),
-           std::fabs(c[0]), std::fabs(c[1]), std::fabs(d[0]), std::fabs(d[1])});
-      const int shift =
-          (max_coord > 0.0 && std::isfinite(max_coord)) ? -std::ilogb(max_coord) : 0;
-      const double sax = std::scalbn(a[0], shift);
-      const double say = std::scalbn(a[1], shift);
-      const double sbx = std::scalbn(b[0], shift);
-      const double sby = std::scalbn(b[1], shift);
-      const double scx = std::scalbn(c[0], shift);
-      const double scy = std::scalbn(c[1], shift);
-      const double sdx = std::scalbn(d[0], shift);
-      const double sdy = std::scalbn(d[1], shift);
+      const Expansion det1 =
+          split_orient_det(a[0], a[1], b[0], b[1], c[0], c[1]);
+      const Expansion det2 =
+          split_orient_det(a[0], a[1], b[0], b[1], d[0], d[1]);
+      const Expansion det3 =
+          split_orient_det(c[0], c[1], d[0], d[1], a[0], a[1]);
+      const Expansion det4 =
+          split_orient_det(c[0], c[1], d[0], d[1], b[0], b[1]);
 
-      const Expansion sdet1 = split_orient_det(sax, say, sbx, sby, scx, scy);
-      const Expansion sdet2 = split_orient_det(sax, say, sbx, sby, sdx, sdy);
-      const Expansion sdet3 = split_orient_det(scx, scy, sdx, sdy, sax, say);
-      const Expansion sdet4 = split_orient_det(scx, scy, sdx, sdy, sbx, sby);
-      have_params = split_exact_params(sdet1, sdet2, sdet3, sdet4, t, u);
+      have_params = split_exact_params(det1, det2, det3, det4, t, u);
+      if (!have_params) {
+        const double max_coord = std::max(
+            {std::fabs(a[0]), std::fabs(a[1]), std::fabs(b[0]), std::fabs(b[1]),
+             std::fabs(c[0]), std::fabs(c[1]), std::fabs(d[0]), std::fabs(d[1])});
+        const int shift =
+            (max_coord > 0.0 && std::isfinite(max_coord)) ? -std::ilogb(max_coord) : 0;
+        const double sax = std::scalbn(a[0], shift);
+        const double say = std::scalbn(a[1], shift);
+        const double sbx = std::scalbn(b[0], shift);
+        const double sby = std::scalbn(b[1], shift);
+        const double scx = std::scalbn(c[0], shift);
+        const double scy = std::scalbn(c[1], shift);
+        const double sdx = std::scalbn(d[0], shift);
+        const double sdy = std::scalbn(d[1], shift);
+
+        const Expansion sdet1 = split_orient_det(sax, say, sbx, sby, scx, scy);
+        const Expansion sdet2 = split_orient_det(sax, say, sbx, sby, sdx, sdy);
+        const Expansion sdet3 = split_orient_det(scx, scy, sdx, sdy, sax, say);
+        const Expansion sdet4 = split_orient_det(scx, scy, sdx, sdy, sbx, sby);
+        have_params = split_exact_params(sdet1, sdet2, sdet3, sdet4, t, u);
+      }
     }
 
     if (!have_params) {
@@ -508,12 +683,16 @@ inline bool split_record_pair(const SplitInput& sa, std::vector<SplitParam>& pa,
 //     intersection point to the two supporting lines; it is +infinity when a
 //     crossing is not representable (see the supported domain below).
 //
-// Candidate pairs come from a min-x sweep with an active set; the exact
+// Candidate pairs come from a min-x sweep with an active set; a cheap
+// double-precision same-side test rejects the near-parallel disjoint pairs that
+// dominate a dense ring before the exact classification runs. The exact
 // classification uses sign_orient2d, so disjoint and exact endpoint cases never
-// depend on a tolerance. Proper-crossing parameters are exact determinant
-// ratios, evaluated in the unscaled frame first and retried in a 2^k-scaled
-// frame only if the unscaled products overflow/underflow; they are then clamped
-// to [0, 1]. The supported domain is finite coordinates whose input exponent
+// depend on a tolerance. Pairs that share an exact endpoint are recorded without
+// further work unless the two segments are collinear. Proper-crossing parameters
+// are determinant ratios: they are evaluated in double-double first (about 106
+// bits, no allocation), then in exact Expansions in the unscaled frame, and
+// finally in a 2^k-scaled frame. A ratio that rounds to an endpoint is rejected
+// rather than emitted. The supported domain is finite coordinates whose input exponent
 // span is at most detail::kMaxSpan (1314). Within it, differences and products
 // are formed exactly as Expansions, so mixed spans such as 2e200 and 1e-160 are
 // handled. Parameters are materialized as double regardless of the width of

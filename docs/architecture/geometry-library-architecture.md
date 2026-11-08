@@ -1139,9 +1139,10 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
   `arrangement2`/`boolean2`、KD 树与 BVH 的代码及性质/差分测试已完成；QA-2
   一致性测试与 `geom_bench_m1b` 已入库（实现取舍见 ADR-020）。**验收状态
   （2026-11-08 实测，见 `docs/benchmarks/m1b.md`）**：QA-1 FAIL，仅为性能——
-  winding 播种修复后面积相对误差 1.783e-13（门禁 1e-12）已通过，但并集
-  4.8–4.9 s vs 80 ms；QA-4 FAIL（构建 2.6–2.7 s vs 350 ms，0.42–0.44 Mray/s
-  vs 8）；QA-2 的 `tsan` job 已在 ubuntu-24.04 CI 通过；覆盖率实测 cgeom 分支
+  winding 播种修复后面积相对误差 1.78e-13（门禁 1e-12）已通过；拆分阶段优化后
+  并集 1.08 s（较 4.8–4.9 s 降低约 4.5×），仍超 80 ms 门禁约 13×；QA-4 FAIL
+  （构建 3.2 s vs 350 ms，0.34 Mray/s vs 8）；QA-2 的 `tsan` job 已在
+  ubuntu-24.04 CI 通过；覆盖率实测 cgeom 分支
   73.1%（门禁 70），行 ≥90。因此 **M1b 代码质量门禁通过，但 QA-1/QA-4 性能验收
   未达成**，不得据 §16.2 的 M1 行声称已达标。
 
