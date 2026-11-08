@@ -1522,10 +1522,10 @@ git commit -m "feat(m2): compute B-rep mass properties and record QA-10/QA-11 ev
 
 ## M2 出口验收
 
-- [ ] QA-10：100,000 面 B-rep 网格化——水密（每条无向边恰好两次）、无零面积/翻转三角形、弦高 ≤ deflection、共享边采样逐点一致；`docs/benchmarks/m2.md` 记录实测面数、三角形数、耗时与 Mtri/s。**（2026-11-08 实测 FAIL：99,996 面 / 199,992 三角形，0.19–0.21 Mtri/s vs 1.0 Mtri/s；水密与朝外卷绕通过，详见 `docs/benchmarks/m2.md`）**
-- [x] QA-11：box/cylinder/sphere/torus 的体积、质心、惯性矩相对误差 ≤ 1e-6，记录最大值。**（实测最大相对误差 5.33e-10）**
+- [ ] QA-10：100,000 面 B-rep 网格化——水密（每条无向边恰好两次）、无零面积/翻转三角形、弦高 ≤ deflection、共享边采样逐点一致；`docs/benchmarks/m2.md` 记录实测面数、三角形数、耗时与 Mtri/s。**（2026-11-08 实测 FAIL：99,996 面 / 199,992 三角形，0.20 Mtri/s vs 1.0 Mtri/s；水密与朝外卷绕通过，详见 `docs/benchmarks/m2.md`）**
+- [x] QA-11：box/cylinder/sphere/torus 的体积、质心、惯性矩相对误差 ≤ 1e-6，记录最大值。**（实测最大相对误差 7.62e-10）**
 - [x] 所有基本体 `validate_topology` 与 `validate_tolerances` 通过；Euler 特征数断言：box/cylinder/cone/sphere = 2、torus = 0。
-- [ ] Debug 与 Release 全套 `ctest` 通过；GCC/Clang CI 通过；无新增警告。**（本地 MSVC Debug/Release 均 366/366 用例、450,255 断言、无新增警告；GCC/Clang CI 未在本任务中复跑）**
+- [ ] Debug 与 Release 全套 `ctest` 通过；GCC/Clang CI 通过；无新增警告。**（本地 MSVC Debug/Release 均 369/369 用例、450,299 断言、无新增警告；GCC/Clang CI 未在本任务中复跑）**
 - [x] 架构 §16.3、`docs/benchmarks/m2.md`、ADR-0021/0022 已更新，数字与 CI 一致。
 
 ## 自检

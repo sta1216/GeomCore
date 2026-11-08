@@ -100,6 +100,34 @@ inline double mass_geometry_tolerance(double deflection, double scale) noexcept 
   return std::max(deflection, relative);
 }
 
+// Local accumulation frame: the centre of the brep's vertex bounding box.
+// Every sample is translated by -reference before it enters the integrals, so
+// a body far from the world origin does not lose its moments to cancellation.
+inline Result<Vec3d> mass_reference(const Brep& brep) {
+  if (brep.vertex_count() == 0) {
+    return mass_numeric_failure("mass_properties: brep has no vertices");
+  }
+  double low[3] = {std::numeric_limits<double>::infinity(),
+                   std::numeric_limits<double>::infinity(),
+                   std::numeric_limits<double>::infinity()};
+  double high[3] = {-std::numeric_limits<double>::infinity(),
+                    -std::numeric_limits<double>::infinity(),
+                    -std::numeric_limits<double>::infinity()};
+  for (const VertexId id : brep.vertex_ids()) {
+    const Point3d& point = brep.vertex(id).point;
+    for (int axis = 0; axis < 3; ++axis) {
+      low[axis] = std::min(low[axis], point[axis]);
+      high[axis] = std::max(high[axis], point[axis]);
+    }
+  }
+  const Vec3d center{0.5 * (low[0] + high[0]), 0.5 * (low[1] + high[1]),
+                     0.5 * (low[2] + high[2])};
+  if (!std::isfinite(center[0]) || !std::isfinite(center[1]) || !std::isfinite(center[2])) {
+    return mass_numeric_failure("mass_properties: vertex bounds are not finite");
+  }
+  return center;
+}
+
 inline const CircleCurve3* mass_circle_curve(const Brep& brep, EdgeId id) noexcept {
   const Edge& edge = brep.edge(id);
   if (edge.curve == kNoGeometry || edge.curve >= brep.geometry().curves.size()) return nullptr;
@@ -173,7 +201,8 @@ inline Result<std::vector<CoedgeId>> mass_single_loop_coedges(const Brep& brep, 
 inline Vec3d mass_negate(Vec3d v) noexcept { return Vec3d{-v[0], -v[1], -v[2]}; }
 
 // Adds one oriented surface element dA (already including du dv and the face
-// reversal) with quadrature weight w.
+// reversal) with quadrature weight w. The point is relative to the local
+// accumulation frame; the area vector is translation invariant.
 inline void mass_add_surface_element(MassIntegrals& acc, Point3d point, Vec3d area,
                                      double weight) noexcept {
   const Vec3d x{point[0], point[1], point[2]};
@@ -234,7 +263,8 @@ inline void mass_gauss_legendre(int order, std::vector<double>& nodes,
 
 template <class Surface>
 inline void mass_integrate_parametric(const Surface& surface, const MassUvDomain& domain,
-                                      bool reversed, const std::vector<double>& nodes,
+                                      bool reversed, const Vec3d& reference,
+                                      const std::vector<double>& nodes,
                                       const std::vector<double>& weights, MassIntegrals& acc) {
   const double middle_u = 0.5 * (domain.u0 + domain.u1);
   const double middle_v = 0.5 * (domain.v0 + domain.v1);
@@ -247,7 +277,10 @@ inline void mass_integrate_parametric(const Surface& surface, const MassUvDomain
       const double weight = half_u * half_v * weights[i] * weights[j];
       Vec3d area = cross(surface.du(u, v), surface.dv(u, v));
       if (reversed) area = mass_negate(area);
-      mass_add_surface_element(acc, surface.eval(u, v), area, weight);
+      const Point3d point = surface.eval(u, v);
+      const Point3d local{point[0] - reference[0], point[1] - reference[1],
+                          point[2] - reference[2]};
+      mass_add_surface_element(acc, local, area, weight);
     }
   }
 }
@@ -484,7 +517,7 @@ inline Result<std::vector<Point3d>> mass_loop_polygon(const Brep& brep, LoopId i
 
 inline Result<void> mass_add_planar_face(const Brep& brep, FaceId id, const Plane3& plane,
                                          const MassPropertiesOptions& options,
-                                         MassIntegrals& acc) {
+                                         const Vec3d& reference, MassIntegrals& acc) {
   const double normal_length = norm2(plane.normal);
   if (!std::isfinite(normal_length) || !(normal_length > 0.0)) {
     return mass_numeric_failure("mass_properties: face plane normal is not usable", id.index());
@@ -494,17 +527,19 @@ inline Result<void> mass_add_planar_face(const Brep& brep, FaceId id, const Plan
   // x·n is constant on the plane: the signed plane distance, flipped when the
   // face normal is opposite the stored plane normal.
   const double distance = brep.face(id).reversed ? -offset : offset;
+  const bool reversed = brep.face(id).reversed;
+  const Vec3d outward = reversed ? mass_negate(normal) : normal;
+  const double local_distance = distance - dot(outward, reference);
 
-  const Vec3d reference = std::fabs(normal[0]) < 0.9 ? Vec3d{1.0, 0.0, 0.0}
-                                                     : Vec3d{0.0, 1.0, 0.0};
-  const Vec3d raw_u = cross(reference, normal);
+  const Vec3d reference_axis = std::fabs(normal[0]) < 0.9 ? Vec3d{1.0, 0.0, 0.0}
+                                                          : Vec3d{0.0, 1.0, 0.0};
+  const Vec3d raw_u = cross(reference_axis, normal);
   const double raw_length = norm2(raw_u);
   if (!std::isfinite(raw_length) || !(raw_length > 0.0)) {
     return mass_numeric_failure("mass_properties: face plane frame is degenerate", id.index());
   }
   const Vec3d u_axis = raw_u * (1.0 / raw_length);
   const Vec3d v_axis = cross(normal, u_axis);
-  const Vec3d origin = normal * offset;
 
   const std::size_t loop_limit = brep.loops().size();
   LoopId loop_id = brep.face(id).first_loop;
@@ -531,8 +566,8 @@ inline Result<void> mass_add_planar_face(const Brep& brep, FaceId id, const Plan
       double moment_ab = 0.0;
       std::vector<std::array<double, 2>> projected(count);
       for (std::size_t i = 0; i < count; ++i) {
-        const Vec3d relative{points[i][0] - origin[0], points[i][1] - origin[1],
-                             points[i][2] - origin[2]};
+        const Vec3d relative{points[i][0] - reference[0], points[i][1] - reference[1],
+                             points[i][2] - reference[2]};
         projected[i] = {dot(relative, u_axis), dot(relative, v_axis)};
       }
       for (std::size_t i = 0; i < count; ++i) {
@@ -553,27 +588,27 @@ inline Result<void> mass_add_planar_face(const Brep& brep, FaceId id, const Plan
       moment_bb /= 12.0;
       moment_ab /= 24.0;
 
-      // ∫ x dA and ∫ x⊗x dA in world coordinates.
-      Vec3d first_moment = origin * area + u_axis * moment_a + v_axis * moment_b;
+      // ∫ x dA and ∫ x⊗x dA in the local accumulation frame.
+      Vec3d first_moment =
+          u_axis * moment_a + v_axis * moment_b + outward * (local_distance * area);
       double second_moment[3][3]{};
       for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
           second_moment[i][j] =
-              area * origin[i] * origin[j] +
-              (origin[i] * u_axis[j] + u_axis[i] * origin[j]) * moment_a +
-              (origin[i] * v_axis[j] + v_axis[i] * origin[j]) * moment_b +
-              u_axis[i] * u_axis[j] * moment_aa +
+              u_axis[i] * u_axis[j] * moment_aa + v_axis[i] * v_axis[j] * moment_bb +
               (u_axis[i] * v_axis[j] + v_axis[i] * u_axis[j]) * moment_ab +
-              v_axis[i] * v_axis[j] * moment_bb;
+              local_distance * ((outward[i] * u_axis[j] + u_axis[i] * outward[j]) * moment_a +
+                                (outward[i] * v_axis[j] + v_axis[i] * outward[j]) * moment_b) +
+              local_distance * local_distance * area * outward[i] * outward[j];
         }
       }
       const double trace = second_moment[0][0] + second_moment[1][1] + second_moment[2][2];
-      acc.volume += distance * area / 3.0;
-      acc.first = acc.first + first_moment * distance;
+      acc.volume += local_distance * area / 3.0;
+      acc.first = acc.first + first_moment * local_distance;
       for (int i = 0; i < 3; ++i) {
         for (int j = 0; j < 3; ++j) {
           const double delta = (i == j) ? trace : 0.0;
-          acc.second[i][j] += distance * (delta - second_moment[i][j]) / 5.0;
+          acc.second[i][j] += local_distance * (delta - second_moment[i][j]) / 5.0;
         }
       }
     }
@@ -583,7 +618,7 @@ inline Result<void> mass_add_planar_face(const Brep& brep, FaceId id, const Plan
 }
 
 inline Result<void> mass_add_face(const Brep& brep, FaceId id, const MassPropertiesOptions& options,
-                                  const std::vector<double>& nodes,
+                                  const Vec3d& reference, const std::vector<double>& nodes,
                                   const std::vector<double>& weights, MassIntegrals& acc) {
   const Face& face = brep.face(id);
   if (face.surface == kNoGeometry || face.surface >= brep.geometry().surfaces.size()) {
@@ -592,34 +627,38 @@ inline Result<void> mass_add_face(const Brep& brep, FaceId id, const MassPropert
   }
   const SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
   if (const Plane3* plane = std::get_if<Plane3>(&surface)) {
-    return mass_add_planar_face(brep, id, *plane, options, acc);
+    return mass_add_planar_face(brep, id, *plane, options, reference, acc);
   }
   if (const Cylinder3* cylinder = std::get_if<Cylinder3>(&surface)) {
     const Result<MassUvDomain> domain =
         mass_cylinder_domain(brep, id, *cylinder, options.sampling_deflection);
     if (!domain.has_value()) return domain.error();
-    mass_integrate_parametric(*cylinder, domain.value(), face.reversed, nodes, weights, acc);
+    mass_integrate_parametric(*cylinder, domain.value(), face.reversed, reference, nodes,
+                              weights, acc);
     return {};
   }
   if (const Cone3* cone = std::get_if<Cone3>(&surface)) {
     const Result<MassUvDomain> domain =
         mass_cone_domain(brep, id, *cone, options.sampling_deflection);
     if (!domain.has_value()) return domain.error();
-    mass_integrate_parametric(*cone, domain.value(), face.reversed, nodes, weights, acc);
+    mass_integrate_parametric(*cone, domain.value(), face.reversed, reference, nodes, weights,
+                              acc);
     return {};
   }
   if (const Sphere3* sphere = std::get_if<Sphere3>(&surface)) {
     const Result<MassUvDomain> domain =
         mass_sphere_domain(brep, id, *sphere, options.sampling_deflection);
     if (!domain.has_value()) return domain.error();
-    mass_integrate_parametric(*sphere, domain.value(), face.reversed, nodes, weights, acc);
+    mass_integrate_parametric(*sphere, domain.value(), face.reversed, reference, nodes,
+                              weights, acc);
     return {};
   }
   if (const Torus3* torus = std::get_if<Torus3>(&surface)) {
     const Result<MassUvDomain> domain =
         mass_torus_domain(brep, id, *torus, options.sampling_deflection);
     if (!domain.has_value()) return domain.error();
-    mass_integrate_parametric(*torus, domain.value(), face.reversed, nodes, weights, acc);
+    mass_integrate_parametric(*torus, domain.value(), face.reversed, reference, nodes,
+                              weights, acc);
     return {};
   }
   return Error{Errc::unsupported, "mass_properties: unsupported surface type", id.index(), 0u};
@@ -627,6 +666,10 @@ inline Result<void> mass_add_face(const Brep& brep, FaceId id, const MassPropert
 
 }  // namespace detail
 
+// Mass properties of a closed, outward-oriented B-rep of unit density.
+// All integrals are accumulated in a local frame centred on the vertex
+// bounding box; the centroid is translated back afterwards and the inertia
+// tensor is shifted to the centroid from that same local frame.
 inline Result<MassProperties> mass_properties(
     const Brep& brep, const MassPropertiesOptions& options = {}) {
   if (!std::isfinite(options.sampling_deflection) || !(options.sampling_deflection > 0.0) ||
@@ -638,6 +681,8 @@ inline Result<MassProperties> mass_properties(
   }
 
   detail::MassIntegrals integrals;
+  const Result<Vec3d> reference = detail::mass_reference(brep);
+  if (!reference.has_value()) return reference.error();
   std::vector<double> nodes;
   std::vector<double> weights;
   detail::mass_gauss_legendre(options.quadrature_order, nodes, weights);
@@ -645,7 +690,8 @@ inline Result<MassProperties> mass_properties(
     if (!brep.shell(shell_id).closed) return detail::mass_not_closed(shell_id);
     for (const FaceId face_id : brep.shell_faces(shell_id)) {
       const Result<void> added =
-          detail::mass_add_face(brep, face_id, options, nodes, weights, integrals);
+          detail::mass_add_face(brep, face_id, options, reference.value(), nodes, weights,
+                                integrals);
       if (!added.has_value()) return added.error();
     }
   }
@@ -653,20 +699,21 @@ inline Result<MassProperties> mass_properties(
   if (!std::isfinite(integrals.volume) || !(integrals.volume > 0.0)) {
     return detail::mass_numeric_failure("mass_properties: volume is not positive");
   }
-  const Vec3d centroid = integrals.first * (0.25 / integrals.volume);
-  if (!std::isfinite(centroid[0]) || !std::isfinite(centroid[1]) ||
-      !std::isfinite(centroid[2])) {
+  const Vec3d local_centroid = integrals.first * (0.25 / integrals.volume);
+  if (!std::isfinite(local_centroid[0]) || !std::isfinite(local_centroid[1]) ||
+      !std::isfinite(local_centroid[2])) {
     return detail::mass_numeric_failure("mass_properties: centroid is not finite");
   }
+  const Vec3d centroid = reference.value() + local_centroid;
 
   MassProperties result;
   result.volume = integrals.volume;
   result.centroid = Point3d{centroid[0], centroid[1], centroid[2]};
-  const double centroid_squared = dot(centroid, centroid);
+  const double centroid_squared = dot(local_centroid, local_centroid);
   for (int i = 0; i < 3; ++i) {
     for (int j = 0; j < 3; ++j) {
       const double delta = (i == j) ? centroid_squared : 0.0;
-      const double shift = delta - centroid[i] * centroid[j];
+      const double shift = delta - local_centroid[i] * local_centroid[j];
       result.inertia[i][j] = integrals.second[i][j] - integrals.volume * shift;
       if (!std::isfinite(result.inertia[i][j])) {
         return detail::mass_numeric_failure("mass_properties: inertia is not finite");
