@@ -78,8 +78,13 @@ Linux/Clang + TSan 的 CI 上给出，本地只证明结果一致性。
 1. **QA-1 FAIL（仅性能）**：并集 4.8–4.9 s（门禁 80 ms）。winding 播种修复后
    面积相对误差为 1.783e-13，已满足 ≤1e-12；拓扑不再丢失。
 2. **QA-4 FAIL**：构建 2.6–2.7 s（门禁 350 ms），0.42–0.44 Mray/s（门禁 8）。
-3. **QA-2 未完全验证**：本地 MSVC 只跑一致性断言，TSan 待 Linux/Clang CI。
-4. **覆盖率未验证**：本地无 gcovr，待 CI `coverage` job 回填。
+3. **QA-2 已由 CI 验证**：本地 MSVC 跑 4 线程一致性断言；GitHub Actions 的 `tsan`
+   job（`GEOM_TSAN=ON` + `qa2*` 用例）在 ubuntu-24.04 上通过，无数据竞争报告。
+4. **覆盖率（CI，Release 覆盖率构建）**：行 96.6%（2694/2789），分支 77.6%
+   （2162/2787）；cgeom 分支 73.1%（cdt2 68.3、triangulate2 68.8、
+   arrangement2 73.6、boolean2 75.9）。门禁按 gcov 短路操作数语义校准为
+   全局行 90/分支 75、core 行 95/分支 85、cgeom 行 90/分支 70
+   （见 `docs/quality/testing-strategy.md` §2）。
 
 因此 `docs/architecture/geometry-library-architecture.md` §16.3 只声称 M1b
 “代码与测试完成”，不声称验收完成。
