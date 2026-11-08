@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -436,11 +437,9 @@ class SolidEditor {
       const Coedge& old = old_coedges[i];
       const Handle head_id = staged_.coedge_alloc_.alloc();
       const Handle tail_id = staged_.coedge_alloc_.alloc();
-      if (head_id.is_null() || tail_id.is_null()) {
-        if (!head_id.is_null()) staged_.coedge_alloc_.release(head_id);
-        if (!tail_id.is_null()) staged_.coedge_alloc_.release(tail_id);
-        return capacity_error();
-      }
+      // The capacity pre-check above reserved two coedges per use, so alloc()
+      // cannot fail here; asserting documents that and keeps the loop atomic.
+      assert(!head_id.is_null() && !tail_id.is_null());
       Coedge head;
       head.face = old.face;
       head.loop = old.loop;
@@ -508,7 +507,11 @@ class SolidEditor {
   // 0). The merged edge keeps the lower interval's start and curve, extends to
   // the upper interval's end, and takes the larger of the two tolerances; the
   // two coedges collapse into one, and the vertex and the other edge are
-  // released. Nothing is staged unless every check passes.
+  // released. The survivor's pcurve is rebuilt over the merged interval from the
+  // lower half's p0 to the upper half's p1 (pcurves run along the edge from t0 to
+  // t1, as in split_edge); if either half has no pcurve the merged edge has none
+  // and the two segments' continuity is not re-validated. Nothing is staged
+  // unless every check passes.
   Result<bool> join_vertex(VertexId vertex) {
     if (!staged_.vertex_alive(vertex)) {
       return Error{Errc::index_out_of_range, "solid_editor: join vertex is not alive",
@@ -617,10 +620,29 @@ class SolidEditor {
     const bool end_is_lower = !end_coedge.reversed;
     const EdgeId kept_edge = end_is_lower ? end_coedge.edge : start_coedge.edge;
     const EdgeId dropped_edge = end_is_lower ? start_coedge.edge : end_coedge.edge;
+
+    // Rebuild the survivor's pcurve over the merged interval. pcurves run along
+    // the edge from t0 to t1 (the convention split_edge uses), so the merged
+    // segment joins the lower half's p0 to the upper half's p1. The two source
+    // segments' continuity is not re-validated. If either half has no pcurve the
+    // merged edge has none either.
+    const std::uint32_t lower_pcurve = end_is_lower ? end_coedge.pcurve : start_coedge.pcurve;
+    const std::uint32_t upper_pcurve = end_is_lower ? start_coedge.pcurve : end_coedge.pcurve;
+    std::uint32_t merged_pcurve = kNoGeometry;
+    if (lower_pcurve != kNoGeometry && upper_pcurve != kNoGeometry) {
+      if (staged_.geometry_.pcurves.size() >= static_cast<std::size_t>(kNoGeometry)) {
+        return capacity_error();
+      }
+      const Pcurve2d lower = staged_.geometry_.pcurves[lower_pcurve];
+      const Pcurve2d upper = staged_.geometry_.pcurves[upper_pcurve];
+      merged_pcurve = add_pcurve(Pcurve2d{lower.p0, upper.p1});
+    }
+
     staged_.edges_[kept_edge.index()] = merged;
 
     Coedge survivor = end_coedge;
     survivor.edge = kept_edge;
+    survivor.pcurve = merged_pcurve;
     survivor.next = start_coedge.next;
     if (survivor.prev == start_id) survivor.prev = end_id;
     staged_.coedges_[end_id.index()] = survivor;

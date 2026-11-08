@@ -1,9 +1,11 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <utility>
+#include <variant>
 
 #include <geom/brep/solid_editor.hpp>
 #include <geom/brep/validate.hpp>
@@ -58,6 +60,34 @@ SingleEdgeFace make_single_edge_face(double tol) {
   const std::uint32_t plane = s.editor.add_surface(geom::Plane3{{0, 0, 1}, 0.0});
   s.face = s.editor.add_face(plane, false, tol).value();
   return s;
+}
+
+// Entity and geometry-store sizes, used to prove rejected operations do not
+// mutate staging.
+struct EditorCounts {
+  std::uint32_t vertices = 0;
+  std::uint32_t edges = 0;
+  std::uint32_t coedges = 0;
+  std::size_t curves = 0;
+  std::size_t surfaces = 0;
+  std::size_t pcurves = 0;
+};
+
+EditorCounts snapshot(const geom::SolidEditor& editor) {
+  const geom::Brep& b = editor.brep();
+  return EditorCounts{b.vertex_count(), b.edge_count(), b.coedge_count(),
+                      b.geometry().curves.size(), b.geometry().surfaces.size(),
+                      b.geometry().pcurves.size()};
+}
+
+void check_unchanged(const geom::SolidEditor& editor, const EditorCounts& expected) {
+  const EditorCounts actual = snapshot(editor);
+  CHECK(actual.vertices == expected.vertices);
+  CHECK(actual.edges == expected.edges);
+  CHECK(actual.coedges == expected.coedges);
+  CHECK(actual.curves == expected.curves);
+  CHECK(actual.surfaces == expected.surfaces);
+  CHECK(actual.pcurves == expected.pcurves);
 }
 
 }  // namespace
@@ -163,12 +193,19 @@ TEST_CASE("split edge subdivides the curve parameter interval") {
   CHECK(first.curve == old.curve);
   CHECK(second.curve == old.curve);
   CHECK(first.t0 == old.t0);
-  CHECK(first.t1 == doctest::Approx(0.5));
-  CHECK(second.t0 == doctest::Approx(0.5));
+  CHECK(first.t1 == 0.5);
+  CHECK(second.t0 == 0.5);
   CHECK(second.t1 == old.t1);
   CHECK(first.v0 == old.v0);
   CHECK(first.v1 == second.v0);
   CHECK(second.v1 == old.v1);
+  const geom::VertexId mid = first.v1;
+  const geom::Point3d expected =
+      std::get<geom::LineCurve3>(b.geometry().curves[first.curve]).eval(0.5);
+  const geom::Point3d& actual = b.vertex(mid).point;
+  CHECK(actual[0] == expected[0]);
+  CHECK(actual[1] == expected[1]);
+  CHECK(actual[2] == expected[2]);
 }
 
 TEST_CASE("split edge splits a forward pcurve at the parameter") {
@@ -187,14 +224,14 @@ TEST_CASE("split edge splits a forward pcurve at the parameter") {
   CHECK_FALSE(tail.reversed);
   const geom::Pcurve2d& first = b.geometry().pcurves[head.pcurve];
   const geom::Pcurve2d& second = b.geometry().pcurves[tail.pcurve];
-  CHECK(first.p0[0] == doctest::Approx(0.0));
-  CHECK(first.p0[1] == doctest::Approx(0.0));
-  CHECK(first.p1[0] == doctest::Approx(0.5));
-  CHECK(first.p1[1] == doctest::Approx(0.5));
-  CHECK(second.p0[0] == doctest::Approx(0.5));
-  CHECK(second.p0[1] == doctest::Approx(0.5));
-  CHECK(second.p1[0] == doctest::Approx(1.0));
-  CHECK(second.p1[1] == doctest::Approx(1.0));
+  CHECK(first.p0[0] == 0.0);
+  CHECK(first.p0[1] == 0.0);
+  CHECK(first.p1[0] == 0.5);
+  CHECK(first.p1[1] == 0.5);
+  CHECK(second.p0[0] == 0.5);
+  CHECK(second.p0[1] == 0.5);
+  CHECK(second.p1[0] == 1.0);
+  CHECK(second.p1[1] == 1.0);
 }
 
 TEST_CASE("split edge splits a reversed pcurve at the parameter") {
@@ -215,20 +252,117 @@ TEST_CASE("split edge splits a reversed pcurve at the parameter") {
   CHECK(tail.reversed);
   const geom::Edge& first_edge = b.edge(head.edge);
   const geom::Edge& second_edge = b.edge(tail.edge);
-  CHECK(first_edge.t0 == doctest::Approx(0.25));
-  CHECK(first_edge.t1 == doctest::Approx(1.0));
-  CHECK(second_edge.t0 == doctest::Approx(0.0));
-  CHECK(second_edge.t1 == doctest::Approx(0.25));
+  CHECK(first_edge.t0 == 0.25);
+  CHECK(first_edge.t1 == 1.0);
+  CHECK(second_edge.t0 == 0.0);
+  CHECK(second_edge.t1 == 0.25);
   const geom::Pcurve2d& high = b.geometry().pcurves[head.pcurve];
   const geom::Pcurve2d& low = b.geometry().pcurves[tail.pcurve];
-  CHECK(low.p0[0] == doctest::Approx(0.0));
-  CHECK(low.p0[1] == doctest::Approx(0.0));
-  CHECK(low.p1[0] == doctest::Approx(0.25));
-  CHECK(low.p1[1] == doctest::Approx(0.25));
-  CHECK(high.p0[0] == doctest::Approx(0.25));
-  CHECK(high.p0[1] == doctest::Approx(0.25));
-  CHECK(high.p1[0] == doctest::Approx(1.0));
-  CHECK(high.p1[1] == doctest::Approx(1.0));
+  CHECK(low.p0[0] == 0.0);
+  CHECK(low.p0[1] == 0.0);
+  CHECK(low.p1[0] == 0.25);
+  CHECK(low.p1[1] == 0.25);
+  CHECK(high.p0[0] == 0.25);
+  CHECK(high.p0[1] == 0.25);
+  CHECK(high.p1[0] == 1.0);
+  CHECK(high.p1[1] == 1.0);
+}
+
+TEST_CASE("split edge uses the interval-relative pcurve fraction") {
+  geom::SolidEditor ed;
+  const geom::VertexId v0 = ed.add_vertex({0, 0, 0}, 0.0).value();
+  const geom::VertexId v1 = ed.add_vertex({1, 0, 0}, 0.0).value();
+  const std::uint32_t line = ed.add_curve(geom::LineCurve3{{0, 0, 0}, {1, 0, 0}});
+  const geom::EdgeId edge = ed.add_edge(v0, v1, line, 0.4, 0.9, 0.0).value();
+  const std::uint32_t plane = ed.add_surface(geom::Plane3{{0, 0, 1}, 0.0});
+  const geom::FaceId face = ed.add_face(plane, false, 0.0).value();
+  // A non-45-degree pcurve so a wrong parameter (absolute vs interval-relative)
+  // shows up in both coordinates.
+  const std::uint32_t pcurve = ed.add_pcurve(geom::Pcurve2d{{0, 0}, {2, 1}});
+  const std::array<geom::CoedgeSpec, 1> specs{geom::CoedgeSpec{edge, false, pcurve, 0.0}};
+  const geom::LoopId loop = ed.add_loop(face, specs, true).value();
+  REQUIRE(ed.split_edge(edge, 0.65).has_value());
+  const auto r = ed.commit();
+  REQUIRE(r.has_value());
+  const geom::Brep& b = r.value();
+  CHECK(b.geometry().pcurves.size() == 3u);
+  const geom::Coedge& head = b.coedge(b.loop(loop).start);
+  const geom::Coedge& tail = b.coedge(head.next);
+  const geom::Pcurve2d& low = b.geometry().pcurves[head.pcurve];
+  const geom::Pcurve2d& high = b.geometry().pcurves[tail.pcurve];
+  // f = (0.65 - 0.4) / (0.9 - 0.4) = 0.5, so the split point is (1, 0.5).
+  CHECK(low.p0[0] == 0.0);
+  CHECK(low.p0[1] == 0.0);
+  CHECK(low.p1[0] == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(low.p1[1] == doctest::Approx(0.5).epsilon(1e-12));
+  CHECK(high.p0[0] == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(high.p0[1] == doctest::Approx(0.5).epsilon(1e-12));
+  CHECK(high.p1[0] == 2.0);
+  CHECK(high.p1[1] == 1.0);
+}
+
+TEST_CASE("join rebuilds the pcurve over the merged interval") {
+  SingleEdgeFace s = make_single_edge_face(0.0);
+  const std::uint32_t pcurve = s.editor.add_pcurve(geom::Pcurve2d{{0, 0}, {2, 1}});
+  const std::array<geom::CoedgeSpec, 1> specs{geom::CoedgeSpec{s.edge, false, pcurve, 0.0}};
+  const geom::LoopId loop = s.editor.add_loop(s.face, specs, true).value();
+  const geom::VertexId mid = s.editor.split_edge(s.edge, 0.5).value();
+  REQUIRE(s.editor.join_vertex(mid).has_value());
+  const auto r = s.editor.commit();
+  REQUIRE(r.has_value());
+  const geom::Brep& b = r.value();
+  const geom::Coedge& survivor = b.coedge(b.loop(loop).start);
+  CHECK(survivor.pcurve != geom::kNoGeometry);
+  const geom::Pcurve2d& merged = b.geometry().pcurves[survivor.pcurve];
+  CHECK(merged.p0[0] == 0.0);
+  CHECK(merged.p0[1] == 0.0);
+  CHECK(merged.p1[0] == 2.0);
+  CHECK(merged.p1[1] == 1.0);
+  CHECK(geom::validate_topology(b).ok());
+}
+
+TEST_CASE("join rebuilds the pcurve for a reversed coedge") {
+  SingleEdgeFace s = make_single_edge_face(0.0);
+  const std::uint32_t pcurve = s.editor.add_pcurve(geom::Pcurve2d{{0, 0}, {2, 1}});
+  const std::array<geom::CoedgeSpec, 1> specs{geom::CoedgeSpec{s.edge, true, pcurve, 0.0}};
+  const geom::LoopId loop = s.editor.add_loop(s.face, specs, true).value();
+  const geom::VertexId mid = s.editor.split_edge(s.edge, 0.5).value();
+  REQUIRE(s.editor.join_vertex(mid).has_value());
+  const auto r = s.editor.commit();
+  REQUIRE(r.has_value());
+  const geom::Brep& b = r.value();
+  const geom::Coedge& survivor = b.coedge(b.loop(loop).start);
+  CHECK(survivor.reversed);
+  CHECK(survivor.pcurve != geom::kNoGeometry);
+  // The pcurve always runs along the edge from t0 to t1, independent of the
+  // coedge direction, so the merged segment is the original one.
+  const geom::Pcurve2d& merged = b.geometry().pcurves[survivor.pcurve];
+  CHECK(merged.p0[0] == 0.0);
+  CHECK(merged.p0[1] == 0.0);
+  CHECK(merged.p1[0] == 2.0);
+  CHECK(merged.p1[1] == 1.0);
+}
+
+TEST_CASE("join drops the pcurve when either half has none") {
+  geom::SolidEditor ed;
+  const geom::VertexId v0 = ed.add_vertex({0, 0, 0}, 0.0).value();
+  const geom::VertexId v1 = ed.add_vertex({0.5, 0, 0}, 0.0).value();
+  const geom::VertexId v2 = ed.add_vertex({1, 0, 0}, 0.0).value();
+  const std::uint32_t line = ed.add_curve(geom::LineCurve3{{0, 0, 0}, {1, 0, 0}});
+  const geom::EdgeId first = ed.add_edge(v0, v1, line, 0.0, 0.5, 0.0).value();
+  const geom::EdgeId second = ed.add_edge(v1, v2, line, 0.5, 1.0, 0.0).value();
+  const std::uint32_t plane = ed.add_surface(geom::Plane3{{0, 0, 1}, 0.0});
+  const geom::FaceId face = ed.add_face(plane, false, 0.0).value();
+  const std::uint32_t pcurve = ed.add_pcurve(geom::Pcurve2d{{0, 0}, {0.5, 0.5}});
+  const std::array<geom::CoedgeSpec, 2> specs{geom::CoedgeSpec{first, false, pcurve, 0.0},
+                                              geom::CoedgeSpec{second, false}};
+  const geom::LoopId loop = ed.add_loop(face, specs, true).value();
+  REQUIRE(ed.join_vertex(v1).has_value());
+  const auto r = ed.commit();
+  REQUIRE(r.has_value());
+  const geom::Brep& b = r.value();
+  const geom::Coedge& survivor = b.coedge(b.loop(loop).start);
+  CHECK(survivor.pcurve == geom::kNoGeometry);
 }
 
 TEST_CASE("split edge gives the new vertex and edges the edge tolerance") {
@@ -273,10 +407,12 @@ TEST_CASE("join rejects a dead vertex and a vertex with one incident edge") {
   const geom::VertexId v1 = ed.add_vertex({1, 0, 0}, 0.0).value();
   const std::uint32_t line = ed.add_curve(geom::LineCurve3{{0, 0, 0}, {1, 0, 0}});
   REQUIRE(ed.add_edge(v0, v1, line, 0.0, 1.0, 0.0).has_value());
+  const EditorCounts before = snapshot(ed);
   CHECK(ed.join_vertex(geom::VertexId::make(0, 2)).error().code ==
         geom::Errc::index_out_of_range);
   CHECK(ed.join_vertex(v0).error().code == geom::Errc::invalid_topology);
   CHECK(ed.join_vertex(v1).error().code == geom::Errc::invalid_topology);
+  check_unchanged(ed, before);
 }
 
 TEST_CASE("join rejects adjacent edges on different curves") {
@@ -286,8 +422,10 @@ TEST_CASE("join rejects adjacent edges on different curves") {
   const geom::VertexId v2 = ed.add_vertex({1, 1, 0}, 0.0).value();
   const std::uint32_t line_x = ed.add_curve(geom::LineCurve3{{0, 0, 0}, {1, 0, 0}});
   const std::uint32_t line_y = ed.add_curve(geom::LineCurve3{{0, 0, 0}, {0, 1, 0}});
+  // The intervals are adjacent (0..1 then 1..2) and the coedges meet
+  // head-to-tail, so only the curve-equality check can reject this join.
   const geom::EdgeId edge_a = ed.add_edge(v0, v1, line_x, 0.0, 1.0, 0.0).value();
-  const geom::EdgeId edge_b = ed.add_edge(v1, v2, line_y, 0.0, 1.0, 0.0).value();
+  const geom::EdgeId edge_b = ed.add_edge(v1, v2, line_y, 1.0, 2.0, 0.0).value();
   const geom::EdgeId edge_c = ed.add_edge(v2, v0, geom::kNoGeometry, 0.0, 1.0, 0.0).value();
   const std::uint32_t plane = ed.add_surface(geom::Plane3{{0, 0, 1}, 0.0});
   const geom::FaceId face = ed.add_face(plane, false, 0.0).value();
@@ -295,7 +433,9 @@ TEST_CASE("join rejects adjacent edges on different curves") {
                                               geom::CoedgeSpec{edge_b, false},
                                               geom::CoedgeSpec{edge_c, false}};
   REQUIRE(ed.add_loop(face, specs, true).has_value());
+  const EditorCounts before = snapshot(ed);
   CHECK(ed.join_vertex(v1).error().code == geom::Errc::degenerate);
+  check_unchanged(ed, before);
 }
 
 TEST_CASE("join rejects edges whose parameter intervals are not adjacent") {
@@ -313,7 +453,9 @@ TEST_CASE("join rejects edges whose parameter intervals are not adjacent") {
                                               geom::CoedgeSpec{edge_b, false},
                                               geom::CoedgeSpec{edge_c, false}};
   REQUIRE(ed.add_loop(face, specs, true).has_value());
+  const EditorCounts before = snapshot(ed);
   CHECK(ed.join_vertex(v1).error().code == geom::Errc::degenerate);
+  check_unchanged(ed, before);
 }
 
 TEST_CASE("join merges the adjacent parameter intervals") {
@@ -347,6 +489,18 @@ TEST_CASE("join rejects a vertex with four coedge uses") {
                                               geom::CoedgeSpec{edge, true}};
   REQUIRE(ed.add_loop(face, specs, true).has_value());
   const geom::VertexId mid = ed.split_edge(edge, 0.5).value();
+  const EditorCounts before = snapshot(ed);
   // Two incident edges, but four coedge uses: outside the KEV contract of this task.
   CHECK(ed.join_vertex(mid).error().code == geom::Errc::invalid_topology);
+  check_unchanged(ed, before);
+}
+
+TEST_CASE("join failure with three incident edges leaves staging unchanged") {
+  SquareFace s = make_square_face();
+  const geom::VertexId extra = s.editor.add_vertex({0.5, -1.0, 0.0}, 0.0).value();
+  const std::uint32_t line = s.editor.add_curve(geom::LineCurve3{{1, 0, 0}, {0, 1, 0}});
+  REQUIRE(s.editor.add_edge(s.vertices[1], extra, line, 0.0, 1.0, 0.0).has_value());
+  const EditorCounts before = snapshot(s.editor);
+  CHECK(s.editor.join_vertex(s.vertices[1]).error().code == geom::Errc::invalid_topology);
+  check_unchanged(s.editor, before);
 }
