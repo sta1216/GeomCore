@@ -38,6 +38,24 @@ jobs:
         run: |
           gcovr -r . --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
                 --txt --txt-metric branch
+      - name: Coverage summary by file (branch)
+        run: |
+          gcovr -r . --exclude 'tests/' --exclude 'third_party/' --exclude 'build-cov/' \
+                --json -o coverage.json
+          python3 - <<'PY'
+          import json
+          d = json.load(open('coverage.json'))
+          rows = []
+          for f in d['files']:
+              total = f.get('branch_total', 0)
+              if total:
+                  rows.append((100.0 * f['branch_covered'] / total, f['filename'],
+                               f['branch_covered'], total))
+          rows.sort()
+          for pct, name, cov, total in rows[:30]:
+              print(f"{pct:6.1f}% {cov:5d}/{total:<5d} {name}")
+          print("TOTAL", d['branch_covered'], d['branch_total'])
+          PY
       - name: Coverage gate (global)
         run: |
           gcovr -r . --fail-under-line 90 --fail-under-branch 85 \
