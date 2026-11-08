@@ -33,6 +33,7 @@ set(GEOM_TEST_SOURCES
   unit/core_handle_arena_test.cpp
   unit/primitives_test.cpp
   unit/curves_test.cpp
+  unit/analytic_curve_test.cpp
   unit/surfaces_test.cpp
   unit/hull2d_test.cpp
   unit/delaunay2_test.cpp
