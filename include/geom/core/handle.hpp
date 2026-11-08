@@ -73,6 +73,25 @@ class HandleAllocator {
     return generations_[h.index()] == h.generation();
   }
 
+  // Number of slots currently owned by a live handle. A released slot stays
+  // counted here only until it is reused, which is exactly when its entry
+  // leaves free_ again.
+  std::uint32_t live_count() const noexcept {
+    return static_cast<std::uint32_t>(generations_.size() - free_.size());
+  }
+
+  // Returns the handle that currently owns slot `index`, or Handle::null() when
+  // the slot is out of range, was never allocated, or has been released. Lets a
+  // storage array indexed by handle index enumerate its live handles without
+  // keeping a second copy of the generation counters.
+  Handle handle_at(std::uint32_t index) const noexcept {
+    if (index >= generations_.size()) return Handle::null();
+    for (const std::uint32_t free_index : free_) {
+      if (free_index == index) return Handle::null();
+    }
+    return Handle::make(index, generations_[index]);
+  }
+
  private:
   std::uint8_t next_generation(std::uint32_t index) const noexcept {
     const std::uint8_t current = generations_[index];

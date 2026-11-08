@@ -15,6 +15,9 @@ enum class Errc : std::uint8_t {
   unsupported,
   cancelled,
   self_intersecting,
+  invalid_topology,
+  tolerance_violation,
+  not_closed,
 };
 
 struct Error {
@@ -35,6 +38,9 @@ constexpr const char* to_string(Errc code) noexcept {
     case Errc::unsupported: return "unsupported";
     case Errc::cancelled: return "cancelled";
     case Errc::self_intersecting: return "self_intersecting";
+    case Errc::invalid_topology: return "invalid_topology";
+    case Errc::tolerance_violation: return "tolerance_violation";
+    case Errc::not_closed: return "not_closed";
   }
   return "unknown";
 }

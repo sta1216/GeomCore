@@ -35,6 +35,7 @@ set(GEOM_TEST_SOURCES
   unit/curves_test.cpp
   unit/analytic_curve_test.cpp
   unit/analytic_surface_test.cpp
+  unit/brep_topology_test.cpp
   unit/surfaces_test.cpp
   unit/hull2d_test.cpp
   unit/delaunay2_test.cpp

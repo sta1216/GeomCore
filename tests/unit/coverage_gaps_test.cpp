@@ -91,3 +91,35 @@ TEST_CASE("self_intersecting error code has a name") {
   CHECK(std::string_view(geom::v1::to_string(Errc::self_intersecting)) ==
         "self_intersecting");
 }
+
+TEST_CASE("brep error codes have names") {
+  CHECK(std::string_view(geom::v1::to_string(Errc::invalid_topology)) == "invalid_topology");
+  CHECK(std::string_view(geom::v1::to_string(Errc::tolerance_violation)) ==
+        "tolerance_violation");
+  CHECK(std::string_view(geom::v1::to_string(Errc::not_closed)) == "not_closed");
+}
+
+TEST_CASE("allocator counts and enumerates live handles") {
+  HandleAllocator alloc;
+  CHECK(alloc.live_count() == 0);
+  CHECK(alloc.handle_at(0).is_null());
+
+  const Handle a = alloc.alloc();
+  const Handle b = alloc.alloc();
+  CHECK(alloc.live_count() == 2);
+  CHECK(alloc.handle_at(0) == a);
+  CHECK(alloc.handle_at(1) == b);
+  CHECK(alloc.handle_at(2).is_null());
+
+  alloc.release(a);
+  CHECK(alloc.live_count() == 1);
+  CHECK(alloc.handle_at(0).is_null());
+  CHECK(alloc.handle_at(1) == b);
+
+  const Handle reused = alloc.alloc();
+  CHECK(reused.index() == a.index());
+  CHECK(reused.generation() == static_cast<std::uint8_t>(a.generation() + 1));
+  CHECK(alloc.live_count() == 2);
+  CHECK(alloc.handle_at(a.index()) == reused);
+}
+
