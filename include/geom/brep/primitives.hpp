@@ -535,5 +535,122 @@ inline Result<Brep> make_sphere(Point3d center, double radius, double tol) {
   return editor.commit();
 }
 
+// Torus with major radius R and minor radius r around the unit `axis` through
+// `center`, cut along the u = 0 and v = 0 seam circles. Both seams meet at the
+// single vertex p = center + (R + r)*x: the u seam is the outer equator
+// CircleCurve3{center, x, y, R + r} (parameter around the axis), the v seam is
+// the tube circle CircleCurve3{center + R*x, x, axis, r}. Both are closed edges
+// owning p, and the single Torus3 face's loop uses each once in each direction:
+// u(false) -> v(false) -> u(true) -> v(true). V = 1, E = 2, F = 1, L = 1
+// (chi = 0) and the shell is closed.
+//
+// Frame: x is the unit perpendicular to axis chosen by the candidate rule used
+// by the other primitives, y = cross(axis, x), so (x, y, axis) is right handed
+// and Torus3::eval(u, v) reproduces the two seam circles at v = 0 and u = 0.
+//
+// Validation:
+//   - non-finite center, axis or radius  -> Errc::non_finite
+//   - non-finite or negative tolerance   -> Errc::tolerance_violation
+//   - axis not unit length               -> Errc::degenerate
+//   - R <= 0, r <= 0 or r >= R           -> Errc::degenerate
+//   - a degenerate frame, or R + r / a seam circle centre that is not
+//     representable                      -> Errc::degenerate
+// Any error from a SolidEditor add_* call is propagated unchanged; commit()
+// performs the final validation.
+inline Result<Brep> make_torus(Point3d center, Vec3d axis, double major_radius,
+                               double minor_radius, double tol) {
+  if (!detail::primitive_point_finite(center) || !detail::primitive_vec_finite(axis) ||
+      !std::isfinite(major_radius) || !std::isfinite(minor_radius)) {
+    return Error{Errc::non_finite, "make_torus: input is not finite", 0u, 0u};
+  }
+  if (!std::isfinite(tol) || tol < 0.0) {
+    return Error{Errc::tolerance_violation,
+                 "make_torus: tolerance must be finite and non-negative", 0u, 0u};
+  }
+  const double axis_length = std::hypot(axis[0], axis[1], axis[2]);
+  if (!(std::fabs(axis_length - 1.0) <= detail::kAnalyticSurfaceUnitTolerance)) {
+    return Error{Errc::degenerate, "make_torus: axis must be unit length", 0u, 0u};
+  }
+  if (!(major_radius > 0.0)) {
+    return Error{Errc::degenerate, "make_torus: major radius must be positive", 0u, 0u};
+  }
+  if (!(minor_radius > 0.0)) {
+    return Error{Errc::degenerate, "make_torus: minor radius must be positive", 0u, 0u};
+  }
+  if (!(minor_radius < major_radius)) {
+    return Error{Errc::degenerate,
+                 "make_torus: minor radius must be smaller than the major radius", 0u, 0u};
+  }
+
+  // Any candidate works as long as it is not parallel to the axis.
+  const Vec3d candidate =
+      std::fabs(axis[0]) < 0.9 ? Vec3d{1.0, 0.0, 0.0} : Vec3d{0.0, 1.0, 0.0};
+  const Vec3d perpendicular = cross(cross(axis, candidate), axis);
+  const double perpendicular_length =
+      std::hypot(perpendicular[0], perpendicular[1], perpendicular[2]);
+  if (!std::isfinite(perpendicular_length) || !(perpendicular_length > 0.0)) {
+    return Error{Errc::degenerate, "make_torus: axis frame is degenerate", 0u, 0u};
+  }
+  const Vec3d x_axis{perpendicular[0] / perpendicular_length,
+                     perpendicular[1] / perpendicular_length,
+                     perpendicular[2] / perpendicular_length};
+  const Vec3d y_axis = cross(axis, x_axis);
+
+  const double outer_radius = major_radius + minor_radius;
+  if (!std::isfinite(outer_radius)) {
+    return Error{Errc::degenerate, "make_torus: seam circle radius is not representable", 0u,
+                 0u};
+  }
+  const Point3d seam_point{center[0] + outer_radius * x_axis[0],
+                           center[1] + outer_radius * x_axis[1],
+                           center[2] + outer_radius * x_axis[2]};
+  if (!detail::primitive_point_finite(seam_point)) {
+    return Error{Errc::degenerate, "make_torus: seam point is not representable", 0u, 0u};
+  }
+  const Point3d tube_center{center[0] + major_radius * x_axis[0],
+                            center[1] + major_radius * x_axis[1],
+                            center[2] + major_radius * x_axis[2]};
+  if (!detail::primitive_point_finite(tube_center)) {
+    return Error{Errc::degenerate, "make_torus: tube circle centre is not representable", 0u,
+                 0u};
+  }
+
+  constexpr double kTwoPi = 2.0 * std::numbers::pi_v<double>;
+
+  SolidEditor editor;
+  const Result<VertexId> seam_vertex = editor.add_vertex(seam_point, tol);
+  if (!seam_vertex.has_value()) return seam_vertex.error();
+
+  const std::uint32_t u_curve =
+      editor.add_curve(CircleCurve3{center, x_axis, y_axis, outer_radius});
+  const Result<EdgeId> u_edge = editor.add_edge(
+      seam_vertex.value(), seam_vertex.value(), u_curve, 0.0, kTwoPi, tol);
+  if (!u_edge.has_value()) return u_edge.error();
+
+  const std::uint32_t v_curve =
+      editor.add_curve(CircleCurve3{tube_center, x_axis, axis, minor_radius});
+  const Result<EdgeId> v_edge = editor.add_edge(
+      seam_vertex.value(), seam_vertex.value(), v_curve, 0.0, kTwoPi, tol);
+  if (!v_edge.has_value()) return v_edge.error();
+
+  const std::uint32_t torus_surface =
+      editor.add_surface(Torus3{center, axis, x_axis, major_radius, minor_radius});
+  const Result<FaceId> face = editor.add_face(torus_surface, false, tol);
+  if (!face.has_value()) return face.error();
+  const std::array<CoedgeSpec, 4> loop{
+      CoedgeSpec{u_edge.value(), false}, CoedgeSpec{v_edge.value(), false},
+      CoedgeSpec{u_edge.value(), true}, CoedgeSpec{v_edge.value(), true}};
+  const Result<LoopId> loop_id = editor.add_loop(face.value(), loop, true);
+  if (!loop_id.has_value()) return loop_id.error();
+
+  const std::array<FaceId, 1> faces{face.value()};
+  const Result<ShellId> shell = editor.add_shell(faces, true);
+  if (!shell.has_value()) return shell.error();
+  const std::array<ShellId, 1> shells{shell.value()};
+  const Result<SolidId> solid = editor.add_solid(shells, tol);
+  if (!solid.has_value()) return solid.error();
+  return editor.commit();
+}
+
 }  // namespace v1
 }  // namespace geom
