@@ -32,6 +32,48 @@ TEST_CASE("circle curve quarter arc bounds are exact") {
   CHECK(b.hi[1] == doctest::Approx(2.0).epsilon(1e-12));
 }
 
+TEST_CASE("circle curve full turn bounds are exact") {
+  constexpr double kPi = 3.14159265358979323846;
+  const geom::CircleCurve3 c{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, 2.0};
+  CHECK(c.is_valid());
+  // Every extremum of a full turn is interior to the arc: an implementation
+  // that only boxes eval(a0) and eval(a1) returns lo[1] == hi[1] == 0 here.
+  const geom::Box3d full = c.bounds(0.0, 2.0 * kPi);
+  CHECK(full.lo[0] == doctest::Approx(-2.0).epsilon(1e-12));
+  CHECK(full.hi[0] == doctest::Approx(2.0).epsilon(1e-12));
+  CHECK(full.lo[1] == doctest::Approx(-2.0).epsilon(1e-12));
+  CHECK(full.hi[1] == doctest::Approx(2.0).epsilon(1e-12));
+  // Same arc shifted by pi, so both stationary angles sit at the same distance
+  // from the endpoints.
+  const geom::Box3d shifted = c.bounds(-kPi, kPi);
+  CHECK(shifted.lo[0] == doctest::Approx(-2.0).epsilon(1e-12));
+  CHECK(shifted.hi[0] == doctest::Approx(2.0).epsilon(1e-12));
+  CHECK(shifted.lo[1] == doctest::Approx(-2.0).epsilon(1e-12));
+  CHECK(shifted.hi[1] == doctest::Approx(2.0).epsilon(1e-12));
+}
+
+TEST_CASE("circle curve axis tolerance is measured on the axis norm") {
+  const geom::CircleCurve3 unit{};
+  REQUIRE(unit.is_valid());
+  // 5e-13 from unit length: valid under | |x| - 1 | <= 1e-12, but rejected by a
+  // squared-norm check, because then |dot(x, x) - 1| is 1.0001e-12.
+  geom::CircleCurve3 c = unit;
+  c.x_axis = {1.0 + 5e-13, 0, 0};
+  CHECK(c.is_valid());
+  c = unit;
+  c.y_axis = {0, 1.0 + 5e-13, 0};
+  CHECK(c.is_valid());
+  c = unit;
+  c.x_axis = {1.0 - 1e-12, 0, 0};
+  CHECK(c.is_valid());
+  c = unit;
+  c.x_axis = {1.0 + 3e-12, 0, 0};
+  CHECK_FALSE(c.is_valid());
+  c = unit;
+  c.y_axis = {0, 1.0 - 3e-12, 0};
+  CHECK_FALSE(c.is_valid());
+}
+
 TEST_CASE("analytic curves reject non-finite and unnormalized data") {
   geom::LineCurve3 line{{0, 0, 0}, {0, 2, 0}};
   CHECK_FALSE(line.is_valid());
@@ -43,11 +85,11 @@ TEST_CASE("analytic curves reject non-finite and unnormalized data") {
   c.radius = std::numeric_limits<double>::infinity();
   CHECK_FALSE(c.is_valid());
   c = geom::CircleCurve3{};
-  c.y_axis = {1, 0, 0};  // 与 x_axis 重合
+  c.y_axis = {1, 0, 0};  // parallel to x_axis
   CHECK_FALSE(c.is_valid());
 }
 
-TEST_CASE("analytic curves reject every non-finite field") {
+TEST_CASE("analytic curves reject non-finite fields, non-unit axes and radius <= 0") {
   using Limit = std::numeric_limits<double>;
   const geom::LineCurve3 line0{};
   REQUIRE(line0.is_valid());
@@ -82,13 +124,13 @@ TEST_CASE("analytic curves reject every non-finite field") {
   c.x_axis = {Limit::quiet_NaN(), 0, 0};
   CHECK_FALSE(c.is_valid());
   c = circle0;
-  c.x_axis = {0, 2, 0};  // 有限但非单位
+  c.x_axis = {0, 2, 0};  // finite but not unit length
   CHECK_FALSE(c.is_valid());
   c = circle0;
   c.y_axis = {0, Limit::infinity(), 0};
   CHECK_FALSE(c.is_valid());
   c = circle0;
-  c.y_axis = {0, 2, 0};  // 有限但非单位
+  c.y_axis = {0, 2, 0};  // finite but not unit length
   CHECK_FALSE(c.is_valid());
   c = circle0;
   c.radius = 0.0;

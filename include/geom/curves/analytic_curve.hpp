@@ -80,11 +80,17 @@ struct CircleCurve3 {
       return false;
     }
     if (!(radius > 0.0)) return false;
-    const double xx = dot(x_axis, x_axis);
-    const double yy = dot(y_axis, y_axis);
+    // The brief measures unit length on the norm (| |x| - 1 |), not on the
+    // squared norm: checking |dot(x, x) - 1| would be about twice as strict and
+    // reject axes such as {1 + 5e-13, 0, 0} whose norm is within 1e-12 of 1.
+    // std::hypot avoids the overflow/underflow of dot(x, x) for extreme axes and
+    // returns |x| exactly for axes with zero components (repo precedent:
+    // Plane3::length).
+    const double nx = std::hypot(x_axis[0], x_axis[1], x_axis[2]);
+    const double ny = std::hypot(y_axis[0], y_axis[1], y_axis[2]);
     const double xy = dot(x_axis, y_axis);
-    return std::fabs(1.0 - xx) <= detail::kAnalyticUnitTolerance &&
-           std::fabs(1.0 - yy) <= detail::kAnalyticUnitTolerance &&
+    return std::fabs(nx - 1.0) <= detail::kAnalyticUnitTolerance &&
+           std::fabs(ny - 1.0) <= detail::kAnalyticUnitTolerance &&
            std::fabs(xy) <= detail::kAnalyticUnitTolerance;
   }
 
@@ -117,10 +123,13 @@ struct CircleCurve3 {
   // where it re-evaluates a value that is already a bound of the arc.
   //
   // An axis with x_axis[i] == y_axis[i] == 0 is constant, which the endpoint
-  // evaluations already cover. For very large angles the candidate angles are
-  // reconstructed at the double spacing of a0, but each candidate is a
-  // stationary point, where the circle value varies only quadratically with
-  // the angle, so the bounds stay close to the true extrema.
+  // evaluations already cover. Candidate angles are reconstructed from
+  // k0 * pi, so their absolute accuracy is limited by the double spacing of a0
+  // (about 2e-4 rad at |a0| = 1e12). Near a stationary point the circle value
+  // changes only quadratically with the angle, so those candidates stay close
+  // to the true extrema. At |a0| = 2^52 the spacing itself is already 1 rad and
+  // candidates no longer resolve an extremum, so the returned box can be too
+  // tight; keep the arc parameters well below 2^52.
   //
   // Precondition: a0, a1 finite and a0 <= a1.
   Box3d bounds(double a0, double a1) const noexcept {
