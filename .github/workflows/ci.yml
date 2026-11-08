@@ -98,3 +98,28 @@ jobs:
         run: cmake --build build-tsan -j 4
       - name: QA-2 concurrency under TSan
         run: ./build-tsan/tests/geom_tests --test-case="qa2*"
+
+  # QA-10 is a documented FAIL (0.20 Mtri/s vs the 1.0 Mtri/s target, see
+  # docs/benchmarks/m2.md) and the bench binaries only report numbers, so this
+  # job records Release evidence as an artifact without blocking the pipeline.
+  bench:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-bench -DGEOM_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build benchmarks
+        run: cmake --build build-bench -j 4 --target geom_bench_m2 geom_bench_m1b
+      - name: Run M2 benchmarks (QA-10, QA-11)
+        run: ./build-bench/geom_bench_m2 | tee bench-m2.txt
+      - name: Run M1b benchmarks (QA-1, QA-4)
+        run: ./build-bench/geom_bench_m1b | tee bench-m1b.txt
+      - name: Upload benchmark output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-release
+          path: |
+            bench-m2.txt
+            bench-m1b.txt

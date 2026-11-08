@@ -50,6 +50,12 @@ sphere/torus 的质量属性都有精确闭式解。
   按存储的反向绕序自然取负。曲面面对 `(u,v)` 矩形做 `order×order`
   Gauss–Legendre（节点/权重运行时由 Newton 法求 Legendre 根得到，默认
   24 阶），`dA_vec = cross(du,dv) dudv`，求积点处累加上述三个积分。
+- **angle_tolerance 预留**：`angle_tolerance` 在 `tessellate()` 中校验有限且为正，
+  但 M2 不用它重采样曲面网格：共享边采样必须保持逐位一致，按角度重采样需要
+  M3 的共享边重采样契约，因此该参数目前只是接口预留。
+- **§8.11 交叉校验延后**：架构 §8.11 原计划的「网格化与质量属性交叉验证」及
+  OCCT 差分 oracle 在 M2 未实现；QA-11 改用解析闭式解（见下），OCCT 仍是
+  长期参考。
 - **QA-11 oracle（替代 OCCT）**：用闭式解作为参考：box `m/12(b²+c²)`，
   cylinder `m(3r²+h²)/12` 与 `mr²/2`，sphere `2mr²/5`，torus
   `m(R²+3r²/4)` 与 `m(R²/2+5r²/8)`。理由：M2 没有 OCCT 依赖，闭式解对基本体
@@ -67,6 +73,9 @@ sphere/torus 的质量属性都有精确闭式解。
 - 已知限制：曲面面只支持未裁剪整矩形，裁剪面返回 `unsupported`；网格化只
   覆盖解析面，NURBS/Bézier 返回 `unsupported`；QA-10 吞吐 0.20 Mtri/s
   未达 1.0 Mtri/s 门禁（见 `docs/benchmarks/m2.md`）。
+- 已知限制（范围）：`angle_tolerance` 仅校验、不参与重采样；§8.11 的网格
+  交叉校验与 OCCT 差分 oracle 延后；QA-11 以解析闭式解为参考，OCCT 对比留到
+  具备 B-rep 布尔/裁剪能力的里程碑。
 - 跟进：M3 引入 SSI/裁剪后，把质量属性扩展到裁剪面（参数域 2D 布尔 + 分片
   求积）；网格化补 NURBS 与自适应细分；QA-10 在 CI 硬件复测或优化后重新判定，
   不得静默修改门禁。

@@ -44,14 +44,17 @@ inline constexpr double kToleranceGrowthFactor = 10.0;
 //     geometry-store entries;
 //  2. every loop's coedge chain is a closed next-cycle with a consistent prev
 //     link, and each coedge agrees with its loop's face and loop id;
-//  3. every face has a loop, owns at most one outer loop and its loop chain is
+//  3. every face has a loop, owns exactly one outer loop and its loop chain is
 //     acyclic;
 //  4. every edge is used by one or two coedges, and two uses run in opposite
 //     directions (a cylinder seam is exactly this two-direction use);
 //  5. every closed==true shell has only interior edges: each edge its faces use
 //     is used twice inside that shell; closed==false shells may have boundary
 //     edges (an open sheet). Shell contents are also validated to list no face
-//     twice, and a solid may not list a shell twice.
+//     twice, and a solid may not list a shell twice. M2 models no shell
+//     orientation, so a solid must reference exactly one shell; multi-shell
+//     solids (cavities, inner shells) are rejected as Errc::unsupported and
+//     deferred to M3.
 //
 // A null Loop::next is the legitimate end of a face's loop chain, and a null
 // Face::first_loop denotes a face with no loops, so neither is a dangling
@@ -181,6 +184,12 @@ inline ValidationReport validate_topology(const Brep& brep) {
         fail(Errc::invalid_topology, id.index(), "solid shell is not alive");
       }
     }
+    // M2 has no shell orientation, so it cannot tell an outer surface from an
+    // inner cavity wall. Restricting solids to one shell keeps the boundary
+    // unambiguous; multi-shell solids arrive with M3 booleans.
+    if (solid.shell_count != 1u) {
+      fail(Errc::unsupported, id.index(), "multi-shell solids are deferred to M3");
+    }
   }
   if (full()) return report;
 
@@ -253,6 +262,9 @@ inline ValidationReport validate_topology(const Brep& brep) {
         fail(Errc::invalid_topology, face_id.index(), "face loop chain contains a cycle");
         break;
       }
+    }
+    if (current.is_null() && outer_loops == 0) {
+      fail(Errc::invalid_topology, face_id.index(), "face has no outer loop");
     }
   }
   if (full()) return report;
@@ -518,9 +530,13 @@ inline ValidationReport validate_tolerances(const Brep& brep) {
 // Euler characteristic of `solid`: V - E + F - (L - F), where V/E/F are the
 // deduplicated vertices/edges/faces reached through solid -> shell -> face ->
 // loop -> coedge and L is the number of loops that bound those faces (so L - F
-// counts inner boundaries). The value is intentionally not asserted here: a
-// torus is 0, a single open face is 1 and a closed box is 2; each primitive's
-// tests assert its own value.
+// counts inner boundaries). M2 supports single-shell solids only (see
+// validate_topology), so for a closed shell the value reduces to 2 - 2g: a box
+// is 2 and a torus is 0, while a single open face is 1. Multi-shell solids
+// (cavities, inner shells) and their S/H validation are deferred to M3 together
+// with booleans; validate_topology rejects them with Errc::unsupported and the
+// message "multi-shell solids are deferred to M3". The value is intentionally
+// not asserted here: each primitive's tests assert its own value.
 //
 // Precondition: solid_alive(solid). The function allocates its de-duplication
 // flags, so it is not noexcept; a malformed topology yields whatever the walk

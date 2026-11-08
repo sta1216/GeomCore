@@ -30,6 +30,7 @@
 3. **网格化只覆盖解析曲面**：平面、圆柱、圆锥、球、环面按参数域规则采样；NURBS 面的自适应细分推迟到 M3。
 4. **QA-11 的参考值用解析闭式而非 OCCT**：CI 不引入 OCCT 依赖；对 box/cylinder/sphere/torus 用闭式体积、质心、惯性矩做 oracle，并在 `docs/benchmarks/m2.md` 记录该替代。
 5. **不做序列化、属性系统、Solid 布尔**：这些分别属于 §6.7、§6.8 属性表与 §8.8，留给后续里程碑。
+6. **单壳实体、angle_tolerance 预留、§8.11 交叉校验延后**：M2 不建模壳朝向，每个 solid 恰好一个 shell，多壳/腔体与布尔一起延后到 M3；`angle_tolerance` 只校验、不参与采样（共享边采样保持逐位一致，角度重采样需要 M3 的共享边重采样契约）；§8.11 的网格交叉校验与 OCCT 差分 oracle 延后，QA-11 使用解析闭式解。
 
 ## Review Focus
 
@@ -93,7 +94,7 @@ struct CircleCurve3 {
 };
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 TEST_CASE("line curve evaluates and bounds") {
@@ -140,22 +141,22 @@ TEST_CASE("analytic curves reject non-finite and unnormalized data") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cmake --build build --config Debug --target geom_tests` → 期望 `Cannot open include file: 'geom/curves/analytic_curve.hpp'`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `LineCurve3::is_valid`：坐标/方向全部有限，且 `|1 - dot(dir,dir)| <= 1e-12`。
 `CircleCurve3::is_valid`：全部有限，`radius > 0`，两轴单位且正交（`|dot| <= 1e-12`，`| |x|-1 | <= 1e-12`、`| |y|-1 | <= 1e-12`）。
 `CircleCurve3::bounds(a0,a1)`：每个轴在区间内的极值由 `center + r(cos t x + sin t y)` 的解析驻点确定——候选角为 `a0`、`a1` 以及各轴分量导数零点（`atan2` 解出的 `t` 加上 `kπ`），落在区间内的才参与；不要用采样近似。前置条件 `std::isfinite(a0) && std::isfinite(a1) && a0 <= a1`，debug 下 `assert`。
 `LineCurve3::bounds(t0,t1)`：两端点构成的盒（`t0 <= t1` 前置）。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cmake --build build --config Debug --target geom_tests; .\build\Debug\geom_tests.exe --test-case="*analytic curve*"` → 期望全过；再跑 Release 与全套 `ctest`。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/curves/analytic_curve.hpp tests/unit/analytic_curve_test.cpp tests/CMakeLists.txt
@@ -227,7 +228,7 @@ struct Torus3 {
 };
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 TEST_CASE("cylinder evaluation, derivatives and outward normal") {
@@ -277,20 +278,20 @@ TEST_CASE("cone derivative follows the slant") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cmake --build build --config Debug --target geom_tests` → 期望找不到 `analytic.hpp`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 公式：圆柱 `p = origin + v·axis + r(cos u·x + sin u·y)`，`y = cross(axis, x)`；圆锥 `p = origin + v·axis + (r − v·tan α)(cos u·x + sin u·y)`（`v` 增大半径减小，`v = r/tan α` 处收成锥顶）；球 `p = center + r(cos v cos u·x + cos v sin u·y + sin v·axis)`；环面 `p = center + (R + r cos v)(cos u·x + sin u·y) + r sin v·axis`。
 法向 = `normalize(cross(du, dv))`（圆锥注意 `dv` 含径向项；球在极点 `cross(du,dv)` 退化，按 `v` 的符号返回 `±axis`，并保证单位长度）。`is_valid` 检查有限性、轴单位与正交、半径/半角范围（球半径 > 0；环面 `0 < r < R`）；退化输入返回 false，不抛异常。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: `cmake --build build --config Debug --target geom_tests; .\build\Debug\geom_tests.exe --test-case="*analytic surface*"`，再跑 Release 与全套 `ctest`。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/surfaces/analytic.hpp tests/unit/analytic_surface_test.cpp tests/CMakeLists.txt
@@ -406,7 +407,7 @@ class Brep {
 
 新增错误码：`Errc::invalid_topology`、`Errc::tolerance_violation`、`Errc::not_closed`（追加在 `self_intersecting` 之后，不改变既有值）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 TEST_CASE("empty brep has no live entities") {
@@ -445,21 +446,21 @@ TEST_CASE("new error codes stringify") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cmake --build build --config Debug --target geom_tests` → 期望找不到 `geom/brep/topology.hpp`，且 `Errc::invalid_topology` 未定义。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 Brep 内部持有 7 个 `HandleAllocator` 与 7 个 `std::vector<Entity>`；`add` 时 `alloc()`，若返回 null（容量 2^24 耗尽）不抛异常——`SolidEditor` 把它转成 `Errc::unsupported`（message "entity capacity exhausted"）。数组按 `handle.index()` 增长，空洞槽位保持默认值；`alive` 判定必须同时检查 index < size 与该类型 allocator 的 generation。`shell_faces` / `solid_shells` 返回 `std::span`，越界或 dangling handle 返回空 span（debug 下 `assert`）。`Brep` 的拷贝是值语义（向量与 allocator 一起复制），提交时返回副本。
 
 **注意**：`Errc::not_closed` 与 `tolerance_violation` 本任务只加枚举与字符串；`coverage_gaps_test.cpp` 的枚举遍历断言同步补上。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`geom_tests.exe --test-case="*brep*"` 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/topology.hpp include/geom/core/error.hpp tests/unit/brep_topology_test.cpp tests/unit/coverage_gaps_test.cpp tests/CMakeLists.txt
@@ -514,7 +515,7 @@ class SolidEditor {
 };
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 namespace {
@@ -598,21 +599,21 @@ TEST_CASE("rollback discards staged entities") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cmake --build build --config Debug --target geom_tests` → 期望找不到 `geom/brep/solid_editor.hpp`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `add_vertex`：拒绝非有限坐标 → `Errc::non_finite`；`tol < 0` → `Errc::tolerance_violation`。`add_edge`：两个顶点必须 alive（否则 `index_out_of_range`），`t0 < t1` 且有限（否则 `degenerate`），curve 索引 < `curves.size()` 或 `kNoGeometry`。`add_face`：surface 索引合法或 `kNoGeometry`。`add_loop`：coedge 数量 ≥ 1（否则 `invalid_topology`），每条 edge alive，同一 loop 内 edge 出现次数 ≤ 2，`next/prev` 按给定顺序成环。`add_shell`：faces 非空且全部 alive；`add_solid`：shells 非空且 alive。所有失败返回 `Result` 的错误分支，不修改 `staged_`。
 
 `commit()`：在副本上检查（1）所有 alive 实体引用的 handle 都 alive；（2）每个 loop 的 coedge 链首尾相接且 `coedge.loop/face` 一致；（3）每个 face 至多一个 `outer == true` 的 loop。通过则返回副本，否则 `Errc::invalid_topology`；`T5/T6` 会把完整校验器接进来。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*editor*"` 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/solid_editor.hpp tests/unit/solid_editor_test.cpp tests/CMakeLists.txt
@@ -651,7 +652,7 @@ void erase_edge(EdgeId id);      // 只释放 handle，不级联修复引用
 void erase_vertex(VertexId id);
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 先在本测试文件顶部复制 T4 的 `SquareFace` / `make_square_face()` 辅助（各测试目标独立编译，不能跨 TU 共享匿名命名空间符号）。
 
@@ -685,11 +686,11 @@ TEST_CASE("edge referenced by three coedges is rejected") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cmake --build build --config Debug --target geom_tests` → 期望找不到 `geom/brep/validate.hpp`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `validate_topology` 逐项检查并把第一处失败的 `Errc` 与实体 index 填入 issue（可继续收集多处，但最多 8 条）：
 
@@ -702,11 +703,11 @@ Run: `cmake --build build --config Debug --target geom_tests` → 期望找不�
 
 `SolidEditor::commit` 依次调用 `validate_topology` 与 `validate_tolerances`（T6 加入），任一失败返回 `Result` 错误（`code` 取第一条 issue，`context_a` 取其 entity）。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*validate*"` 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/validate.hpp include/geom/brep/solid_editor.hpp tests/unit/brep_validate_test.cpp tests/CMakeLists.txt
@@ -727,7 +728,7 @@ git commit -m "feat(m2): validate B-rep topology and report Euler characteristic
 - Produces: `ValidationReport validate_tolerances(const Brep& brep);`
 - 规则常量：`inline constexpr double kToleranceGrowthFactor = 10.0;`（§4.6 的「增长 >10× 视为可疑」）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 namespace {
@@ -790,11 +791,11 @@ TEST_CASE("negative tolerance is rejected at construction") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cmake --build build --config Debug --target geom_tests` → 期望 `validate_tolerances` 未声明。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 规则（每条失败返回一条 issue，`entity` 为子实体 index）：
 
@@ -804,11 +805,11 @@ Run: `cmake --build build --config Debug --target geom_tests` → 期望 `valida
 4. `solid.tol ≥ max(shell 内所有 face.tol)`。
 5. 增长检查：`parent.tol > 0 && child.tol > 0 && parent.tol > kToleranceGrowthFactor * child.tol` 时记一条 `tolerance_violation`，`message = "tolerance growth exceeds 10x"`（不引入新 Errc）。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*tolerance*"` 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/validate.hpp include/geom/brep/solid_editor.hpp tests/unit/brep_tolerance_test.cpp tests/CMakeLists.txt
@@ -832,7 +833,7 @@ Result<VertexId> split_edge(EdgeId edge, double t);  // MEV
 Result<bool> join_vertex(VertexId vertex);           // KEV
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 先在本测试文件顶部复制 T4 的 `SquareFace` / `make_square_face()` 辅助（放在匿名命名空间，避免与其他测试 TU 的同名符号冲突）。
 
@@ -885,21 +886,21 @@ TEST_CASE("join rejects a vertex with three incident edges") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cmake --build build --config Debug --target geom_tests` → `split_edge` 未声明。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 `split_edge(e, t)`：边需 alive，`t0 < t < t1`，曲线可求值；新顶点 `p = curve.eval(t)`、tol = `edge.tol`；创建 e0(v0→vnew, t0..t)、e1(vnew→v1, t..t1)，两者 tol 与 pcurve 继承；遍历该边的每个 coedge，在原 loop 位置用两个新 coedge 替换（方向继承，pcurve 按线性段插值拆分或置 `kNoGeometry`）；释放旧边与旧 coedge。返回新顶点。
 
 `join_vertex(v)`：v 必须 alive 且恰好 2 条 incident edge（按 coedge 统计；否则 `Errc::invalid_topology`），两条边共享同一曲线且参数区间首尾相接（`|e0.t1 - e1.t0| <= 0` 精确或同端点）、在 v 处切线方向一致（点积 > 0，否则 `degenerate`）；合并为一条边（t0 = min、t1 = max），重写两个 coedge 的 edge 引用并重新接线，释放 v 与其中一条边。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*split*"`、`--test-case="*join*"` 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/solid_editor.hpp tests/unit/brep_euler_ops_test.cpp tests/CMakeLists.txt
@@ -921,7 +922,7 @@ git commit -m "feat(m2): add MEV and KEV Euler operators"
 Result<Brep> make_box(Point3d lo, Point3d hi, double tol);
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 TEST_CASE("box has the expected topology") {
@@ -963,19 +964,19 @@ TEST_CASE("degenerate and non-finite boxes are rejected") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `cmake --build build --config Debug --target geom_tests` → `make_box` 未声明。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 8 个角点（`tol` 全部相同）、12 条边（每条用 `LineCurve3{v0.point, unit_dir}`，`t0 = 0`、`t1 = |v1 - v0|`，方向为单位向量；边 tol 与顶点相同）。6 个面按「外法向 = 面内环的右手方向」构造：底面 `-z`、顶面 `+z`、前面 `-y`、后面 `+y`、左面 `-x`、右面 `+x`；每个 loop 的 coedge 顺序必须让平面法向与环方向一致（在平面上按外法向看是逆时针）。面的 `reversed = false`，surface 用 `Plane3{normal, dot(normal, corner)}`。最后 `add_shell(6 faces, closed=true)`、`add_solid`、`commit()`。任何 `add_*` 失败立即返回其错误（`Result` 传播）。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*box*"` 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/primitives.hpp tests/unit/brep_box_test.cpp tests/CMakeLists.txt
@@ -994,7 +995,7 @@ git commit -m "feat(m2): build box solids through the editor"
 **Interfaces:**
 - Produces: `Result<Brep> make_cylinder(Point3d base, Vec3d axis, double radius, double height, double tol);`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 TEST_CASE("cylinder topology uses a seam edge twice") {
@@ -1030,11 +1031,11 @@ TEST_CASE("cylinder rejects bad radius, height and axis") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: 期望 `make_cylinder` 未声明。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 构造规范：`x = 任一与 axis 不平行的单位向量投影后归一化`（取 `|axis[0]| < 0.9 ? (1,0,0) : (0,1,0)`，再 `x = normalize(cross(cross(axis, cand), axis))`… 实现只需 `x` 单位且 ⊥ axis），`y = cross(axis, x)`，`top = base + height*axis`，接缝点 `p0 = base + radius*x`、`p1 = top + radius*x`。
 
@@ -1050,11 +1051,11 @@ Run: 期望 `make_cylinder` 未声明。
 
 `add_shell(3 faces, closed=true)`，`add_solid`。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*cylinder*"` 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/primitives.hpp tests/unit/brep_cylinder_test.cpp tests/CMakeLists.txt
@@ -1075,7 +1076,7 @@ git commit -m "feat(m2): build cylinder solids with a seam edge"
   - `Result<Brep> make_cone(Point3d base, Vec3d axis, double base_radius, double height, double tol);`（`half_angle = atan2(base_radius, height)` 由参数导出）
   - `Result<Brep> make_sphere(Point3d center, double radius, double tol);`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 TEST_CASE("cone topology shares the base circle and the seam") {
@@ -1111,21 +1112,21 @@ TEST_CASE("cone and sphere reject degenerate parameters") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: 期望 `make_cone` / `make_sphere` 未声明。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 圆锥：底圆 `v0 = v1 = p_base`、接缝 `p_base → apex`（`apex = base + height*axis`，`base_radius > 0`、`height > 0`、`axis` 单位；否则 `Errc::degenerate` / `non_finite`）。`Cone3.half_angle = atan2(base_radius, height)`，这样顶点与底圆在几何上严格一致，不引入第二个可矛盾的参数。侧面 `Cone3{base, axis, x, base_radius, half_angle}`：loop = `底圆(false) → 接缝(false) → 接缝(true)`；底盖 `Plane3{-axis, ...}`：底圆 `reversed = true`。共 2 边、4 coedge。
 
 球：接缝是半条大圆（从南极到北极，`CircleCurve3` 参数 `[-π/2, π/2]`，平面含 axis 与 x）；`v_south`、`v_north` 两个顶点；单面 `Sphere3`，loop 为 `接缝(false) → 接缝(true)`；`add_shell(1 face, closed=true)`。球面 `Sphere3` 的 `eval/du/dv/normal` 在极点按 T2 的规则取极限。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*cone*"`、`--test-case="*sphere*"` 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/primitives.hpp tests/unit/brep_cone_sphere_test.cpp tests/CMakeLists.txt
@@ -1144,7 +1145,7 @@ git commit -m "feat(m2): build cone and sphere solids"
 **Interfaces:**
 - Produces: `Result<Brep> make_torus(Point3d center, Vec3d axis, double major_radius, double minor_radius, double tol);`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 TEST_CASE("torus has Euler characteristic zero") {
@@ -1166,19 +1167,19 @@ TEST_CASE("torus rejects r >= R and non-unit axis") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: 期望 `make_torus` 未声明。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 接缝顶点 `p = center + (R + r)*x`（u=0, v=0）。u 接缝：`CircleCurve3` 在平面 z = 0 内绕轴，半径 `R + r`，`v0 = v1 = p`，`t0=0,t1=2π`；v 接缝：`CircleCurve3` 在含 `x` 与 `axis` 的平面内、圆心 `center + R*x`、半径 `r`，`v0 = v1 = p`，`t0=0,t1=2π`。单面 `Torus3`，loop = `u 接缝(false) → v 接缝(false) → u 接缝(true) → v 接缝(true)`。`shell(1 face, closed=true)`。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*torus*"` 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/primitives.hpp tests/unit/brep_torus_test.cpp tests/CMakeLists.txt
@@ -1211,7 +1212,7 @@ struct TessellationOptions {
 Result<TriMesh> tessellate(const Brep& brep, const TessellationOptions& options);
 ```
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 // 需要 T4 的 SquareFace / make_square_face()（复制到本文件匿名命名空间）。
@@ -1256,22 +1257,22 @@ TEST_CASE("tessellation rejects non-positive deflection") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: 期望找不到 `geom/brep/tessellate.hpp`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 1. **边采样缓存**：按 `(EdgeId, deflection)` 生成采样点；`LineCurve3` 取两端点；`CircleCurve3` 取 `n = ceil(|t1-t0| / dθ)`，`dθ = 2*acos(max(-1.0, 1.0 - deflection/radius))`（`deflection >= 2r` 时取 π）；其他曲线返回 `Errc::unsupported`。采样点必须按边的参数方向保存。
 2. **焊接表**：端点按 `VertexId` 焊接（同一拓扑顶点永远映射到同一个全局下标，圆柱/圆锥的接缝端点因此与端盖边界自动重合）；边的内部采样按 `(edge.index(), 采样序号)` 焊接。相邻面因此复用同一批顶点（水密的基础）。
 3. **平面面**：用面所在平面构造正交基 `(u_axis, v_axis = cross(n, u_axis))`，把 loop 的边界采样点投影为 `Point2d`；按 `outer` 决定环方向（外环 CCW、内环 CW），组装 `Polygon2d{vertices, ring_starts}`；调 `triangulate_polygon2`；三角形法向与 `face_normal = (reversed ? -1 : 1) * unit(plane.normal)` 同向，反向则交换两个顶点。
 4. 面上每个 loop 的第一个 coedge 从采样序号 0 开始；相邻 coedge 共享的端点只保留一次（`reversed` 时从 `n` 递减到 0）。空 loop、零面积面返回 `Errc::degenerate`。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*tessellat*"` 全过。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/tessellate.hpp tests/unit/tessellate_planar_test.cpp tests/CMakeLists.txt
@@ -1293,7 +1294,7 @@ git commit -m "feat(m2): tessellate planar B-rep faces with shared edge samples"
 - 扩展 `tessellate` 支持 `Cylinder3`、`Cone3`、`Sphere3`、`Torus3` 面；新增内部函数 `detail::sample_curved_face`。
 - QA-10 基准入口：`bench/bench_m2.cpp` 构造 16,666 个 box（6 面 = 100k 面）并计时 `tessellate`。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```cpp
 TEST_CASE("cylinder mesh is watertight across the seam and caps") {
@@ -1373,11 +1374,11 @@ TEST_CASE("chord height stays within deflection on a circle") {
 }
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: 期望 `tessellate` 对圆柱返回 `unsupported`（或测试失败于水密断言）。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 - **圆柱侧面**：u 采样数取与该圆柱端圆相同的 `n`（保证与端盖边界共用采样点），v 取 2 行；每对相邻 u 生成两个三角形；方向由 `du × dv` 决定。接缝列 u=0 / u=2π 必须落在同一条接缝边的两个采样上（端点已按 `VertexId` 与端盖共享），不能各自新建顶点。
 - **圆锥侧面**：底圆采样 `n` 个点 + 顶点，扇形三角化；顶点只出现一次。
@@ -1388,11 +1389,11 @@ Run: 期望 `tessellate` 对圆柱返回 `unsupported`（或测试失败于水�
 
 **QA-10 基准**（`bench/bench_m2.cpp`）：16,666 个 1×1×1 box 平铺（每 1000 个一组，位置错开），共 100,000 面；网格化 3 次取最小值，打印面数、三角形数、毫秒、Mtri/s；断言水密（每条无向边两次）与零翻转；输出 `QA10 faces=100000 tris=... ms=... Mtri/s=...`。目标 ≥ 1 Mtri/s，未达标时打印 `FAIL` 但进程返回 0（基准不设失败退出码，验收在文档与 CI 步骤中判定）。
 
-- [ ] **Step 4: 运行确认通过**
+- [x] **Step 4: 运行确认通过**
 
 Run: Debug/Release 全套 + `ctest`；`--test-case="*curved*"`、`--test-case="*sphere*"`、`--test-case="*torus*"`；`geom_bench_m2.exe` 打印 QA-10 数据。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/tessellate.hpp bench/bench_m2.cpp CMakeLists.txt tests/unit/tessellate_curved_test.cpp tests/CMakeLists.txt
@@ -1487,7 +1488,7 @@ TEST_CASE("open shells have no mass properties") {
 
 Run: 期望找不到 `geom/brep/mass_properties.hpp`。
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 前置：所有 shell 必须 `closed`（否则 `not_closed`）、法向一致朝外（体积必须 > 0，否则 `numeric_failure`）。
 
@@ -1525,7 +1526,7 @@ git commit -m "feat(m2): compute B-rep mass properties and record QA-10/QA-11 ev
 - [ ] QA-10：100,000 面 B-rep 网格化——水密（每条无向边恰好两次）、无零面积/翻转三角形、弦高 ≤ deflection、共享边采样逐点一致；`docs/benchmarks/m2.md` 记录实测面数、三角形数、耗时与 Mtri/s。**（2026-11-08 实测 FAIL：99,996 面 / 199,992 三角形，0.20 Mtri/s vs 1.0 Mtri/s；水密与朝外卷绕通过，详见 `docs/benchmarks/m2.md`）**
 - [x] QA-11：box/cylinder/sphere/torus 的体积、质心、惯性矩相对误差 ≤ 1e-6，记录最大值。**（实测最大相对误差 7.62e-10）**
 - [x] 所有基本体 `validate_topology` 与 `validate_tolerances` 通过；Euler 特征数断言：box/cylinder/cone/sphere = 2、torus = 0。
-- [ ] Debug 与 Release 全套 `ctest` 通过；GCC/Clang CI 通过；无新增警告。**（本地 MSVC Debug/Release 均 369/369 用例、450,299 断言、无新增警告；GCC/Clang CI 未在本任务中复跑）**
+- [ ] Debug 与 Release 全套 `ctest` 通过；GCC/Clang CI 通过；无新增警告。**（本地 MSVC Debug/Release 均 371/371 用例、450,308 断言、无新增警告；GCC/Clang CI 未在本任务中复跑）**
 - [x] 架构 §16.3、`docs/benchmarks/m2.md`、ADR-0021/0022 已更新，数字与 CI 一致。
 
 ## 自检

@@ -46,6 +46,10 @@ vertex/edge/face/solid 显式传播。实现必须同时满足：
   欧拉算子主要用于证明「拓扑变更必须经受控算子」并支撑后续编辑。`split_edge`
   （MEV）与 `join_vertex`（KEV）覆盖了增加/删除顶点与边的最小闭环；MEF/KEM
   等需要新建/合并环与面，M2 没有消费方，留待布尔与高级建模里程碑。
+- **单壳实体（M2 范围限制）**：M2 不建模壳朝向，无法区分外表面与腔体内表面，
+  因此每个 `solid` 恰好引用一个 shell；多壳实体（腔体、内壳）与布尔运算一起
+  延后到 M3。`validate_topology` 以 `Errc::unsupported` 拒绝
+  `shell_count != 1`，消息为 "multi-shell solids are deferred to M3"。
 
 ## 后果
 
@@ -58,5 +62,7 @@ vertex/edge/face/solid 显式传播。实现必须同时满足：
   「同一条边被一个环使用两次」的透镜环会被拒绝并返回 `invalid_topology`；
   这不是通用 KEV，后续里程碑需扩展为按环合并。相关测试
   `join rejects a vertex with four coedge uses` 固定了该边界。
+- 已知限制（M2 单壳）：闭合体的欧拉特征退化为 `2 - 2g`（box 2、torus 0）；
+  多壳 S/H 校验随腔体/内壳延后到 M3，届时应与布尔运算一起恢复。
 - 跟进：若大模型提交成为瓶颈，引入脏区标记与增量校验；扩展欧拉算子族时
   保持同一事务与代际语义。

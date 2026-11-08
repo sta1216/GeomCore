@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <utility>
 
 #include <geom/brep/solid_editor.hpp>
@@ -44,6 +45,7 @@ struct Box {
   geom::SolidEditor editor;
   geom::SolidId solid;
   geom::ShellId shell;
+  std::array<geom::FaceId, 6> faces;
 };
 
 // Closed box built only from topology (no curve geometry): 8 vertices, 12 edges,
@@ -81,7 +83,8 @@ Box make_box(bool split_shells = false) {
     }
     ed.add_loop(faces[i], specs, true).value();
   }
-  Box box{std::move(ed), {}, {}};
+  Box box{std::move(ed), {}, {}, {}};
+  box.faces = faces;
   if (split_shells) {
     const geom::ShellId first = box.editor
                                     .add_shell(std::array<geom::FaceId, 3>{
@@ -255,7 +258,7 @@ TEST_CASE("closed shell with a boundary edge reports not_closed") {
   CHECK(r.error().code == geom::Errc::not_closed);
 }
 
-TEST_CASE("two open sheets in closed shells are not closed shells") {
+TEST_CASE("closed shell does not borrow edge uses from orphan faces") {
   SquareFace s = make_square_face();
   const geom::Loop loop = s.editor.brep().loop(s.loop);
   std::array<geom::CoedgeSpec, 4> specs{};
@@ -269,20 +272,54 @@ TEST_CASE("two open sheets in closed shells are not closed shells") {
   REQUIRE(s.editor.add_loop(back, specs, true).has_value());
   const geom::ShellId front_shell =
       s.editor.add_shell(std::array<geom::FaceId, 1>{s.face}, true).value();
-  const geom::ShellId back_shell =
-      s.editor.add_shell(std::array<geom::FaceId, 1>{back}, true).value();
-  REQUIRE(s.editor.add_solid(std::array<geom::ShellId, 2>{front_shell, back_shell}, 0.0)
-              .has_value());
+  REQUIRE(s.editor.add_solid(std::array<geom::ShellId, 1>{front_shell}, 0.0).has_value());
+  // Every edge has two opposite uses globally (front and orphan back), but only
+  // one of them belongs to the closed shell, so the shell is still open.
   const auto r = s.editor.commit();
   REQUIRE_FALSE(r.has_value());
   CHECK(r.error().code == geom::Errc::not_closed);
 }
 
-TEST_CASE("box split into two closed three-face shells is not closed") {
+TEST_CASE("box split into two shells is deferred to M3") {
   Box box = make_box(true);
   const auto r = box.editor.commit();
   REQUIRE_FALSE(r.has_value());
-  CHECK(r.error().code == geom::Errc::not_closed);
+  CHECK(r.error().code == geom::Errc::unsupported);
+  CHECK(std::string(r.error().message) == "multi-shell solids are deferred to M3");
+}
+
+TEST_CASE("solid with two closed shells is deferred to M3") {
+  Box box = make_box();
+  const geom::ShellId second = box.editor.add_shell(box.faces, true).value();
+  REQUIRE(box.editor.add_solid(std::array<geom::ShellId, 2>{box.shell, second}, 0.0)
+              .has_value());
+  // Both shells are individually closed, so only the single-shell policy is
+  // violated. It is reported as unsupported rather than invalid topology.
+  const auto r = box.editor.commit();
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::unsupported);
+  CHECK(std::string(r.error().message) == "multi-shell solids are deferred to M3");
+}
+
+TEST_CASE("face without an outer loop is rejected") {
+  geom::SolidEditor ed;
+  const geom::Point3d pts[4] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}};
+  std::array<geom::VertexId, 4> vertices{};
+  for (int i = 0; i < 4; ++i) vertices[i] = ed.add_vertex(pts[i], 0.0).value();
+  std::array<geom::EdgeId, 4> edges{};
+  for (int i = 0; i < 4; ++i) {
+    edges[i] =
+        ed.add_edge(vertices[i], vertices[(i + 1) % 4], geom::kNoGeometry, 0.0, 1.0, 0.0)
+            .value();
+  }
+  const geom::FaceId face = ed.add_face(geom::kNoGeometry, false, 0.0).value();
+  std::array<geom::CoedgeSpec, 4> specs{};
+  for (int i = 0; i < 4; ++i) specs[i] = geom::CoedgeSpec{edges[i], false};
+  REQUIRE(ed.add_loop(face, specs, false).has_value());
+  const auto r = ed.commit();
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::invalid_topology);
+  CHECK(std::string(r.error().message) == "face has no outer loop");
 }
 
 TEST_CASE("shell listing a face twice is rejected") {
