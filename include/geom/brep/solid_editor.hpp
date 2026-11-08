@@ -1,0 +1,414 @@
+#pragma once
+
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <utility>
+#include <vector>
+
+#include <geom/brep/topology.hpp>
+#include <geom/core/error.hpp>
+#include <geom/core/handle.hpp>
+#include <geom/core/result.hpp>
+
+namespace geom {
+inline namespace v1 {
+
+// One coedge of a new loop: the edge the coedge uses, whether it runs against
+// that edge's orientation, the optional pcurve store index and the coincidence
+// tolerance. An omitted pcurve is kNoGeometry, an omitted tolerance is 0.
+struct CoedgeSpec {
+  EdgeId edge{};
+  bool reversed = false;
+  std::uint32_t pcurve = kNoGeometry;
+  double tol = 0.0;
+};
+
+// Transactional editor for a Brep.
+//
+// Topology changes go through add_vertex/add_edge/add_face/add_loop/add_shell/
+// add_solid, which mutate a private staging copy. Every method validates its
+// arguments before touching the staging copy and reports failure through
+// Result, so a failed call leaves the staged topology exactly as it was.
+// rollback() discards the staging changes and restores the base handed to the
+// constructor; commit() validates the staging copy and returns it as a fresh
+// Brep on success, leaving the editor untouched on failure.
+//
+// SolidEditor is Brep's only friend, so it is the sole path that can allocate
+// entity slots. Curve/surface/pcurve geometry is appended to the staging
+// geometry store and addressed by the 32-bit index the add_* method returns
+// (kNoGeometry means "no geometry"); passing an index that does not exist yet
+// is rejected as Errc::index_out_of_range.
+class SolidEditor {
+ public:
+  SolidEditor() = default;
+  explicit SolidEditor(const Brep& base) : base_(base), staged_(base) {}
+
+  // Staged view: what commit() would publish if it validated successfully.
+  const Brep& brep() const noexcept { return staged_; }
+
+  // Store-index append helpers. Geometry is addressed by position in the
+  // staging store and can never be released, so the returned index is stable
+  // until rollback()/destruction. A store cannot exceed kNoGeometry entries
+  // (the index simply does not fit the 32-bit fields that reference it), which
+  // is far beyond what memory can hold.
+  std::uint32_t add_curve(CurveGeometry curve) {
+    staged_.geometry_.curves.push_back(std::move(curve));
+    return static_cast<std::uint32_t>(staged_.geometry_.curves.size() - 1u);
+  }
+  std::uint32_t add_surface(SurfaceGeometry surface) {
+    staged_.geometry_.surfaces.push_back(std::move(surface));
+    return static_cast<std::uint32_t>(staged_.geometry_.surfaces.size() - 1u);
+  }
+  std::uint32_t add_pcurve(Pcurve2d pcurve) {
+    staged_.geometry_.pcurves.push_back(pcurve);
+    return static_cast<std::uint32_t>(staged_.geometry_.pcurves.size() - 1u);
+  }
+
+  Result<VertexId> add_vertex(Point3d p, double tol) {
+    if (!(std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]))) {
+      return Error{Errc::non_finite, "solid_editor: vertex position is not finite", 0u, 0u};
+    }
+    if (tol < 0.0 || !std::isfinite(tol)) {
+      return Error{Errc::tolerance_violation,
+                   "solid_editor: vertex tolerance must be finite and non-negative", 0u, 0u};
+    }
+    const Handle id = staged_.vertex_alloc_.alloc();
+    if (id.is_null()) return capacity_error();
+    Vertex vertex;
+    vertex.point = p;
+    vertex.tol = tol;
+    place(staged_.vertices_, id, vertex);
+    return id;
+  }
+
+  Result<EdgeId> add_edge(VertexId v0, VertexId v1, std::uint32_t curve, double t0, double t1,
+                          double tol) {
+    if (!staged_.vertex_alive(v0) || !staged_.vertex_alive(v1)) {
+      return Error{Errc::index_out_of_range, "solid_editor: edge vertex is not alive",
+                   v0.index(), v1.index()};
+    }
+    if (!(std::isfinite(t0) && std::isfinite(t1)) || !(t0 < t1)) {
+      return Error{Errc::degenerate,
+                   "solid_editor: edge parameter interval is empty or non-finite", 0u, 0u};
+    }
+    if (curve != kNoGeometry &&
+        static_cast<std::size_t>(curve) >= staged_.geometry_.curves.size()) {
+      return Error{Errc::index_out_of_range, "solid_editor: edge curve index out of range",
+                   curve, 0u};
+    }
+    const Handle id = staged_.edge_alloc_.alloc();
+    if (id.is_null()) return capacity_error();
+    Edge edge;
+    edge.curve = curve;
+    edge.t0 = t0;
+    edge.t1 = t1;
+    edge.v0 = v0;
+    edge.v1 = v1;
+    edge.tol = tol;
+    place(staged_.edges_, id, edge);
+    return id;
+  }
+
+  Result<FaceId> add_face(std::uint32_t surface, bool reversed, double tol) {
+    if (surface != kNoGeometry &&
+        static_cast<std::size_t>(surface) >= staged_.geometry_.surfaces.size()) {
+      return Error{Errc::index_out_of_range, "solid_editor: face surface index out of range",
+                   surface, 0u};
+    }
+    const Handle id = staged_.face_alloc_.alloc();
+    if (id.is_null()) return capacity_error();
+    Face face;
+    face.surface = surface;
+    face.reversed = reversed;
+    face.tol = tol;
+    place(staged_.faces_, id, face);
+    return id;
+  }
+
+  // Creates a loop from coedges.size() fresh Coedges in the given order:
+  // coedge i -> coedge i + 1 -> ... -> coedge 0. Each edge may be used at most
+  // twice in one loop, so an edge can carry the two opposite-oriented uses a
+  // manifold boundary needs; a third use would make the cycle non-manifold.
+  Result<LoopId> add_loop(FaceId face, std::span<const CoedgeSpec> coedges, bool outer) {
+    if (!staged_.face_alive(face)) {
+      return Error{Errc::index_out_of_range, "solid_editor: loop face is not alive",
+                   face.index(), 0u};
+    }
+    if (coedges.empty()) {
+      return Error{Errc::invalid_topology, "solid_editor: loop needs at least one coedge", 0u,
+                   0u};
+    }
+    for (const CoedgeSpec& spec : coedges) {
+      if (!staged_.edge_alive(spec.edge)) {
+        return Error{Errc::index_out_of_range, "solid_editor: loop coedge edge is not alive",
+                     spec.edge.index(), 0u};
+      }
+      if (spec.pcurve != kNoGeometry &&
+          static_cast<std::size_t>(spec.pcurve) >= staged_.geometry_.pcurves.size()) {
+        return Error{Errc::index_out_of_range,
+                     "solid_editor: loop coedge pcurve index out of range", spec.pcurve, 0u};
+      }
+    }
+    // Occurrence counting is quadratic in the loop size. That is deliberate:
+    // loops are short, and this keeps the validation allocation-free so the
+    // failure paths cannot throw.
+    for (std::size_t i = 0; i < coedges.size(); ++i) {
+      std::size_t occurrences = 0;
+      for (std::size_t j = 0; j < coedges.size(); ++j) {
+        if (coedges[j].edge == coedges[i].edge) ++occurrences;
+      }
+      if (occurrences > 2) {
+        return Error{Errc::invalid_topology, "solid_editor: edge used more than twice in a loop",
+                     coedges[i].edge.index(), 0u};
+      }
+    }
+    if (coedges.size() > Handle::kNullIndex ||
+        !can_alloc(staged_.coedge_alloc_, static_cast<std::uint32_t>(coedges.size())) ||
+        !can_alloc(staged_.loop_alloc_, 1u)) {
+      return capacity_error();
+    }
+
+    const std::uint32_t count = static_cast<std::uint32_t>(coedges.size());
+    std::vector<CoedgeId> ids;
+    ids.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) ids.push_back(staged_.coedge_alloc_.alloc());
+
+    const Handle loop_id = staged_.loop_alloc_.alloc();
+    for (std::uint32_t i = 0; i < count; ++i) {
+      Coedge coedge;
+      coedge.edge = coedges[i].edge;
+      coedge.face = face;
+      coedge.loop = loop_id;
+      coedge.reversed = coedges[i].reversed;
+      coedge.pcurve = coedges[i].pcurve;
+      coedge.next = ids[(i + 1u) % count];
+      coedge.prev = ids[(i + count - 1u) % count];
+      coedge.tol = coedges[i].tol;
+      place(staged_.coedges_, ids[i], coedge);
+    }
+    Loop loop;
+    loop.face = face;
+    loop.start = ids.front();
+    loop.outer = outer;
+    place(staged_.loops_, loop_id, loop);
+
+    // Append the new loop to the face's loop chain. The chain is walked through
+    // Loop::next and always ends on a null next; the editor only ever appends,
+    // so a bounded walk is enough.
+    LoopId* link = &staged_.faces_[static_cast<std::size_t>(face.index())].first_loop;
+    std::size_t steps = 0;
+    while (!link->is_null() && staged_.loop_alive(*link) && steps < staged_.loops_.size()) {
+      link = &staged_.loops_[static_cast<std::size_t>(link->index())].next;
+      ++steps;
+    }
+    if (link->is_null()) *link = loop_id;
+    return loop_id;
+  }
+
+  Result<ShellId> add_shell(std::span<const FaceId> faces, bool closed) {
+    if (faces.empty()) {
+      return Error{Errc::invalid_topology, "solid_editor: shell needs at least one face", 0u, 0u};
+    }
+    for (const FaceId face : faces) {
+      if (!staged_.face_alive(face)) {
+        return Error{Errc::index_out_of_range, "solid_editor: shell face is not alive",
+                     face.index(), 0u};
+      }
+    }
+    const std::size_t first = staged_.shell_faces_.size();
+    if (first > kNoGeometry || faces.size() > static_cast<std::size_t>(kNoGeometry) - first ||
+        !can_alloc(staged_.shell_alloc_, 1u)) {
+      return capacity_error();
+    }
+    const Handle id = staged_.shell_alloc_.alloc();
+    Shell shell;
+    shell.first_face = static_cast<std::uint32_t>(first);
+    shell.face_count = static_cast<std::uint32_t>(faces.size());
+    shell.closed = closed;
+    staged_.shell_faces_.insert(staged_.shell_faces_.end(), faces.begin(), faces.end());
+    place(staged_.shells_, id, shell);
+    return id;
+  }
+
+  Result<SolidId> add_solid(std::span<const ShellId> shells, double tol) {
+    if (shells.empty()) {
+      return Error{Errc::invalid_topology, "solid_editor: solid needs at least one shell", 0u, 0u};
+    }
+    for (const ShellId shell : shells) {
+      if (!staged_.shell_alive(shell)) {
+        return Error{Errc::index_out_of_range, "solid_editor: solid shell is not alive",
+                     shell.index(), 0u};
+      }
+    }
+    const std::size_t first = staged_.solid_shells_.size();
+    if (first > kNoGeometry || shells.size() > static_cast<std::size_t>(kNoGeometry) - first ||
+        !can_alloc(staged_.solid_alloc_, 1u)) {
+      return capacity_error();
+    }
+    const Handle id = staged_.solid_alloc_.alloc();
+    SolidEntity solid;
+    solid.first_shell = static_cast<std::uint32_t>(first);
+    solid.shell_count = static_cast<std::uint32_t>(shells.size());
+    solid.tol = tol;
+    staged_.solid_shells_.insert(staged_.solid_shells_.end(), shells.begin(), shells.end());
+    place(staged_.solids_, id, solid);
+    return id;
+  }
+
+  // Validates the staging copy and returns it as a fresh Brep. The three checks
+  // are: every live entity references only live handles (and existing geometry
+  // store entries); every loop's coedge chain is a closed cycle whose coedges
+  // agree on loop and face; and every face owns at most one outer loop. This is
+  // the M2 subset of the validator that T5/T6 extend.
+  Result<Brep> commit() const {
+    Brep candidate = staged_;
+    if (!references_alive(candidate) || !loops_are_closed(candidate) ||
+        !faces_have_one_outer_loop(candidate)) {
+      return Error{Errc::invalid_topology, "solid_editor: staged topology is invalid", 0u, 0u};
+    }
+    return candidate;
+  }
+
+  // Drops every staged change and restores the base passed to the constructor
+  // (an empty Brep for a default-constructed editor).
+  void rollback() { staged_ = base_; }
+
+ private:
+  static Error capacity_error() noexcept {
+    return Error{Errc::unsupported, "solid_editor: entity capacity exhausted", 0u, 0u};
+  }
+
+  static bool can_alloc(const HandleAllocator& allocator, std::uint32_t count) noexcept {
+    const std::uint32_t live = allocator.live_count();
+    return count <= Handle::kNullIndex - live;
+  }
+
+  // Stores `entity` at the slot the allocator handed out. A fresh allocation
+  // always lands at the end of the array; a slot reused after a release lands
+  // inside it and is overwritten. Growing first keeps index() == slot index,
+  // which is the invariant every Brep accessor relies on.
+  template <class Entity>
+  static void place(std::vector<Entity>& slots, Handle id, const Entity& entity) {
+    const std::size_t index = static_cast<std::size_t>(id.index());
+    if (index >= slots.size()) slots.resize(index + 1u);
+    slots[index] = entity;
+  }
+
+  static bool references_alive(const Brep& b) {
+    for (std::size_t i = 0; i < b.edges_.size(); ++i) {
+      if (b.edge_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      const Edge& edge = b.edges_[i];
+      if (!b.vertex_alive(edge.v0) || !b.vertex_alive(edge.v1)) return false;
+      if (edge.curve != kNoGeometry &&
+          static_cast<std::size_t>(edge.curve) >= b.geometry_.curves.size()) {
+        return false;
+      }
+    }
+    for (std::size_t i = 0; i < b.coedges_.size(); ++i) {
+      if (b.coedge_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      const Coedge& coedge = b.coedges_[i];
+      if (!b.edge_alive(coedge.edge) || !b.face_alive(coedge.face) ||
+          !b.loop_alive(coedge.loop)) {
+        return false;
+      }
+      if (coedge.pcurve != kNoGeometry &&
+          static_cast<std::size_t>(coedge.pcurve) >= b.geometry_.pcurves.size()) {
+        return false;
+      }
+    }
+    for (std::size_t i = 0; i < b.loops_.size(); ++i) {
+      if (b.loop_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      const Loop& loop = b.loops_[i];
+      if (!b.face_alive(loop.face) || !b.coedge_alive(loop.start)) return false;
+    }
+    for (std::size_t i = 0; i < b.faces_.size(); ++i) {
+      if (b.face_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      const Face& face = b.faces_[i];
+      if (face.surface != kNoGeometry &&
+          static_cast<std::size_t>(face.surface) >= b.geometry_.surfaces.size()) {
+        return false;
+      }
+      if (!face.first_loop.is_null() && !b.loop_alive(face.first_loop)) return false;
+    }
+    for (std::size_t i = 0; i < b.shells_.size(); ++i) {
+      if (b.shell_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      const Shell& shell = b.shells_[i];
+      if (shell.first_face > b.shell_faces_.size() ||
+          shell.face_count > b.shell_faces_.size() - shell.first_face) {
+        return false;
+      }
+      for (std::uint32_t j = 0; j < shell.face_count; ++j) {
+        if (!b.face_alive(b.shell_faces_[shell.first_face + j])) return false;
+      }
+    }
+    for (std::size_t i = 0; i < b.solids_.size(); ++i) {
+      if (b.solid_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      const SolidEntity& solid = b.solids_[i];
+      if (solid.first_shell > b.solid_shells_.size() ||
+          solid.shell_count > b.solid_shells_.size() - solid.first_shell) {
+        return false;
+      }
+      for (std::uint32_t j = 0; j < solid.shell_count; ++j) {
+        if (!b.shell_alive(b.solid_shells_[solid.first_shell + j])) return false;
+      }
+    }
+    return true;
+  }
+
+  static bool loops_are_closed(const Brep& b) {
+    const std::size_t limit = b.coedge_alloc_.live_count();
+    for (std::size_t i = 0; i < b.loops_.size(); ++i) {
+      const Handle loop_id = b.loop_alloc_.handle_at(static_cast<std::uint32_t>(i));
+      if (loop_id.is_null()) continue;
+      const Loop& loop = b.loops_[i];
+      CoedgeId current = loop.start;
+      std::size_t steps = 0;
+      for (;;) {
+        if (!b.coedge_alive(current)) return false;
+        const Coedge& coedge = b.coedge(current);
+        if (coedge.loop != loop_id || coedge.face != loop.face) return false;
+        const CoedgeId next = coedge.next;
+        if (!b.coedge_alive(next)) return false;
+        if (b.coedge(next).prev != current) return false;
+        if (!b.coedge_alive(coedge.prev) || b.coedge(coedge.prev).next != current) return false;
+        if (next == loop.start) break;
+        current = next;
+        if (++steps > limit) return false;
+      }
+    }
+    return true;
+  }
+
+  static bool faces_have_one_outer_loop(const Brep& b) {
+    const std::size_t limit = b.loop_alloc_.live_count();
+    for (std::size_t i = 0; i < b.faces_.size(); ++i) {
+      const Handle face_id = b.face_alloc_.handle_at(static_cast<std::uint32_t>(i));
+      if (face_id.is_null()) continue;
+      std::size_t outer_loops = 0;
+      std::size_t steps = 0;
+      LoopId current = b.faces_[i].first_loop;
+      while (!current.is_null()) {
+        if (!b.loop_alive(current)) return false;
+        const Loop& loop = b.loop(current);
+        if (loop.face != face_id) return false;
+        if (loop.outer) {
+          if (++outer_loops > 1) return false;
+        }
+        current = loop.next;
+        if (++steps > limit) return false;
+      }
+    }
+    return true;
+  }
+
+  // Base state for rollback(), and the mutable staging copy. Keeping the base
+  // by value costs one extra copy per editor but makes rollback trivial and
+  // exact; the alternative (replaying the inverse edits) would be fragile.
+  Brep base_;
+  Brep staged_;
+};
+
+}  // namespace v1
+}  // namespace geom
