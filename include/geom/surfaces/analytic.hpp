@@ -108,7 +108,10 @@ struct Cylinder3 {
 // Cone whose v = 0 cross-section is a circle of the given radius:
 //   p(u, v) = origin + v * axis + (radius - v * tan(half_angle)) * radial(u)
 // The radius shrinks as v grows and reaches zero at v = radius / tan(half_angle)
-// (the apex); beyond the apex the formula continues on the opposite nappe.
+// (the apex). For v beyond the apex the parameterization continues on the
+// opposite nappe of the same double cone: eval() stays on the surface, but the
+// (u, v) frame turns over, so normal() flips sign to stay consistent with
+// cross(du, dv). Callers that trim the cone at the apex never reach that branch.
 // half_angle is the angle between the surface and the axis and must lie in
 // (0, pi/2). The frame and radius requirements match Cylinder3.
 struct Cone3 {
@@ -187,8 +190,10 @@ struct Sphere3 {
 
   // p - center divided by radius, written directly as the unit vector
   // cos(v)*radial + sin(v)*axis. cross(du, dv) is parallel to this vector but
-  // vanishes at the poles, where the closed form still returns the outward
-  // unit normal (approximately +axis at v = +pi/2 and -axis at v = -pi/2).
+  // vanishes at the poles (as cos(v)); the closed form is the directional
+  // limit there, returning +axis at v = +pi/2 and -axis at v = -pi/2. At the
+  // poles the radial residual cos(v)*radial(u) is one ulp of 1 (about 6e-17),
+  // so equal-to-±axis comparisons need one ulp of slack, not exact equality.
   Vec3d normal(double u, double v) const noexcept {
     const double c = std::cos(v);
     const double s = std::sin(v);

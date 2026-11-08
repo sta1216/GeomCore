@@ -20,6 +20,11 @@ TEST_CASE("cylinder evaluation, derivatives and outward normal") {
   const geom::Vec3d n0 = cyl.normal(0.0, 0.0);
   CHECK(n0[0] == doctest::Approx(1.0).epsilon(1e-12));
   CHECK(geom::dot(cyl.normal(1.2, 5.0), cyl.normal(1.2, 5.0)) == doctest::Approx(1.0).epsilon(1e-12));
+  // Mid-longitude: the normal must rotate with u; a constant normal fails here.
+  const geom::Vec3d n_mid = cyl.normal(3.14159265358979323846 / 2, 0.5);
+  CHECK(n_mid[0] == doctest::Approx(0.0).epsilon(1e-12));
+  CHECK(n_mid[1] == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(n_mid[2] == doctest::Approx(0.0).epsilon(1e-12));
 }
 
 TEST_CASE("sphere normal is unit and points outward at poles") {
@@ -31,6 +36,16 @@ TEST_CASE("sphere normal is unit and points outward at poles") {
   const geom::Vec3d np = s.normal(0.0, 3.14159265358979323846 / 2);
   CHECK(np[2] == doctest::Approx(1.0).epsilon(1e-12));
   CHECK(geom::dot(np, np) == doctest::Approx(1.0).epsilon(1e-12));
+  // Pole normal is the directional limit: ±axis plus a cos(pi/2)*radial(u)
+  // residual of about one ulp, compared at 1e-15 rather than with exact ==.
+  CHECK(np[0] == doctest::Approx(0.0).epsilon(1e-15));
+  CHECK(np[1] == doctest::Approx(0.0).epsilon(1e-15));
+  // Mid-latitude, mid-longitude: the normal rotates with both u and v.
+  constexpr double kPi = 3.14159265358979323846;
+  const geom::Vec3d nm = s.normal(kPi / 2, kPi / 4);
+  CHECK(nm[0] == doctest::Approx(0.0).epsilon(1e-12));
+  CHECK(nm[1] == doctest::Approx(std::cos(kPi / 4)).epsilon(1e-12));
+  CHECK(nm[2] == doctest::Approx(std::sin(kPi / 4)).epsilon(1e-12));
 }
 
 TEST_CASE("torus geometry is rejected when r >= R") {
@@ -49,6 +64,7 @@ TEST_CASE("cone derivative follows the slant") {
   CHECK(cone.eval(0.0, 2.0)[0] ==
         doctest::Approx(1.0 - 2.0 * std::tan(0.25)).epsilon(1e-12));
   CHECK(cone.dv(0.0, 2.0)[0] == doctest::Approx(-std::tan(0.25)).epsilon(1e-12));
+  CHECK(cone.du(0.0, 2.0)[1] == doctest::Approx(1.0 - 2.0 * std::tan(0.25)).epsilon(1e-12));
 }
 
 TEST_CASE("analytic surfaces reject non-finite fields and out-of-range parameters") {
@@ -171,6 +187,8 @@ TEST_CASE("sphere derivatives and south pole normal") {
   const geom::Vec3d ns = s.normal(0.7, -kPi / 2);
   CHECK(ns[2] == doctest::Approx(-1.0).epsilon(1e-12));
   CHECK(geom::dot(ns, ns) == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(ns[0] == doctest::Approx(0.0).epsilon(1e-15));
+  CHECK(ns[1] == doctest::Approx(0.0).epsilon(1e-15));
   CHECK(s.eval(0.0, -kPi / 2)[2] == doctest::Approx(-2.0).epsilon(1e-12));
 }
 
@@ -196,6 +214,11 @@ TEST_CASE("torus derivatives, evaluation and normals") {
   const geom::Vec3d nt = t.normal(0.0, kPi / 2);
   CHECK(nt[2] == doctest::Approx(1.0).epsilon(1e-12));
   CHECK(geom::dot(t.normal(1.1, 0.3), t.normal(1.1, 0.3)) == doctest::Approx(1.0).epsilon(1e-12));
+  // Mid-longitude: the normal must rotate with u; a constant normal fails here.
+  const geom::Vec3d n_mid = t.normal(kPi / 2, 0.0);
+  CHECK(n_mid[0] == doctest::Approx(0.0).epsilon(1e-12));
+  CHECK(n_mid[1] == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(n_mid[2] == doctest::Approx(0.0).epsilon(1e-12));
 }
 
 TEST_CASE("cone normal is unit and perpendicular to the slant") {
@@ -207,4 +230,9 @@ TEST_CASE("cone normal is unit and perpendicular to the slant") {
   CHECK(geom::dot(n, cone.dv(0.0, 2.0)) == doctest::Approx(0.0).epsilon(1e-12));
   CHECK(geom::dot(n, cone.du(0.0, 2.0)) == doctest::Approx(0.0).epsilon(1e-12));
   CHECK(geom::dot(n, n) == doctest::Approx(1.0).epsilon(1e-12));
+  // Mid-longitude: the normal must rotate with u; a constant normal fails here.
+  const geom::Vec3d n_mid = cone.normal(3.14159265358979323846 / 2, 0.0);
+  CHECK(n_mid[0] == doctest::Approx(0.0).epsilon(1e-12));
+  CHECK(n_mid[1] == doctest::Approx(std::cos(0.25)).epsilon(1e-12));
+  CHECK(n_mid[2] == doctest::Approx(std::sin(0.25)).epsilon(1e-12));
 }
