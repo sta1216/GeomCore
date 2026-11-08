@@ -40,6 +40,11 @@ struct CoedgeSpec {
 // geometry store and addressed by the 32-bit index the add_* method returns
 // (kNoGeometry means "no geometry"); passing an index that does not exist yet
 // is rejected as Errc::index_out_of_range.
+//
+// Allocation failure (std::bad_alloc from vector growth or a member-pool resize)
+// is not caught: it propagates out of these methods instead of being mapped to
+// an Errc. This is the repo-wide container-allocation policy and the editor adds
+// no recovery of its own; every other failure is reported as a Result error.
 class SolidEditor {
  public:
   SolidEditor() = default;
@@ -170,6 +175,30 @@ class SolidEditor {
       return capacity_error();
     }
 
+    // Locate the tail of the face's loop chain before creating anything: if the
+    // chain is corrupt (a link to a dead or foreign loop, or a cycle) the call
+    // fails without leaving a half-built loop behind. A null tail means the
+    // face has no loops yet.
+    LoopId tail{};
+    {
+      const std::size_t limit = staged_.loop_alloc_.live_count();
+      std::size_t steps = 0;
+      LoopId current = staged_.faces_[static_cast<std::size_t>(face.index())].first_loop;
+      while (!current.is_null()) {
+        if (!staged_.loop_alive(current) ||
+            staged_.loops_[static_cast<std::size_t>(current.index())].face != face) {
+          return Error{Errc::invalid_topology, "solid_editor: face loop chain is corrupt",
+                       current.index(), 0u};
+        }
+        tail = current;
+        current = staged_.loops_[static_cast<std::size_t>(current.index())].next;
+        if (++steps > limit) {
+          return Error{Errc::invalid_topology, "solid_editor: face loop chain is corrupt",
+                       current.index(), 0u};
+        }
+      }
+    }
+
     const std::uint32_t count = static_cast<std::uint32_t>(coedges.size());
     std::vector<CoedgeId> ids;
     ids.reserve(count);
@@ -194,16 +223,12 @@ class SolidEditor {
     loop.outer = outer;
     place(staged_.loops_, loop_id, loop);
 
-    // Append the new loop to the face's loop chain. The chain is walked through
-    // Loop::next and always ends on a null next; the editor only ever appends,
-    // so a bounded walk is enough.
-    LoopId* link = &staged_.faces_[static_cast<std::size_t>(face.index())].first_loop;
-    std::size_t steps = 0;
-    while (!link->is_null() && staged_.loop_alive(*link) && steps < staged_.loops_.size()) {
-      link = &staged_.loops_[static_cast<std::size_t>(link->index())].next;
-      ++steps;
+    // The chain was validated above, so appending here cannot fail.
+    if (tail.is_null()) {
+      staged_.faces_[static_cast<std::size_t>(face.index())].first_loop = loop_id;
+    } else {
+      staged_.loops_[static_cast<std::size_t>(tail.index())].next = loop_id;
     }
-    if (link->is_null()) *link = loop_id;
     return loop_id;
   }
 

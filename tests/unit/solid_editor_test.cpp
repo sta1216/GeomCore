@@ -97,11 +97,24 @@ TEST_CASE("rollback restores the construction base") {
   const auto committed = source.editor.commit();
   REQUIRE(committed.has_value());
   geom::SolidEditor ed(committed.value());
+  const std::size_t base_curves = ed.brep().geometry().curves.size();
+  const std::size_t base_surfaces = ed.brep().geometry().surfaces.size();
+  REQUIRE(base_curves == 1u);
+  REQUIRE(base_surfaces == 1u);
   REQUIRE(ed.add_vertex({2, 2, 2}, 0.0).has_value());
+  const std::uint32_t curve = ed.add_curve(geom::LineCurve3{{0, 0, 0}, {0, 1, 0}});
+  const std::uint32_t surface = ed.add_surface(geom::Plane3{{1, 0, 0}, 0.0});
+  CHECK(curve == static_cast<std::uint32_t>(base_curves));
+  CHECK(surface == static_cast<std::uint32_t>(base_surfaces));
   CHECK(ed.brep().vertex_count() == 5);
+  CHECK(ed.brep().geometry().curves.size() == base_curves + 1u);
+  CHECK(ed.brep().geometry().surfaces.size() == base_surfaces + 1u);
   ed.rollback();
   CHECK(ed.brep().vertex_count() == 4);
   CHECK(ed.brep().face_count() == 1);
+  CHECK(ed.brep().geometry().curves.size() == base_curves);
+  CHECK(ed.brep().geometry().surfaces.size() == base_surfaces);
+  CHECK(ed.brep().geometry().pcurves.empty());
 }
 
 TEST_CASE("editor rejects non-finite vertex positions") {
@@ -172,6 +185,63 @@ TEST_CASE("editor rejects a solid with no shells") {
   CHECK_FALSE(r.has_value());
   CHECK(r.error().code == geom::Errc::invalid_topology);
   CHECK(ed.brep().solid_count() == 0);
+}
+
+TEST_CASE("editor accepts a coedge pcurve that exists") {
+  geom::SolidEditor ed;
+  const geom::VertexId v0 = ed.add_vertex({0, 0, 0}, 0.0).value();
+  const geom::VertexId v1 = ed.add_vertex({1, 0, 0}, 0.0).value();
+  const geom::EdgeId edge = ed.add_edge(v0, v1, geom::kNoGeometry, 0.0, 1.0, 0.0).value();
+  const std::uint32_t plane = ed.add_surface(geom::Plane3{{0, 0, 1}, 0.0});
+  const geom::FaceId face = ed.add_face(plane, false, 0.0).value();
+  const std::uint32_t pcurve = ed.add_pcurve(geom::Pcurve2d{{0, 0}, {1, 0}});
+  CHECK(pcurve == 0u);
+  const std::array<geom::CoedgeSpec, 1> specs{geom::CoedgeSpec{edge, false, pcurve, 0.0}};
+  const auto loop = ed.add_loop(face, specs, true);
+  REQUIRE(loop.has_value());
+  const auto committed = ed.commit();
+  REQUIRE(committed.has_value());
+  const geom::Brep& b = committed.value();
+  CHECK(b.geometry().pcurves.size() == 1u);
+  CHECK(b.coedge(b.loop(loop.value()).start).pcurve == pcurve);
+}
+
+TEST_CASE("editor rejects an out-of-range pcurve index") {
+  geom::SolidEditor ed;
+  const geom::VertexId v0 = ed.add_vertex({0, 0, 0}, 0.0).value();
+  const geom::VertexId v1 = ed.add_vertex({1, 0, 0}, 0.0).value();
+  const geom::EdgeId edge = ed.add_edge(v0, v1, geom::kNoGeometry, 0.0, 1.0, 0.0).value();
+  const std::uint32_t plane = ed.add_surface(geom::Plane3{{0, 0, 1}, 0.0});
+  const geom::FaceId face = ed.add_face(plane, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 1> specs{geom::CoedgeSpec{edge, false, 0u, 0.0}};
+  const auto r = ed.add_loop(face, specs, true);
+  CHECK_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::index_out_of_range);
+  CHECK(ed.brep().loop_count() == 0);
+  CHECK(ed.brep().coedge_count() == 0);
+}
+
+TEST_CASE("editor rejects shells and solids with dead members") {
+  geom::SolidEditor ed;
+  const auto shell = ed.add_shell(std::array<geom::FaceId, 1>{geom::FaceId::make(0, 2)}, false);
+  CHECK_FALSE(shell.has_value());
+  CHECK(shell.error().code == geom::Errc::index_out_of_range);
+  CHECK(ed.brep().shell_count() == 0);
+  const auto solid = ed.add_solid(std::array<geom::ShellId, 1>{geom::ShellId::make(0, 2)}, 0.0);
+  CHECK_FALSE(solid.has_value());
+  CHECK(solid.error().code == geom::Errc::index_out_of_range);
+  CHECK(ed.brep().solid_count() == 0);
+}
+
+TEST_CASE("empty editor commits an empty brep") {
+  const geom::SolidEditor ed;
+  const auto r = ed.commit();
+  REQUIRE(r.has_value());
+  CHECK(r.value().vertex_count() == 0u);
+  CHECK(r.value().edge_count() == 0u);
+  CHECK(r.value().loop_count() == 0u);
+  CHECK(r.value().solid_count() == 0u);
+  CHECK(r.value().geometry().curves.empty());
 }
 
 TEST_CASE("commit rejects a face with two outer loops") {
