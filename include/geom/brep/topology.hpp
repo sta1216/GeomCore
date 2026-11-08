@@ -214,7 +214,9 @@ class Brep {
   const std::vector<Shell>& shells() const noexcept { return shells_; }
   const std::vector<SolidEntity>& solids() const noexcept { return solids_; }
 
-  // Live solid ids in handle-index (construction) order. Allocates, so the
+  // Live solid ids in ascending slot order. Released slots are reused, so this
+  // equals construction order only while no solid slot has been released; M2
+  // has no solid-release path, so the two agree today. Allocates, so the
   // noexcept marker terminates on allocation failure rather than throwing
   // across the boundary; callers that cannot tolerate that should not call it
   // under memory pressure.
