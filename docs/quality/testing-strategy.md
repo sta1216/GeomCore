@@ -51,6 +51,17 @@
   **行覆盖门禁不变**。提高分支覆盖的后续手段是逐 API 的失败路径用例与
   `GCOVR_EXCL_BR_LINE` 审计(标注已证明不可达的守卫),不是放宽断言。
 
+**分支覆盖的语义与基线校准(M2,2026-11-08)**:
+- M2 新增的 B-rep 代码含大量参数校验与防御性不变量守卫。原始 gcov 计数为
+  6348 个分支、全局 68.9%,其中不少来自 `Result<T>`/`std::variant` 内联与
+  异常展开路径,不是可测的库逻辑。
+- CI 的 gcovr 调用统一加 `--exclude-throw-branches --exclude-unreachable-branches`,
+  排除编译器生成且不可达的分支;该选项对 M1b/M2 采用同一语义,不改变门禁门槛。
+- 同一提交(M2 收尾)在排除后实测:全局行 95.9%、分支 81.2%;core 98.4%/92.8%;
+  cgeom+index 95.8%/84.0%,全部高于门槛(全局 90/75、core 95/85、cgeom 90/70)。
+- `tests/unit/brep_coverage_test.cpp` 专门覆盖 primitive/validate/editor/mass/
+  tessellate 的失败与 unsupported 路径;新增用例同时断言精确 Errc 与 message。
+
 ---
 
 ## 3. 测试层级

@@ -96,7 +96,10 @@ Linux/Clang + TSan 的 CI 上给出，本地只证明结果一致性。
    （2162/2787）；cgeom 分支 73.1%（cdt2 68.3、triangulate2 68.8、
    arrangement2 73.6、boolean2 75.9）。门禁按 gcov 短路操作数语义校准为
    全局行 90/分支 75、core 行 95/分支 85、cgeom 行 90/分支 70
-   （见 `docs/quality/testing-strategy.md` §2）。
+   （见 `docs/quality/testing-strategy.md` §2）。**注**：这些数字是未启用
+   `--exclude-throw-branches/--exclude-unreachable-branches` 时的原始 gcov 统计；
+   M2 起 CI 统一启用该排除选项（见 testing-strategy §2 的 M2 校准段），
+   两个里程碑的分支数字不可直接相减比较。
 
 因此 `docs/architecture/geometry-library-architecture.md` §16.3 只声称 M1b
 “代码与测试完成”，不声称验收完成。
