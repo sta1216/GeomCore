@@ -230,6 +230,25 @@ class Brep {
     return ids;
   }
 
+  // Live vertex/edge/coedge/loop/face/shell ids in ascending slot order, the
+  // per-type counterparts of solid_ids(). The topology validator must inspect
+  // every live entity, not only the ones reachable from a solid, and the flat
+  // arrays are indexed by slot so they cannot yield the generation that makes a
+  // handle alive; only the allocators can. These allocate, so the noexcept
+  // marker terminates on allocation failure rather than throwing across the
+  // boundary; callers that cannot tolerate that should not call them under
+  // memory pressure.
+  std::vector<VertexId> vertex_ids() const noexcept {
+    return live_ids(vertices_, vertex_alloc_);
+  }
+  std::vector<EdgeId> edge_ids() const noexcept { return live_ids(edges_, edge_alloc_); }
+  std::vector<CoedgeId> coedge_ids() const noexcept {
+    return live_ids(coedges_, coedge_alloc_);
+  }
+  std::vector<LoopId> loop_ids() const noexcept { return live_ids(loops_, loop_alloc_); }
+  std::vector<FaceId> face_ids() const noexcept { return live_ids(faces_, face_alloc_); }
+  std::vector<ShellId> shell_ids() const noexcept { return live_ids(shells_, shell_alloc_); }
+
   const GeometryStore& geometry() const noexcept { return geometry_; }
 
   // Faces of `id`, as recorded in the global shell_faces_ pool. Precondition:
@@ -258,6 +277,20 @@ class Brep {
 
  private:
   friend class SolidEditor;
+
+  // Enumerates the live handles of one flat entity array without exposing the
+  // generation counters. Shared by the *_ids() queries above.
+  template <class Entity>
+  static std::vector<Handle> live_ids(const std::vector<Entity>& slots,
+                                      const HandleAllocator& allocator) noexcept {
+    std::vector<Handle> ids;
+    ids.reserve(allocator.live_count());
+    for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(slots.size()); ++i) {
+      const Handle id = allocator.handle_at(i);
+      if (!id.is_null()) ids.push_back(id);
+    }
+    return ids;
+  }
 
   HandleAllocator vertex_alloc_;
   HandleAllocator edge_alloc_;

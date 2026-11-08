@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <geom/brep/topology.hpp>
+#include <geom/brep/validate.hpp>
 #include <geom/core/error.hpp>
 #include <geom/core/handle.hpp>
 #include <geom/core/result.hpp>
@@ -282,16 +283,41 @@ class SolidEditor {
     return id;
   }
 
-  // Validates the staging copy and returns it as a fresh Brep. The three checks
-  // are: every live entity references only live handles (and existing geometry
-  // store entries); every loop's coedge chain is a closed cycle whose coedges
-  // agree on loop and face; and every face owns at most one outer loop. This is
-  // the M2 subset of the validator that T5/T6 extend.
+  // Releases the edge's handle without repairing references to it. This is the
+  // deliberate low-level corruption path: the staged topology now contains
+  // dangling handles, and commit() rejects it until the affected loops are
+  // rebuilt. A dead or out-of-range id is rejected with index_out_of_range and
+  // leaves the editor unchanged.
+  Result<void> erase_edge(EdgeId id) {
+    if (!staged_.edge_alive(id)) {
+      return Error{Errc::index_out_of_range, "solid_editor: edge is not alive", id.index(), 0u};
+    }
+    staged_.edge_alloc_.release(id);
+    return {};
+  }
+
+  // Counterpart of erase_edge() for vertices; edges that still bound the vertex
+  // are left dangling and commit() reports them. Same id rules.
+  Result<void> erase_vertex(VertexId id) {
+    if (!staged_.vertex_alive(id)) {
+      return Error{Errc::index_out_of_range, "solid_editor: vertex is not alive", id.index(),
+                   0u};
+    }
+    staged_.vertex_alloc_.release(id);
+    return {};
+  }
+
+  // Validates the staging copy and returns it as a fresh Brep. Topology
+  // validation is delegated to validate_topology() so commit() and a direct
+  // validator call cannot disagree; the first issue's code and entity become
+  // the Result error's code and context_a. T6 will extend this with
+  // validate_tolerances().
   Result<Brep> commit() const {
     Brep candidate = staged_;
-    if (!references_alive(candidate) || !loops_are_closed(candidate) ||
-        !faces_have_one_outer_loop(candidate)) {
-      return Error{Errc::invalid_topology, "solid_editor: staged topology is invalid", 0u, 0u};
+    const ValidationReport report = validate_topology(candidate);
+    if (!report.ok()) {
+      const ValidationIssue& issue = report.issues.front();
+      return Error{issue.code, issue.message, issue.entity, 0u};
     }
     return candidate;
   }
@@ -319,113 +345,6 @@ class SolidEditor {
     const std::size_t index = static_cast<std::size_t>(id.index());
     if (index >= slots.size()) slots.resize(index + 1u);
     slots[index] = entity;
-  }
-
-  static bool references_alive(const Brep& b) {
-    for (std::size_t i = 0; i < b.edges_.size(); ++i) {
-      if (b.edge_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
-      const Edge& edge = b.edges_[i];
-      if (!b.vertex_alive(edge.v0) || !b.vertex_alive(edge.v1)) return false;
-      if (edge.curve != kNoGeometry &&
-          static_cast<std::size_t>(edge.curve) >= b.geometry_.curves.size()) {
-        return false;
-      }
-    }
-    for (std::size_t i = 0; i < b.coedges_.size(); ++i) {
-      if (b.coedge_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
-      const Coedge& coedge = b.coedges_[i];
-      if (!b.edge_alive(coedge.edge) || !b.face_alive(coedge.face) ||
-          !b.loop_alive(coedge.loop)) {
-        return false;
-      }
-      if (coedge.pcurve != kNoGeometry &&
-          static_cast<std::size_t>(coedge.pcurve) >= b.geometry_.pcurves.size()) {
-        return false;
-      }
-    }
-    for (std::size_t i = 0; i < b.loops_.size(); ++i) {
-      if (b.loop_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
-      const Loop& loop = b.loops_[i];
-      if (!b.face_alive(loop.face) || !b.coedge_alive(loop.start)) return false;
-    }
-    for (std::size_t i = 0; i < b.faces_.size(); ++i) {
-      if (b.face_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
-      const Face& face = b.faces_[i];
-      if (face.surface != kNoGeometry &&
-          static_cast<std::size_t>(face.surface) >= b.geometry_.surfaces.size()) {
-        return false;
-      }
-      if (!face.first_loop.is_null() && !b.loop_alive(face.first_loop)) return false;
-    }
-    for (std::size_t i = 0; i < b.shells_.size(); ++i) {
-      if (b.shell_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
-      const Shell& shell = b.shells_[i];
-      if (shell.first_face > b.shell_faces_.size() ||
-          shell.face_count > b.shell_faces_.size() - shell.first_face) {
-        return false;
-      }
-      for (std::uint32_t j = 0; j < shell.face_count; ++j) {
-        if (!b.face_alive(b.shell_faces_[shell.first_face + j])) return false;
-      }
-    }
-    for (std::size_t i = 0; i < b.solids_.size(); ++i) {
-      if (b.solid_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
-      const SolidEntity& solid = b.solids_[i];
-      if (solid.first_shell > b.solid_shells_.size() ||
-          solid.shell_count > b.solid_shells_.size() - solid.first_shell) {
-        return false;
-      }
-      for (std::uint32_t j = 0; j < solid.shell_count; ++j) {
-        if (!b.shell_alive(b.solid_shells_[solid.first_shell + j])) return false;
-      }
-    }
-    return true;
-  }
-
-  static bool loops_are_closed(const Brep& b) {
-    const std::size_t limit = b.coedge_alloc_.live_count();
-    for (std::size_t i = 0; i < b.loops_.size(); ++i) {
-      const Handle loop_id = b.loop_alloc_.handle_at(static_cast<std::uint32_t>(i));
-      if (loop_id.is_null()) continue;
-      const Loop& loop = b.loops_[i];
-      CoedgeId current = loop.start;
-      std::size_t steps = 0;
-      for (;;) {
-        if (!b.coedge_alive(current)) return false;
-        const Coedge& coedge = b.coedge(current);
-        if (coedge.loop != loop_id || coedge.face != loop.face) return false;
-        const CoedgeId next = coedge.next;
-        if (!b.coedge_alive(next)) return false;
-        if (b.coedge(next).prev != current) return false;
-        if (!b.coedge_alive(coedge.prev) || b.coedge(coedge.prev).next != current) return false;
-        if (next == loop.start) break;
-        current = next;
-        if (++steps > limit) return false;
-      }
-    }
-    return true;
-  }
-
-  static bool faces_have_one_outer_loop(const Brep& b) {
-    const std::size_t limit = b.loop_alloc_.live_count();
-    for (std::size_t i = 0; i < b.faces_.size(); ++i) {
-      const Handle face_id = b.face_alloc_.handle_at(static_cast<std::uint32_t>(i));
-      if (face_id.is_null()) continue;
-      std::size_t outer_loops = 0;
-      std::size_t steps = 0;
-      LoopId current = b.faces_[i].first_loop;
-      while (!current.is_null()) {
-        if (!b.loop_alive(current)) return false;
-        const Loop& loop = b.loop(current);
-        if (loop.face != face_id) return false;
-        if (loop.outer) {
-          if (++outer_loops > 1) return false;
-        }
-        current = loop.next;
-        if (++steps > limit) return false;
-      }
-    }
-    return true;
   }
 
   // Base state for rollback(), and the mutable staging copy. Keeping the base
