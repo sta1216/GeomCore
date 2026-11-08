@@ -34,7 +34,7 @@
 
 ## Review Focus
 
-1. **面朝向与 coedge 顺序**：外法向 = `reversed` 取反后的 `du × dv`；内腔 shell 必须整体反向。测试须覆盖外壳与内腔两种朝向，而不是只看体积符号。
+1. **面朝向与 coedge 顺序**：外法向 = `reversed` 取反后的 `du × dv`；内腔 shell 必须整体反向。测试须覆盖外壳与内腔两种朝向，而不是只看体积符号。（**M2 延期**：M2 不建模壳朝向且只接受单壳 solid，内腔/多壳定向测试随 M3 一起实现；见偏差 6。）
 2. **容差链单调性**：`edge.tol ≥ max(两端 vertex.tol)`、`face.tol ≥ 相邻 edge.tol`、`coedge.tol ≤ face.tol`、`solid.tol ≥ max(子实体 tol)`；违反时返回 `Errc::tolerance_violation` 而不是静默通过。
 3. **接缝与闭合曲面**：圆柱侧面/圆锥/球/环面的接缝边在同一条 loop 里出现两次（正反各一），coedge 配对校验不能把它当成「边出现两次」而误报。
 4. **退化极点**：球的两极由接缝边端点表示；网格化必须在极点合并为单个顶点且不产生零面积三角形。
