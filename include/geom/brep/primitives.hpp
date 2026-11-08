@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <numbers>
 
 #include <geom/brep/solid_editor.hpp>
 #include <geom/brep/topology.hpp>
@@ -11,6 +12,7 @@
 #include <geom/curves/analytic_curve.hpp>
 #include <geom/primitives/point.hpp>
 #include <geom/primitives/vec.hpp>
+#include <geom/surfaces/analytic.hpp>
 #include <geom/surfaces/plane.hpp>
 
 namespace geom {
@@ -20,6 +22,14 @@ namespace detail {
 
 inline bool primitive_point_finite(Point3d p) noexcept {
   return std::isfinite(p[0]) && std::isfinite(p[1]) && std::isfinite(p[2]);
+}
+
+inline bool primitive_vec_finite(Vec3d v) noexcept {
+  return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
+
+inline bool primitive_point_equal(Point3d a, Point3d b) noexcept {
+  return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
 }
 
 }  // namespace detail
@@ -151,6 +161,143 @@ inline Result<Brep> make_box(Point3d lo, Point3d hi, double tol) {
     if (!loop.has_value()) return loop.error();
   }
 
+  const Result<ShellId> shell = editor.add_shell(faces, true);
+  if (!shell.has_value()) return shell.error();
+  const std::array<ShellId, 1> shells{shell.value()};
+  const Result<SolidId> solid = editor.add_solid(shells, tol);
+  if (!solid.has_value()) return solid.error();
+  return editor.commit();
+}
+
+// Right circular cylinder: the circle of `radius` around `base`, extruded along
+// the unit `axis` by `height`; `tol` is stored on every entity.
+//
+// The lateral surface is cut along u = 0, so the bottom and top circles are
+// each a single closed edge whose only vertex is the seam point, and the seam
+// is a line edge used twice by the lateral loop (up and down). The three faces
+// are the bottom cap (plane normal -axis), the top cap (plane normal +axis) and
+// the lateral face (Cylinder3), and the shell is closed with V = 2, E = 3,
+// F = 3 (chi = 2).
+//
+// Frame: x is the unit perpendicular to axis chosen by the brief's candidate
+// rule, y = cross(axis, x), so (x, y, axis) is right handed.
+//
+// Validation:
+//   - non-finite base, axis, radius or height  -> Errc::non_finite
+//   - non-finite or negative tolerance         -> Errc::tolerance_violation
+//   - axis not unit length, radius <= 0 or
+//     height <= 0                              -> Errc::degenerate
+//   - top/seam points that round to base or to
+//     each other (zero-length seam)             -> Errc::degenerate
+// Any error from a SolidEditor add_* call is propagated unchanged; commit()
+// performs the final validation.
+inline Result<Brep> make_cylinder(Point3d base, Vec3d axis, double radius, double height,
+                                  double tol) {
+  if (!detail::primitive_point_finite(base) || !detail::primitive_vec_finite(axis) ||
+      !std::isfinite(radius) || !std::isfinite(height)) {
+    return Error{Errc::non_finite, "make_cylinder: input is not finite", 0u, 0u};
+  }
+  if (!std::isfinite(tol) || tol < 0.0) {
+    return Error{Errc::tolerance_violation,
+                 "make_cylinder: tolerance must be finite and non-negative", 0u, 0u};
+  }
+  const double axis_length = std::hypot(axis[0], axis[1], axis[2]);
+  if (!(std::fabs(axis_length - 1.0) <= detail::kAnalyticSurfaceUnitTolerance)) {
+    return Error{Errc::degenerate, "make_cylinder: axis must be unit length", 0u, 0u};
+  }
+  if (!(radius > 0.0)) {
+    return Error{Errc::degenerate, "make_cylinder: radius must be positive", 0u, 0u};
+  }
+  if (!(height > 0.0)) {
+    return Error{Errc::degenerate, "make_cylinder: height must be positive", 0u, 0u};
+  }
+
+  // Any candidate works as long as it is not parallel to the axis.
+  const Vec3d candidate =
+      std::fabs(axis[0]) < 0.9 ? Vec3d{1.0, 0.0, 0.0} : Vec3d{0.0, 1.0, 0.0};
+  const Vec3d perpendicular = cross(cross(axis, candidate), axis);
+  const double perpendicular_length =
+      std::hypot(perpendicular[0], perpendicular[1], perpendicular[2]);
+  if (!std::isfinite(perpendicular_length) || !(perpendicular_length > 0.0)) {
+    return Error{Errc::degenerate, "make_cylinder: axis frame is degenerate", 0u, 0u};
+  }
+  const Vec3d x_axis{perpendicular[0] / perpendicular_length,
+                     perpendicular[1] / perpendicular_length,
+                     perpendicular[2] / perpendicular_length};
+  const Vec3d y_axis = cross(axis, x_axis);
+
+  const Point3d top{base[0] + height * axis[0], base[1] + height * axis[1],
+                    base[2] + height * axis[2]};
+  if (!detail::primitive_point_finite(top)) {
+    return Error{Errc::degenerate, "make_cylinder: top center is not representable", 0u, 0u};
+  }
+  if (detail::primitive_point_equal(top, base)) {
+    return Error{Errc::degenerate, "make_cylinder: seam has zero length", 0u, 0u};
+  }
+  const Point3d p0{base[0] + radius * x_axis[0], base[1] + radius * x_axis[1],
+                   base[2] + radius * x_axis[2]};
+  const Point3d p1{top[0] + radius * x_axis[0], top[1] + radius * x_axis[1],
+                   top[2] + radius * x_axis[2]};
+  if (!detail::primitive_point_finite(p0) || !detail::primitive_point_finite(p1)) {
+    return Error{Errc::degenerate, "make_cylinder: seam point is not representable", 0u, 0u};
+  }
+  if (detail::primitive_point_equal(p0, p1)) {
+    return Error{Errc::degenerate, "make_cylinder: seam has zero length", 0u, 0u};
+  }
+
+  constexpr double kTwoPi = 2.0 * std::numbers::pi_v<double>;
+
+  SolidEditor editor;
+  const Result<VertexId> bottom_vertex = editor.add_vertex(p0, tol);
+  if (!bottom_vertex.has_value()) return bottom_vertex.error();
+  const Result<VertexId> top_vertex = editor.add_vertex(p1, tol);
+  if (!top_vertex.has_value()) return top_vertex.error();
+
+  const std::uint32_t bottom_circle =
+      editor.add_curve(CircleCurve3{base, x_axis, y_axis, radius});
+  const Result<EdgeId> bottom_edge = editor.add_edge(
+      bottom_vertex.value(), bottom_vertex.value(), bottom_circle, 0.0, kTwoPi, tol);
+  if (!bottom_edge.has_value()) return bottom_edge.error();
+
+  const std::uint32_t top_circle = editor.add_curve(CircleCurve3{top, x_axis, y_axis, radius});
+  const Result<EdgeId> top_edge = editor.add_edge(
+      top_vertex.value(), top_vertex.value(), top_circle, 0.0, kTwoPi, tol);
+  if (!top_edge.has_value()) return top_edge.error();
+
+  const std::uint32_t seam_curve = editor.add_curve(LineCurve3{p0, axis});
+  const Result<EdgeId> seam_edge = editor.add_edge(bottom_vertex.value(), top_vertex.value(),
+                                                   seam_curve, 0.0, height, tol);
+  if (!seam_edge.has_value()) return seam_edge.error();
+
+  const Vec3d down{-axis[0], -axis[1], -axis[2]};
+  const Vec3d base_vector{base[0], base[1], base[2]};
+  const Vec3d top_vector{top[0], top[1], top[2]};
+  const std::uint32_t bottom_surface = editor.add_surface(Plane3{down, dot(down, base_vector)});
+  const Result<FaceId> bottom_face = editor.add_face(bottom_surface, false, tol);
+  if (!bottom_face.has_value()) return bottom_face.error();
+  const std::array<CoedgeSpec, 1> bottom_loop{CoedgeSpec{bottom_edge.value(), true}};
+  const Result<LoopId> bottom_loop_id = editor.add_loop(bottom_face.value(), bottom_loop, true);
+  if (!bottom_loop_id.has_value()) return bottom_loop_id.error();
+
+  const std::uint32_t top_surface = editor.add_surface(Plane3{axis, dot(axis, top_vector)});
+  const Result<FaceId> top_face = editor.add_face(top_surface, false, tol);
+  if (!top_face.has_value()) return top_face.error();
+  const std::array<CoedgeSpec, 1> top_loop{CoedgeSpec{top_edge.value(), false}};
+  const Result<LoopId> top_loop_id = editor.add_loop(top_face.value(), top_loop, true);
+  if (!top_loop_id.has_value()) return top_loop_id.error();
+
+  const std::uint32_t lateral_surface =
+      editor.add_surface(Cylinder3{base, axis, x_axis, radius});
+  const Result<FaceId> lateral_face = editor.add_face(lateral_surface, false, tol);
+  if (!lateral_face.has_value()) return lateral_face.error();
+  const std::array<CoedgeSpec, 4> lateral_loop{
+      CoedgeSpec{bottom_edge.value(), false}, CoedgeSpec{seam_edge.value(), false},
+      CoedgeSpec{top_edge.value(), true}, CoedgeSpec{seam_edge.value(), true}};
+  const Result<LoopId> lateral_loop_id =
+      editor.add_loop(lateral_face.value(), lateral_loop, true);
+  if (!lateral_loop_id.has_value()) return lateral_loop_id.error();
+
+  const std::array<FaceId, 3> faces{bottom_face.value(), top_face.value(), lateral_face.value()};
   const Result<ShellId> shell = editor.add_shell(faces, true);
   if (!shell.has_value()) return shell.error();
   const std::array<ShellId, 1> shells{shell.value()};

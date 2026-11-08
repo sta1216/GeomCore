@@ -39,6 +39,7 @@ set(GEOM_TEST_SOURCES
   unit/solid_editor_test.cpp
   unit/brep_euler_ops_test.cpp
   unit/brep_box_test.cpp
+  unit/brep_cylinder_test.cpp
   unit/brep_validate_test.cpp
   unit/brep_tolerance_test.cpp
   unit/surfaces_test.cpp
