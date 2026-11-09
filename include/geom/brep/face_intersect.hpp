@@ -67,27 +67,22 @@ inline Segment3 face_intersect_ordered(const Point3d& a, const Point3d& b) noexc
   return Segment3{a, b};
 }
 
-// One parameter interval on the infinite crossing line x = p0 + t * d.
+// One parameter interval on the infinite crossing line x = p0 + t * u, where u
+// is the unit line direction.
 struct FaceIntersectInterval {
   double lo = 0.0;
   double hi = 0.0;
 };
 
 // Builds a Polygon2d from rings that are already projected into one frame.
-// Every ring is normalized to counter-clockwise so the two faces agree even
-// when their outward normals point in opposite directions.
+// Ring orientation is left as stored: boolean2 normalizes outer and hole rings
+// itself, so a pre-pass here would duplicate that rule.
 inline Polygon2d face_intersect_polygon(
     const std::vector<std::vector<Point2d>>& loops) {
   Polygon2d polygon;
   polygon.ring_starts.push_back(0u);
   for (const std::vector<Point2d>& ring : loops) {
-    if (signed_area2(ring) < 0.0) {
-      for (auto it = ring.rbegin(); it != ring.rend(); ++it) {
-        polygon.vertices.push_back(*it);
-      }
-    } else {
-      polygon.vertices.insert(polygon.vertices.end(), ring.begin(), ring.end());
-    }
+    polygon.vertices.insert(polygon.vertices.end(), ring.begin(), ring.end());
     polygon.ring_starts.push_back(static_cast<std::uint32_t>(polygon.vertices.size()));
   }
   return polygon;
@@ -222,10 +217,10 @@ inline Result<FacePairCut> intersect_planar_faces(const Brep& a, FaceId fa,
 
   const Vec3d& normal_a = frame_a.normal;
   const Vec3d& normal_b = frame_b.normal;
-  const Vec3d line_direction = cross(normal_a, normal_b);
+  const Vec3d line_vector = cross(normal_a, normal_b);
 
   FacePairCut cut;
-  if (dot(line_direction, line_direction) <=
+  if (dot(line_vector, line_vector) <=
       detail::kFaceIntersectParallelEpsilon * detail::kFaceIntersectParallelEpsilon) {
     // Parallel planes: coplanar when their distances from the origin agree
     // after orienting B's normal like A's. Antiparallel normals describe the
@@ -254,13 +249,14 @@ inline Result<FacePairCut> intersect_planar_faces(const Brep& a, FaceId fa,
     return cut;
   }
 
-  // The crossing line solves nA . x = bA, nB . x = bB and d . x = 0. Cramer's
-  // rule on the 3x3 matrix whose columns are the normal components and d.
+  // The crossing line solves nA . x = bA, nB . x = bB and d . x = 0, where d is
+  // the cross product of the normals. Cramer's rule on the 3x3 matrix whose
+  // columns are the normal components and d.
   const Plane3 unit_a = plane_frame_plane(frame_a);
   const Plane3 unit_b = plane_frame_plane(frame_b);
-  const Vec3d column0{normal_a[0], normal_b[0], line_direction[0]};
-  const Vec3d column1{normal_a[1], normal_b[1], line_direction[1]};
-  const Vec3d column2{normal_a[2], normal_b[2], line_direction[2]};
+  const Vec3d column0{normal_a[0], normal_b[0], line_vector[0]};
+  const Vec3d column1{normal_a[1], normal_b[1], line_vector[1]};
+  const Vec3d column2{normal_a[2], normal_b[2], line_vector[2]};
   const Vec3d rhs{unit_a.offset, unit_b.offset, 0.0};
   const double det = dot(column0, cross(column1, column2));
   if (!(det != 0.0)) {
@@ -269,6 +265,14 @@ inline Result<FacePairCut> intersect_planar_faces(const Brep& a, FaceId fa,
   const Point3d p0{dot(rhs, cross(column1, column2)) / det,
                   dot(column0, cross(rhs, column2)) / det,
                   dot(column0, cross(column1, rhs)) / det};
+
+  // Clipping parameters and the emitted points both use the unit direction, so
+  // the interval parameter is a distance along the line and cannot be scaled by
+  // the cross product magnitude.
+  const double line_length = std::sqrt(dot(line_vector, line_vector));
+  const Vec3d line_direction{line_vector[0] / line_length,
+                             line_vector[1] / line_length,
+                             line_vector[2] / line_length};
 
   const Result<std::vector<detail::FaceIntersectInterval>> intervals_a =
       detail::face_intersect_clip_line(a, fa, frame_a, p0, line_direction, tol);
