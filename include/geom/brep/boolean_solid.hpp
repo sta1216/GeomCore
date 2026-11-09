@@ -143,8 +143,14 @@ struct solid_boolean_face {
 // other operand imposes on them.
 inline Result<std::vector<solid_boolean_face>> solid_boolean_build_faces(
     const Brep& brep, std::span<const FaceId> face_ids) {
-  std::vector<solid_boolean_face> faces;
-  faces.reserve(face_ids.size());
+  // First pass: prove every face is planar. A curved face may also carry a
+  // non-polygonal ring (a cylinder cap), and the curved diagnosis is the
+  // useful one, so no loop is projected before the whole face set is known to
+  // be planar.
+  std::vector<Plane3> planes;
+  std::vector<PlaneFrame> frames;
+  planes.reserve(face_ids.size());
+  frames.reserve(face_ids.size());
   for (const FaceId id : face_ids) {
     const Result<Plane3> plane = face_plane(brep, id);
     if (!plane) {
@@ -157,13 +163,21 @@ inline Result<std::vector<solid_boolean_face>> solid_boolean_build_faces(
     }
     const Result<PlaneFrame> frame = make_plane_frame(plane.value());
     if (!frame) return frame.error();
+    planes.push_back(plane.value());
+    frames.push_back(frame.value());
+  }
+  // Second pass: project the boundary loops into each face frame.
+  std::vector<solid_boolean_face> faces;
+  faces.reserve(face_ids.size());
+  for (std::size_t index = 0; index < face_ids.size(); ++index) {
+    const FaceId id = face_ids[index];
     const Result<std::vector<std::vector<Point2d>>> loops =
-        face_loops_2d(brep, id, frame.value());
+        face_loops_2d(brep, id, frames[index]);
     if (!loops) return loops.error();
     solid_boolean_face face;
     face.id = id;
-    face.plane = plane.value();
-    face.frame = frame.value();
+    face.plane = planes[index];
+    face.frame = frames[index];
     for (const std::vector<Point2d>& loop : loops.value()) {
       for (const Point2d& point : loop) {
         solid_boolean_extend(face.bounds,
@@ -363,6 +377,15 @@ inline Result<void> solid_boolean_classify_face(
 // planar; curved operands are rejected as unsupported. The result is assembled
 // with `assemble_solid`, so a result that cannot form a closed manifold solid is
 // reported as an error instead of being returned malformed.
+//
+// Coplanar contact: two faces that share a plane contribute the boundary of
+// their overlap patch as cuts to both faces. This is supported while the patch
+// is interior to the host face, as when a smaller face is glued onto the middle
+// of a larger one. When the patch reaches the host face's boundary loop, the
+// shared boundary becomes a T-junction; propagation of coplanar patches is not
+// implemented, so the assembly step diagnoses the result as `Errc::not_closed`
+// ("assemble_solid: edge is used once"). Callers can treat that as a documented
+// limitation rather than corrupt output.
 inline Result<SolidBooleanResult> boolean_solid(
     const Brep& a, const Brep& b, SolidBooleanOp op,
     const SolidBooleanOptions& options = {}) {
@@ -376,13 +399,32 @@ inline Result<SolidBooleanResult> boolean_solid(
                  "boolean_solid: tolerance must be positive and finite"};
   }
 
+  // Operand-shape checks run before validate_topology so a multi-shell solid
+  // reports the dedicated M3c diagnosis instead of the validator's generic
+  // deferral message. An operand with no solid at all is structurally invalid,
+  // not merely unsupported, so it is left for validate_topology to reject.
+  const std::vector<SolidId> solids_a = a.solid_ids();
+  const std::vector<SolidId> solids_b = b.solid_ids();
+  if (solids_a.size() > 1u || solids_b.size() > 1u) {
+    return Error{Errc::unsupported,
+                 "boolean_solid: expected exactly one solid per operand"};
+  }
+  if (solids_a.size() == 1u &&
+      a.solid_shells(solids_a.front()).size() > 1u) {
+    return Error{Errc::unsupported,
+                 "boolean_solid: multi-shell operands are deferred to M3c"};
+  }
+  if (solids_b.size() == 1u &&
+      b.solid_shells(solids_b.front()).size() > 1u) {
+    return Error{Errc::unsupported,
+                 "boolean_solid: multi-shell operands are deferred to M3c"};
+  }
+
   const Result<void> check_a = detail::solid_boolean_check_operand(a);
   if (!check_a) return check_a.error();
   const Result<void> check_b = detail::solid_boolean_check_operand(b);
   if (!check_b) return check_b.error();
 
-  const std::vector<SolidId> solids_a = a.solid_ids();
-  const std::vector<SolidId> solids_b = b.solid_ids();
   if (solids_a.size() != 1u || solids_b.size() != 1u) {
     return Error{Errc::unsupported,
                  "boolean_solid: expected exactly one solid per operand"};

@@ -105,6 +105,37 @@ void check_symdiff_diagnosed(const Brep& a, const Brep& b) {
   CHECK(result.error().code == Errc::invalid_topology);
 }
 
+// Counts faces whose outward normal is `normal` and whose plane offset is
+// `offset`. assemble_solid stores the outward normal either directly or through
+// the face's reversed flag, so the flag has to be folded back in before the
+// orientation is compared.
+std::size_t count_oriented_faces(const Brep& brep, const Vec3d& normal,
+                                 double offset) {
+  std::size_t count = 0;
+  for (const FaceId id : brep.face_ids()) {
+    const Plane3 plane = take(face_plane(brep, id));
+    const PlaneFrame frame = take(make_plane_frame(plane));
+    const Vec3d outward =
+        brep.face(id).reversed
+            ? Vec3d{-frame.normal[0], -frame.normal[1], -frame.normal[2]}
+            : frame.normal;
+    bool matches = true;
+    for (int axis = 0; axis < 3; ++axis) {
+      if (std::fabs(outward[axis] - normal[axis]) > 1e-9) matches = false;
+    }
+    if (!matches) continue;
+    const auto loops = face_loops_2d(brep, id, frame);
+    REQUIRE(loops.has_value());
+    const Point3d point =
+        plane_frame_to_3d(frame, loops.value().front().front());
+    const double plane_offset = outward[0] * point[0] +
+                                outward[1] * point[1] +
+                                outward[2] * point[2];
+    if (std::fabs(plane_offset - offset) <= 1e-9) ++count;
+  }
+  return count;
+}
+
 }  // namespace
 
 TEST_CASE("boolean_solid: overlapping boxes, four operations") {
@@ -222,6 +253,51 @@ TEST_CASE("boolean_solid: side-by-side boxes share only a face") {
   }
 }
 
+// A coplanar patch glued to the middle of a host face is supported: the patch
+// boundary is cut into both faces, so the union keeps one holed +x face and the
+// difference keeps the patch as a separate +x fragment. Skipping the coplanar
+// cuts would leave dangling edges and both cases would fail instead.
+TEST_CASE("boolean_solid: coplanar patch interior to the host face") {
+  const Brep host = box({0, 0, 0}, {2, 2, 2});
+  const Brep patch = box({2, 0.5, 0.5}, {3, 1.5, 1.5});
+  {
+    const auto result = boolean_solid(host, patch, SolidBooleanOp::union_);
+    REQUIRE(result.has_value());
+    const Brep& joined = result.value().brep;
+    check_valid(joined);
+    CHECK(joined.solid_count() == 1);
+    CHECK(volume_of(joined) == doctest::Approx(9.0).epsilon(1e-9));
+    CHECK(joined.face_count() == 11);
+    CHECK(count_oriented_faces(joined, Vec3d{1, 0, 0}, 2.0) == 1);
+  }
+  {
+    const auto result = boolean_solid(host, patch, SolidBooleanOp::difference);
+    REQUIRE(result.has_value());
+    const Brep& cut = result.value().brep;
+    check_valid(cut);
+    CHECK(cut.solid_count() == 1);
+    CHECK(volume_of(cut) == doctest::Approx(8.0).epsilon(1e-9));
+    CHECK(cut.face_count() == 7);
+    CHECK(count_oriented_faces(cut, Vec3d{1, 0, 0}, 2.0) == 2);
+  }
+}
+
+// A coplanar patch that reaches the host face's boundary loop is a T-junction.
+// Propagation of coplanar patches is deferred, so the contract is a diagnosed
+// not_closed instead of a malformed Brep.
+TEST_CASE("boolean_solid: coplanar contact at a host boundary is diagnosed") {
+  const Brep host = box({0, 0, 0}, {2, 2, 2});
+  const Brep glued = box({2, 0, 0}, {3, 1, 1});
+  for (const SolidBooleanOp op :
+       {SolidBooleanOp::union_, SolidBooleanOp::difference}) {
+    const auto result = boolean_solid(host, glued, op);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == Errc::not_closed);
+    CHECK(std::string_view(result.error().message) ==
+          "assemble_solid: edge is used once");
+  }
+}
+
 TEST_CASE("boolean_solid: report counters describe the work") {
   const Brep a = box({0, 0, 0}, {2, 2, 2});
   const Brep b = box({1, 1, 1}, {3, 3, 3});
@@ -262,6 +338,8 @@ TEST_CASE("boolean_solid errors: curved operands are unsupported") {
   const auto result = boolean_solid(box_brep, cylinder, SolidBooleanOp::union_);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "boolean_solid: curved faces are deferred to M3b");
 }
 
 TEST_CASE("boolean_solid errors: multi-shell operands are unsupported") {
@@ -272,6 +350,8 @@ TEST_CASE("boolean_solid errors: multi-shell operands are unsupported") {
   const auto result = boolean_solid(split, operand, SolidBooleanOp::union_);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "boolean_solid: multi-shell operands are deferred to M3c");
 }
 
 TEST_CASE("boolean_solid errors: tolerances must be positive and finite") {
