@@ -1,9 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <utility>
 #include <vector>
@@ -172,6 +174,64 @@ inline Result<bool> validate_walk_touches(const Brep& brep, ShellId shell,
   }
   return false;
 }
+
+// Axis-aligned bounds of the distinct vertices of one shell walk. `ok` is false
+// when the walk failed or a coordinate is not finite.
+struct validate_shell_bounds {
+  bool ok = false;
+  Point3d lo{};
+  Point3d hi{};
+};
+
+inline validate_shell_bounds validate_walk_bounds(const validate_shell_walk& walk) {
+  validate_shell_bounds bounds;
+  if (!walk.ok || walk.vertices.empty()) return bounds;
+  bounds.lo = walk.vertices.front();
+  bounds.hi = walk.vertices.front();
+  for (const Point3d& point : walk.vertices) {
+    for (int axis = 0; axis < 3; ++axis) {
+      if (!std::isfinite(point[axis])) return bounds;
+      bounds.lo[axis] = std::min(bounds.lo[axis], point[axis]);
+      bounds.hi[axis] = std::max(bounds.hi[axis], point[axis]);
+    }
+  }
+  bounds.ok = true;
+  return bounds;
+}
+
+// Conservative disjointness test: two shells whose bounds overlap with positive
+// extent on every axis might intersect. It can reject disjoint L-shaped shells,
+// but it catches crossings that dodge every probe point, so it is used as a
+// cheap pre-check in addition to the probe test.
+inline bool validate_bounds_overlap(const validate_shell_bounds& first,
+                                    const validate_shell_bounds& second, double tol) {
+  if (!first.ok || !second.ok) return false;
+  for (int axis = 0; axis < 3; ++axis) {
+    if (!(first.lo[axis] < second.hi[axis] - tol &&
+          second.lo[axis] < first.hi[axis] - tol)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Largest absolute coordinate over the vertices of both walks; used to scale the
+// floating-point slack of point probes.
+inline double validate_max_abs_coordinate(const validate_shell_walk& first,
+                                          const validate_shell_walk& second) {
+  double result = 0.0;
+  for (const Point3d& point : first.vertices) {
+    for (int axis = 0; axis < 3; ++axis) {
+      result = std::max(result, std::fabs(point[axis]));
+    }
+  }
+  for (const Point3d& point : second.vertices) {
+    for (int axis = 0; axis < 3; ++axis) {
+      result = std::max(result, std::fabs(point[axis]));
+    }
+  }
+  return result;
+}
 }  // namespace detail
 
 // A positive parent tolerance more than this factor above a positive child
@@ -196,12 +256,22 @@ inline constexpr double kToleranceGrowthFactor = 10.0;
 //  6. every solid has at least one shell. A solid with several shells is a
 //     solid with cavities: all shells must be closed, exactly one must wind
 //     outward (a positive signed volume), and every other shell must wind
-//     inward (a negative signed volume). Each cavity must lie strictly inside
-//     the outer shell and outside the other cavities. A single-shell solid
-//     keeps the M2 behavior: open sheets and curved shells are accepted without
-//     an orientation test. Shell orientation is recovered from the loop
-//     winding, so a multi-shell solid whose faces are curved cannot be
-//     classified and is reported as Errc::unsupported.
+//     inward (a negative signed volume). A shell whose signed volume is exactly
+//     zero is neither, and is rejected before the outer-shell count. Each
+//     cavity must lie strictly inside the outer shell and outside the other
+//     cavities. A single-shell solid keeps the M2 behavior: open sheets and
+//     curved shells are accepted without an orientation test. Shell orientation
+//     is recovered from the loop winding, so a multi-shell solid whose faces are
+//     curved cannot be classified and is reported as Errc::unsupported.
+//
+//     Cavity containment and disjointness are probe-based: the sample point and
+//     the vertices of one shell must be strictly inside the other. A cavity
+//     that leaves the solid through a concave channel without any probe point
+//     landing in the void can therefore pass. Disjointness also rejects
+//     cavities whose axis-aligned bounds overlap with positive extent on all
+//     three axes, which catches crossings that dodge every probe point but can
+//     reject disjoint L-shaped cavities. Exact shell/shell intersection is
+//     future work.
 //
 // A null Loop::next is the legitimate end of a face's loop chain, and a null
 // Face::first_loop denotes a face with no loops, so neither is a dangling
@@ -498,7 +568,8 @@ inline ValidationReport validate_topology(const Brep& brep) {
   // 6. A multi-shell solid is a solid with cavities: exactly one shell winds
   // outward and every other shell is a cavity strictly inside it. A single-shell
   // solid keeps the M2 behavior, so open sheets and curved shells are accepted
-  // without an orientation test.
+  // without an orientation test. See the header comment for the probe-based
+  // limits of containment and disjointness.
   for (const SolidId id : brep.solid_ids()) {
     const SolidEntity& solid = brep.solid(id);
     const auto shells = brep.solid_shells(id);
@@ -533,6 +604,18 @@ inline ValidationReport validate_topology(const Brep& brep) {
       continue;
     }
 
+    // A shell with exactly zero signed volume is neither an outer boundary nor
+    // a cavity; it cannot subtract anything and would be misread as a cavity.
+    bool zero_volume = false;
+    for (const detail::validate_shell_volume& volume : volumes) {
+      if (volume.volume == 0.0) {
+        fail(Errc::invalid_topology, id.index(), "shell has zero volume");
+        zero_volume = true;
+        break;
+      }
+    }
+    if (zero_volume) continue;
+
     std::size_t outer_count = 0;
     std::size_t outer = 0;
     for (std::size_t i = 0; i < volumes.size(); ++i) {
@@ -552,8 +635,21 @@ inline ValidationReport validate_topology(const Brep& brep) {
 
     double tol = solid.tol;
     if (!std::isfinite(tol) || tol < 0.0) tol = 0.0;
+    // The point queries reject a ray hit by exact plane membership, so at
+    // tol == 0 a probe that is strictly interior in exact arithmetic can still
+    // be reported as ambiguous. Scale a floating-point-only slack by the
+    // coordinate magnitude; the slack stabilizes the probe and never changes
+    // shell geometry, so it is not a modeling tolerance.
+    const double epsilon = std::numeric_limits<double>::epsilon();
+    detail::validate_shell_walk outer_walk =
+        detail::validate_walk_shell(brep, brep.shell_faces(shells[outer]));
+    if (!outer_walk.ok) {
+      fail(Errc::invalid_topology, id.index(), "outer shell cannot be walked");
+      continue;
+    }
     std::vector<ShellId> cavity_shells;
     std::vector<detail::validate_shell_walk> cavity_walks;
+    std::vector<detail::validate_shell_bounds> cavity_bounds;
     bool valid = true;
     for (std::size_t i = 0; i < shells.size() && valid; ++i) {
       if (i == outer) continue;
@@ -564,8 +660,11 @@ inline ValidationReport validate_topology(const Brep& brep) {
         valid = false;
         break;
       }
+      const double scale =
+          std::max(1.0, detail::validate_max_abs_coordinate(outer_walk, walk));
+      const double probe_tol = std::max(tol, 64.0 * epsilon * scale);
       const Result<bool> inside =
-          detail::validate_walk_inside(brep, shells[outer], walk, tol);
+          detail::validate_walk_inside(brep, shells[outer], walk, probe_tol);
       if (!inside) {
         fail(inside.error().code, id.index(), inside.error().message);
         valid = false;
@@ -578,7 +677,21 @@ inline ValidationReport validate_topology(const Brep& brep) {
         break;
       }
       cavity_shells.push_back(shells[i]);
+      cavity_bounds.push_back(detail::validate_walk_bounds(walk));
       cavity_walks.push_back(std::move(walk));
+    }
+    if (!valid) continue;
+
+    // Crossing cavities can miss every probe point, so reject overlapping
+    // axis-aligned bounds too. This is conservative: disjoint L-shaped cavities
+    // can share bounds.
+    for (std::size_t i = 0; i < cavity_shells.size() && valid; ++i) {
+      for (std::size_t j = i + 1u; j < cavity_shells.size() && valid; ++j) {
+        if (detail::validate_bounds_overlap(cavity_bounds[i], cavity_bounds[j], tol)) {
+          fail(Errc::invalid_topology, id.index(), "cavity shells overlap");
+          valid = false;
+        }
+      }
     }
     if (!valid) continue;
 

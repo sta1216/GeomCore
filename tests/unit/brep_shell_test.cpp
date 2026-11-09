@@ -175,3 +175,51 @@ TEST_CASE("a contained cavity shell is accepted") {
         doctest::Approx(56.0).epsilon(1e-12));
   CHECK(euler_characteristic(brep, brep.solid_ids().front()) == 4);
 }
+
+TEST_CASE("crossing cavity shells are rejected") {
+  // The two cavities intersect, but every sample point and vertex of one lies
+  // outside the other, so only the bounds test catches the crossing.
+  SolidEditor editor;
+  const ShellId outer = add_box_shell(editor, {0, 0, 0}, {100, 100, 100}, false);
+  const ShellId first =
+      add_box_shell(editor, {10, 10, 10}, {20, 11, 11}, true);
+  const ShellId second =
+      add_box_shell(editor, {12, 0.5, 10.2}, {12.5, 30, 10.5}, true);
+  REQUIRE(editor.add_solid(std::array<ShellId, 3>{outer, first, second}, 0.0)
+              .has_value());
+
+  const ValidationReport report = validate_topology(editor.brep());
+  REQUIRE_FALSE(report.ok());
+  CHECK(report.issues.front().code == Errc::invalid_topology);
+  CHECK(std::string_view(report.issues.front().message) ==
+        "cavity shells overlap");
+}
+
+TEST_CASE("a zero-volume cavity shell is rejected") {
+  SolidEditor editor;
+  const ShellId outer = add_box_shell(editor, {0, 0, 0}, {4, 4, 4}, false);
+  const ShellId degenerate = add_box_shell(editor, {2, 2, 2}, {2, 2, 2}, true);
+  REQUIRE(editor.add_solid(std::array<ShellId, 2>{outer, degenerate}, 0.0)
+              .has_value());
+
+  const ValidationReport report = validate_topology(editor.brep());
+  REQUIRE_FALSE(report.ok());
+  CHECK(report.issues.front().code == Errc::invalid_topology);
+  CHECK(std::string_view(report.issues.front().message) ==
+        "shell has zero volume");
+}
+
+TEST_CASE("a contained cavity is accepted at zero tolerance") {
+  // Non-round cavity coordinates and a zero solid tolerance exercise the probe
+  // slack: without it the point queries can report an ambiguous ray hit.
+  SolidEditor editor;
+  const ShellId outer = add_box_shell(editor, {0, 0, 0}, {100, 100, 100}, false);
+  const ShellId cavity =
+      add_box_shell(editor, {10, 10, 10}, {20, 11, 11}, true);
+  REQUIRE(editor.add_solid(std::array<ShellId, 2>{outer, cavity}, 0.0).has_value());
+
+  const ValidationReport report = validate_topology(editor.brep());
+  CHECK(report.ok());
+  CHECK(mass_properties(editor.brep()).value().volume ==
+        doctest::Approx(1000000.0 - 10.0).epsilon(1e-15));
+}
