@@ -254,8 +254,9 @@ Expected RED: `plane_frame_test.cpp(3): error C1083: Cannot open include file:
 - Validate `normal` components with `std::isfinite` (→ `non_finite`) and
   `|normal| > 0` (→ `degenerate`).
 - Unit normal `n = normal / |normal|`. Choose the reference axis with the
-  largest `|n[i]|`; `u = normalize(cross(ref, n))`; `v = cross(n, u)`. Then
-  `u × v = n`.
+  smallest `|n[i]|` (least aligned); `u = normalize(cross(ref, n))`;
+  `v = cross(n, u)`. Then `u × v = n`. Using the largest component instead
+  makes `cross(ref, n)` vanish for axis-aligned normals such as `(0, 1, 0)`.
 - `origin = n * (offset / |normal|)`.
 - `to_2d(p) = {dot(p - origin, u), dot(p - origin, v)}`;
   `to_3d(q) = origin + q[0]*u + q[1]*v`.
@@ -590,8 +591,17 @@ TEST_CASE("planar_cut: crossing cuts make four fragments whose areas sum to four
   (projected and normalised: outer CCW, holes CW); this fast path keeps the
   boolean cheap for untouched faces.
 - Project every loop edge and every cut segment to the frame.
+- Snap cut endpoints to the face boundary before splitting: if an endpoint is
+  within `tol` of a loop vertex, use that vertex; else if it is within `tol` of
+  a loop edge, replace that edge by two edges through the snapped point and use
+  the snapped point as the cut endpoint; weld cut endpoints to each other within
+  `tol`. Without this, a cut that is off the boundary by one ulp leaves a
+  dangling edge and the arrangement does not partition the face.
 - Build `SplitInput`s with `source = 0` for loop edges and `1..n` for cuts;
-  call `detail::split_segments`; build `Arrangement2`.
+  call `detail::split_segments`; if `split.max_residual` is non-finite
+  (`+inf` marks an intersection ratio that cannot be represented), return
+  `numeric_failure` instead of building fragments from unsplit cuts. Build
+  `Arrangement2`.
 - For each bounded arrangement face, collect **every** boundary cycle whose
   half-edges carry that face id (a face may have several cycles: one outer and
   several hole rings; do not start from a single half-edge and assume one
@@ -708,8 +718,9 @@ TEST_CASE("assemble: welding joins independently computed intersection points") 
   assembled normal is already outward.
 - Group faces into connected components through shared edges. Per component,
   sum the oriented signed volume; a positive component is an outer shell, a
-  negative one is a cavity. Assign each cavity to the outer shell containing a
-  sample point of the cavity; if none or more than one contains it → error.
+  negative one is a cavity. Assign each cavity to the outer shell that contains
+  one of the cavity's vertices (`point_in_shell`); if none or more than one
+  contains it → error.
 - Emit one solid per outer shell (`add_solid({outer, cavities...}, tol)`) and
   `commit()`; return its `Result<Brep>`.
 - Pcurve for each coedge: the edge endpoints in that face's `(u, v)` frame,
