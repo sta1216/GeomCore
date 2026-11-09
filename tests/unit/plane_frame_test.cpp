@@ -130,3 +130,41 @@ TEST_CASE("plane_frame: off-plane point projects orthogonally") {
   CHECK(back[1] == doctest::Approx(p[1] - distance * n[1]).epsilon(1e-12));
   CHECK(back[2] == doctest::Approx(p[2] - distance * n[2]).epsilon(1e-12));
 }
+
+TEST_CASE("plane_frame: distance stays finite when offset/m overflows") {
+  const auto frame = make_plane_frame(Plane3{Vec3d{0.5, 0.5, 0.5}, 1e308});
+  REQUIRE(frame.has_value());
+  const PlaneFrame& f = frame.value();
+  for (int i = 0; i < 3; ++i) {
+    CHECK(std::isfinite(f.origin[i]));
+    CHECK(f.origin[i] == doctest::Approx(6.6666666666666667e307).epsilon(1e-14));
+  }
+  CHECK(plane_frame_plane(f).offset == doctest::Approx(1.1547005383792515e308).epsilon(1e-14));
+}
+
+TEST_CASE("plane_frame: two-component normal keeps a finite on-plane origin") {
+  const auto frame = make_plane_frame(Plane3{Vec3d{0.5, 0.5, 0.0}, 1e308});
+  REQUIRE(frame.has_value());
+  const PlaneFrame& f = frame.value();
+  for (int i = 0; i < 3; ++i) {
+    CHECK(std::isfinite(f.origin[i]));
+  }
+  const double on_plane = dot(f.normal, Vec3d{f.origin[0], f.origin[1], f.origin[2]});
+  CHECK(on_plane == doctest::Approx(1.4142135623730951e308).epsilon(1e-14));
+}
+
+TEST_CASE("plane_frame: overflowed derived distance is rejected") {
+  const auto frame = make_plane_frame(Plane3{Vec3d{1e-300, 0.0, 0.0}, 1e200});
+  REQUIRE_FALSE(frame.has_value());
+  CHECK(frame.error().code == Errc::non_finite);
+}
+
+TEST_CASE("plane_frame: huge normal and huge offset keep a finite origin") {
+  const auto frame = make_plane_frame(Plane3{Vec3d{1e308, 1e308, 1e308}, 1e308});
+  REQUIRE(frame.has_value());
+  const PlaneFrame& f = frame.value();
+  for (int i = 0; i < 3; ++i) {
+    CHECK(std::isfinite(f.origin[i]));
+    CHECK(f.origin[i] == doctest::Approx(1.0 / 3.0).epsilon(1e-14));
+  }
+}

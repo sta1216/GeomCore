@@ -9,11 +9,11 @@
 namespace geom {
 inline namespace v1 {
 
-// Orthonormal right-handed frame anchored on a plane: u x v = normal.
+// Orthonormal right-handed frame anchored on an oriented plane: u x v = normal.
 // The basis depends only on the normal direction, so positively scaling a
 // plane's normal and offset together leaves the frame unchanged; a negative
-// scale flips both normal and u. Every query against the same geometric plane
-// shares one frame.
+// scale flips both normal and u while the origin stays put. Every query against
+// the same oriented plane shares one frame.
 struct PlaneFrame {
   Point3d origin;
   Vec3d u;
@@ -63,9 +63,10 @@ inline void plane_frame_basis(const Vec3d& normal, Vec3d& u, Vec3d& v) {
 
 // Validates the plane and builds its frame. A non-finite normal component or
 // a non-finite offset is rejected as non_finite; a zero normal as degenerate.
-// The offset must also produce a finite distance offset / |normal|, otherwise
-// the plane is rejected as non_finite. Both offset and distance are required
-// to be finite.
+// The distance offset / |normal| is computed scale-safely and must be finite,
+// otherwise the plane is rejected as non_finite. If that distance rounds to
+// zero because it lies below the smallest subnormal, the frame is accepted and
+// origin is the nearest representable point (the world origin).
 inline Result<PlaneFrame> make_plane_frame(const Plane3& plane) {
   const Vec3d& raw = plane.normal;
   if (!std::isfinite(raw[0]) || !std::isfinite(raw[1]) || !std::isfinite(raw[2])) {
@@ -86,7 +87,9 @@ inline Result<PlaneFrame> make_plane_frame(const Plane3& plane) {
   const double z = raw[2] / m;
   const double h = std::sqrt(x * x + y * y + z * z);
   const Vec3d normal{x / h, y / h, z / h};
-  const double distance = (plane.offset / m) / h;
+  // Divide by h in [1, sqrt(3)] first: offset / m can overflow even when the
+  // true distance offset / (m * h) is finite.
+  const double distance = (plane.offset / h) / m;
   if (!std::isfinite(distance)) {
     return Error{Errc::non_finite, "plane offset is too large for a finite frame"};
   }
@@ -107,9 +110,9 @@ inline Point3d plane_frame_to_3d(const PlaneFrame& frame, const Point2d& q) noex
   return frame.origin + frame.u * q[0] + frame.v * q[1];
 }
 
-// {unit normal, offset / |normal|}, i.e. the same geometric plane rescaled to
-// unit normal. dot(normal, origin) equals offset / |normal| because origin is
-// the normal-foot point nearest the world origin.
+// {unit normal, frame distance}, i.e. the same oriented plane rescaled to unit
+// normal. dot(normal, origin) equals offset / |normal| rounded to the nearest
+// representable double (it may be zero when that distance underflows).
 inline Plane3 plane_frame_plane(const PlaneFrame& frame) noexcept {
   const Vec3d& n = frame.normal;
   const Point3d& o = frame.origin;
