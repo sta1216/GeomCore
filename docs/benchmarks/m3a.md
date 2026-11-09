@@ -86,6 +86,31 @@ QA8 op=difference faces_a=5002 faces_b=5002 ms=559296.597 volume_rel_err=5.880e-
 4. 本次只新增基准程序，未改动库与测试；Debug 构建在本机通过，
    `ctest -C Debug` 1/1 passed，35.96 s。
 
+## 范围与限制
+
+M3a 的布尔只覆盖平面面；以下限制是已记录的契约，不是待修 bug。曲面面布尔、
+SSI 与 QA-9 随 M3b 交付。
+
+- **仅平面面**：任一面的 surface 不是 `Plane3` 时返回 `Errc::unsupported`，
+  消息为 `"boolean_solid: curved faces are deferred to M3b"`；圆柱/圆锥/球/
+  圆环实体的布尔与 QA-9 一并延后。
+- **pcurve 为直线**：M3a 只产生直边，`Pcurve2d` 是精确的 2D 线段；曲面 pcurve
+  随 SSI 一起引入。
+- **共面补丁不得触及宿主面边界**：与宿主面环相接的共面补丁会留下 T 型接点，
+  诊断为 `Errc::not_closed`（`"assemble_solid: edge is used once"`），不做
+  T 型传播或静默缝合。
+- **腔体归属用保守 AABB**：多壳结果（外壳 + 腔体壳）受支持，但腔体与外壳的
+  不相交判定是保守的 AABB 判定，不做精确壳-壳求交。
+- **非流形接触是诊断失败**：边相接触的 L 形对称差诊断为
+  `Errc::invalid_topology`，记录为失败而不是缝合。
+- **只接受单壳操作数**：两个输入都必须是单壳实体；多壳输入返回
+  `Errc::unsupported`，消息为
+  `"boolean_solid: multi-shell operands are deferred to M3c"`。
+- **门禁状态**：QA-8 是 M3a 唯一失败的出口门禁，失败原因仅是性能——并、交、
+  差分别 636,040 ms、550,446 ms、559,297 ms，比 5,000 ms 门禁慢 110–127 倍；
+  体积恒等式 5.93e-14 / 5.93e-14 / 5.88e-14 远优于 1e-9，正确性通过。Debug 与
+  Release 各 516 个用例、455,084 条断言全绿，`/W4 /WX /utf-8` 下零警告。
+
 ## 复现
 
 ```powershell

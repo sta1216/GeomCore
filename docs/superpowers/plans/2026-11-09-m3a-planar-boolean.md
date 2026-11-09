@@ -186,7 +186,7 @@ Bench and docs:
   - `Plane3 plane_frame_plane(const PlaneFrame& frame) noexcept;`
   - `void detail::plane_frame_basis(const Vec3d& normal, Vec3d& u, Vec3d& v);`
 
-**Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```cpp
 #include <doctest/doctest.h>
@@ -244,7 +244,7 @@ TEST_CASE("plane_frame: the basis only depends on the normal direction") {
 }
 ```
 
-**Step 2: Run it**
+- [x] **Step 2: Run it**
 
 ```powershell
 cmake --build build --config Debug --target geom_tests
@@ -254,7 +254,7 @@ build\tests\Debug\geom_tests.exe --test-case="plane_frame*"
 Expected RED: `plane_frame_test.cpp(3): error C1083: Cannot open include file:
 'geom/brep/plane_frame.hpp'`.
 
-**Step 3: Implement**
+- [x] **Step 3: Implement**
 
 - Validate `normal` components with `std::isfinite` (→ `non_finite`) and
   `|normal| > 0` (→ `degenerate`).
@@ -267,12 +267,12 @@ Expected RED: `plane_frame_test.cpp(3): error C1083: Cannot open include file:
   `to_3d(q) = origin + q[0]*u + q[1]*v`.
 - `plane_frame_plane` returns `{normal, dot(normal, origin)}`.
 
-**Step 4: Run**
+- [x] **Step 4: Run**
 
 Debug and Release full suite must pass; standalone-compile the new header with
 `/W4 /WX /utf-8`.
 
-**Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `feat(m3a): add stable plane frames for planar B-rep work`
 
@@ -293,7 +293,7 @@ Debug and Release full suite must pass; standalone-compile the new header with
   - `Result<bool> point_in_shell(const Brep&, ShellId, const Point3d&, double tol);`
   - `Result<Plane3> face_plane(const Brep&, FaceId);`
 
-**Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```cpp
 #include <doctest/doctest.h>
@@ -341,9 +341,9 @@ TEST_CASE("face_query: a shell contains an interior point and not an exterior on
 }
 ```
 
-**Step 2: Run it** — expected RED: missing `face_query.hpp`.
+- [x] **Step 2: Run it** — expected RED: missing `face_query.hpp`.
 
-**Step 3: Implement**
+- [x] **Step 3: Implement**
 
 - `face_plane`: map `face.surface` through `geometry().surfaces`; return
   `unsupported` for a non-`Plane3` variant.
@@ -370,9 +370,9 @@ TEST_CASE("face_query: a shell contains an interior point and not an exterior on
   direction; after the table is exhausted return `numeric_failure`. Odd parity =
   inside.
 
-**Step 4: Run** Debug/Release plus standalone header compile.
+- [x] **Step 4: Run** Debug/Release plus standalone header compile.
 
-**Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `feat(m3a): add exact point-in-face and point-in-shell queries`
 
@@ -390,7 +390,7 @@ TEST_CASE("face_query: a shell contains an interior point and not an exterior on
   - `struct FacePairCut { std::vector<Segment3> segments; bool coplanar = false; };`
   - `Result<FacePairCut> intersect_planar_faces(const Brep& a, FaceId fa, const Brep& b, FaceId fb, double tol);`
 
-**Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```cpp
 #include <doctest/doctest.h>
@@ -439,9 +439,9 @@ TEST_CASE("face_intersect: disjoint faces produce no segments") {
 }
 ```
 
-**Step 2: Run it** — expected RED: missing header.
+- [x] **Step 2: Run it** — expected RED: missing header.
 
-**Step 3: Implement**
+- [x] **Step 3: Implement**
 
 - Get both planes and frames. Compute `d = cross(nA, nB)`; `|d| <= 1e-12`
   means parallel: if the offset difference along a unit normal is ≤ `tol`,
@@ -458,9 +458,9 @@ TEST_CASE("face_intersect: disjoint faces produce no segments") {
   `boolean2({faceA, faceB}, BooleanOp::intersection)`, and emit each result
   ring edge as a 3D segment (`plane_frame_to_3d`). Set `coplanar = true`.
 
-**Step 4: Run** Debug/Release.
+- [x] **Step 4: Run** Debug/Release.
 
-**Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `feat(m3a): intersect planar B-rep faces into cut segments`
 
@@ -476,7 +476,7 @@ TEST_CASE("face_intersect: disjoint faces produce no segments") {
 - Produces:
   - `Result<bool> point_in_solid(const Brep&, SolidId, const Point3d&, double tol);`
 
-**Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```cpp
 TEST_CASE("inside: a box classifies interior and exterior points") {
@@ -492,9 +492,9 @@ TEST_CASE("inside: a box classifies interior and exterior points") {
 Add a translated box (offset 1e4) and a ray that grazes an edge to exercise
 the direction retry.
 
-**Step 2: Run it** — expected RED.
+- [x] **Step 2: Run it** — expected RED.
 
-**Step 3: Implement**
+- [x] **Step 3: Implement**
 
 - For each direction in the retry table, count intersections over every face of
   the solid's shells; parity decides. Use `face_plane` + ray-plane `t`; ignore
@@ -504,9 +504,9 @@ the direction retry.
   `Error{Errc::numeric_failure, "point_in_solid: every probe ray is degenerate", ...}`.
 - An empty solid list or a solid with no shells → `invalid_topology`.
 
-**Step 4: Run** Debug/Release.
+- [x] **Step 4: Run** Debug/Release.
 
-**Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `feat(m3a): classify points against planar solids by ray parity`
 
@@ -524,7 +524,7 @@ the direction retry.
   - `struct FaceFragment2d { std::vector<Point2d> outer; std::vector<std::vector<Point2d>> holes; Point2d sample; };`
   - `Result<std::vector<FaceFragment2d>> cut_face_by_segments(const Brep&, FaceId, std::span<const Segment3>, double tol);`
 
-**Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```cpp
 namespace {
@@ -622,9 +622,9 @@ TEST_CASE("planar_cut: a closed cut loop makes an island and a holed remainder")
 }
 ```
 
-**Step 2: Run it** — expected RED.
+- [x] **Step 2: Run it** — expected RED.
 
-**Step 3: Implement**
+- [x] **Step 3: Implement**
 
 - If `segments` is empty, return one fragment built from the face loops
   (projected and normalised: outer CCW, holes CW); this fast path keeps the
@@ -670,9 +670,9 @@ TEST_CASE("planar_cut: a closed cut loop makes an island and a holed remainder")
 - Return fragments sorted by (area desc, lexicographic first point) for
   determinism.
 
-**Step 4: Run** Debug/Release.
+- [x] **Step 4: Run** Debug/Release.
 
-**Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `feat(m3a): cut planar B-rep faces into fragments`
 
@@ -689,7 +689,7 @@ TEST_CASE("planar_cut: a closed cut loop makes an island and a holed remainder")
   - `struct AssembledFace { std::vector<Point3d> outer; std::vector<std::vector<Point3d>> holes; Vec3d normal; };`
   - `Result<Brep> assemble_solid(std::span<const AssembledFace>, double tol);`
 
-**Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```cpp
 namespace {
@@ -747,9 +747,9 @@ TEST_CASE("assemble: welding joins independently computed intersection points") 
 }
 ```
 
-**Step 2: Run it** — expected RED.
+- [x] **Step 2: Run it** — expected RED.
 
-**Step 3: Implement**
+- [x] **Step 3: Implement**
 
 - `VertexWelder`: snap each coordinate to `llround(x / tol)` and search the 27
   neighbouring cells for an existing vertex within `tol`; insert otherwise.
@@ -774,9 +774,9 @@ TEST_CASE("assemble: welding joins independently computed intersection points") 
 - Pcurve for each coedge: the edge endpoints in that face's `(u, v)` frame,
   ordered along the coedge direction.
 
-**Step 4: Run** Debug/Release.
+- [x] **Step 4: Run** Debug/Release.
 
-**Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `feat(m3a): assemble fragments into a validated Brep solid`
 
@@ -797,7 +797,7 @@ TEST_CASE("assemble: welding joins independently computed intersection points") 
   - `Result<SolidBooleanResult> boolean_solid(const Brep& a, const Brep& b, SolidBooleanOp op, const SolidBooleanOptions& options = {});`
   - `bool detail::solid_boolean_member(bool in_a, bool in_b, SolidBooleanOp op) noexcept;`
 
-**Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```cpp
 TEST_CASE("boolean_solid: overlapping boxes, union/intersection/difference") {
@@ -841,9 +841,9 @@ TEST_CASE("boolean_solid: stacked boxes merge their shared face away") {
 }
 ```
 
-**Step 2: Run it** — expected RED.
+- [x] **Step 2: Run it** — expected RED.
 
-**Step 3: Implement**
+- [x] **Step 3: Implement**
 
 - Validate options (`tol > 0`, finite) and both inputs
   (`validate_topology`, `validate_tolerances`); require exactly one solid and
@@ -868,9 +868,9 @@ TEST_CASE("boolean_solid: stacked boxes merge their shared face away") {
 - Feed the kept `AssembledFace`s to `assemble_solid`; validate; return.
 - Empty kept set → `Error{Errc::degenerate, "boolean_solid: result is empty", ...}`.
 
-**Step 4: Run** Debug/Release.
+- [x] **Step 4: Run** Debug/Release.
 
-**Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `feat(m3a): add planar B-rep boolean for union, intersection and difference`
 
@@ -892,7 +892,7 @@ TEST_CASE("boolean_solid: stacked boxes merge their shared face away") {
   - `euler_characteristic` unchanged in shape; documented as
     `V - E + F - (L - F) = 2(S - H)` with `S` the shell count.
 
-**Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```cpp
 TEST_CASE("boolean_shell: a fully interior difference opens a cavity") {
@@ -921,14 +921,14 @@ TEST_CASE("boolean_shell: a difference that punches a through-hole has genus one
 }
 ```
 
-**Step 2: Run it** — expected RED: `assemble_solid` already detects the cavity
+- [x] **Step 2: Run it** — expected RED: `assemble_solid` already detects the cavity
 component (Task 6) but merges it into the outer component's single shell, so
 `shell_count()` is 1 and the planned second shell is missing; `validate_topology`
 still rejects multi-shell solids. The through-hole case currently passes the
 volume/genus checks with one shell, so its RED comes from the new cavity-shell
 assertions, not from `commit()` returning `unsupported`.
 
-**Step 3: Implement**
+- [x] **Step 3: Implement**
 
 - Remove the `shell_count != 1` rejection. For each solid: exactly one shell
   with positive signed volume (outer), every other shell negative, every cavity
@@ -943,9 +943,9 @@ assertions, not from `commit()` returning `unsupported`.
   `add_solid({outer, cavities...}, tol)` per outer shell. Re-run the Task 6
   cavity test and update it to expect two shells.
 
-**Step 4: Run** Debug/Release.
+- [x] **Step 4: Run** Debug/Release.
 
-**Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `feat(m3a): support solids with cavities and through-holes`
 
@@ -965,7 +965,7 @@ assertions, not from `commit()` returning `unsupported`.
   - open/non-manifold assembly → `not_closed` or `invalid_topology`
   - invalid tolerance → `tolerance_violation` / `"boolean_solid: tolerance must be positive and finite"`
 
-**Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```cpp
 TEST_CASE("boolean_solid errors: curved operands are unsupported") {
@@ -995,18 +995,18 @@ TEST_CASE("boolean_solid errors: boxes that meet only at an edge are not silent"
 }
 ```
 
-**Step 2: Run it** — some cases will fail with a wrong code or a crash.
+- [x] **Step 2: Run it** — some cases will fail with a wrong code or a crash.
 
-**Step 3: Implement** the guards in the listed order (options → operands →
+- [x] **Step 3: Implement** the guards in the listed order (options → operands →
 faces → empty → assembly). Never let an `ASSERT`/`std::terminate` path be the
 diagnosis. Unify the option check on `Errc::tolerance_violation` with the
 existing message `"boolean_solid: tolerance must be positive and finite"` (Task
 7 currently returns `degenerate` for ≤0 and `non_finite` for NaN/inf); update
 the Task 7 tests that pin those two codes.
 
-**Step 4: Run** Debug/Release.
+- [x] **Step 4: Run** Debug/Release.
 
-**Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `feat(m3a): diagnose unsupported and degenerate boolean inputs`
 
@@ -1022,7 +1022,7 @@ the Task 7 tests that pin those two codes.
 - Produces: a program printing
   `QA8 faces_a=<n> faces_b=<n> ms=<t> volume_rel_err=<e> target=5000ms/1e-9 PASS|FAIL`.
 
-**Step 1: Write the benchmark**
+- [x] **Step 1: Write the benchmark**
 
 - Build a `prism(center, radius, height, sides, tol)` solid with
   `sides = 5000`: two cap faces with `sides` coedges each and `sides` side
@@ -1034,7 +1034,7 @@ the Task 7 tests that pin those two codes.
 - Time only the boolean calls; print the numbers; exit 1 on FAIL, but do not
   throw.
 
-**Step 2: Run it**
+- [x] **Step 2: Run it**
 
 ```powershell
 cmake --build build-rel --config Release --target geom_bench_m3
@@ -1044,13 +1044,13 @@ build-rel\bench\Release\geom_bench_m3.exe
 Record the output in `docs/benchmarks/m3a.md`, including the machine and the
 fact that FAIL is FAIL.
 
-**Step 3: Record** — nothing to implement beyond the bench; if the time is over
+- [x] **Step 3: Record** — nothing to implement beyond the bench; if the time is over
 5 s or the error over 1e-9, state it explicitly.
 
-**Step 4: Run** Debug build of the library must stay green; the bench is
+- [x] **Step 4: Run** Debug build of the library must stay green; the bench is
 Release-only.
 
-**Step 5: Commit**
+- [x] **Step 5: Commit**
 
 `feat(m3a): add QA-8 boolean benchmark and record measurements`
 
@@ -1077,17 +1077,20 @@ numbers, then commit:
 
 ## M3a Exit Acceptance
 
-- Debug and Release full suite green, zero C++ warnings, `/W4 /WX /utf-8`.
-- All new headers compile standalone.
-- `validate_topology` and `validate_tolerances` pass on every boolean result
-  the tests expect to succeed.
-- Volume identity holds within 1e-9 for the test corpus (transversal, stacked,
-  cavity, through-hole, disjoint bodies).
-- Failure cases return the documented `Errc` and message, never a crash and
-  never a silent empty `Brep`.
-- QA-8 measured and recorded; if it FAILs, `docs/benchmarks/m3a.md` and §16.3
-  say FAIL and the gap is listed as follow-up work.
-- `docs/adr/0023-*.md` exists and §16.3 links it.
+- [x] Debug and Release full suite green, zero C++ warnings, `/W4 /WX /utf-8`
+      (516 cases / 455,084 assertions in each configuration).
+- [x] All new headers compile standalone.
+- [x] `validate_topology` and `validate_tolerances` pass on every boolean result
+      the tests expect to succeed.
+- [x] Volume identity holds within 1e-9 for the test corpus (transversal, stacked,
+      cavity, through-hole, disjoint bodies).
+- [x] Failure cases return the documented `Errc` and message, never a crash and
+      never a silent empty `Brep`.
+- [ ] QA-8 performance acceptance: FAIL — union 636,040 ms, intersection
+      550,446 ms, difference 559,297 ms vs 5,000 ms (110–127× over); the volume
+      identity passes at 5.93e-14 / 5.93e-14 / 5.88e-14. The performance gap is
+      follow-up work; see `docs/benchmarks/m3a.md`.
+- [x] `docs/adr/0023-*.md` exists and §16.3 links it.
 
 ## Self-Check
 
