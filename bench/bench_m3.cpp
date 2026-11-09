@@ -2,10 +2,12 @@
 //
 // Builds two prisms with `assemble_solid` (caps plus one quad per side), checks
 // each operand, then times `boolean_solid` for union / intersection / difference
-// and reports the volume identity. A run passes an op only when its wall-clock
-// time is at most 5 s, the result passes `validate_topology`, and the identity
-// holds to 1e-9. Construction and validation are outside the timed region; at
-// the official 5000 sides assembly alone takes about 15 s per operand.
+// and reports the volume identity. A single-op run passes on wall-clock time at
+// most 5 s plus `validate_topology`; its identity is unavailable (`nan`), so
+// 1e-9 is not a single-op gate. In `all` mode each line additionally requires
+// the identity to hold to 1e-9. Construction and validation are outside the
+// timed region; at the official 5000 sides assembly alone takes about 15 s per
+// operand.
 //
 // Exit codes: 0 all executed ops pass, 1 any op fails, 2 setup or Boolean
 // error. Progress goes to stderr so the stdout QA8 lines stay a single

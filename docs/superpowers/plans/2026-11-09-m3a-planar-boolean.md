@@ -58,9 +58,9 @@ only used to produce candidate geometry and sample points.
   §16.2/§16.3 (M3 scope).
 - `docs/quality/testing-strategy.md` (coverage gates, exact/float dual paths,
   negative tests for every `Errc`).
-- QA-8: boolean of two ~10k-face solids, volume relative error ≤ 1e-9,
-  ≤ 5 s single-threaded. This plan measures QA-8 and records PASS/FAIL
-  honestly; it does not weaken the gate.
+- QA-8: boolean of two 5002-face prisms (10,004 faces total), volume
+  relative error ≤ 1e-9, ≤ 5 s single-threaded. This plan measures QA-8 and
+  records PASS/FAIL honestly; it does not weaken the gate.
 
 ## Global Constraints
 

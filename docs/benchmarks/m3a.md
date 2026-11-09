@@ -96,19 +96,24 @@ SSI 与 QA-9 随 M3b 交付。
   圆环实体的布尔与 QA-9 一并延后。
 - **pcurve 为直线**：M3a 只产生直边，`Pcurve2d` 是精确的 2D 线段；曲面 pcurve
   随 SSI 一起引入。
-- **共面补丁不得触及宿主面边界**：与宿主面环相接的共面补丁会留下 T 型接点，
-  诊断为 `Errc::not_closed`（`"assemble_solid: edge is used once"`），不做
-  T 型传播或静默缝合。
-- **腔体归属用 AABB 预检 + 点/接触探测**：多壳结果（外壳 + 腔体壳）受支持，
-  但腔体包含性与不相交判定先用保守的 AABB 预检，再做点/接触探测，不做精确
-  壳-壳求交。
+- **部分共面补丁不得触及宿主面环边**：整面重合接触可以成功；只有触及宿主
+  面环边的部分共面补丁会留下 T 型接点，诊断为 `Errc::not_closed`
+  （`"assemble_solid: edge is used once"`），不做 T 型传播或静默缝合。
+- **腔体归属用实体角 + 校验器探测**：多壳结果（外壳 + 腔体壳）受支持；
+  `assemble_solid` 按实体角判定腔体归属并组装外壳/腔体壳，`validate_topology`
+  （测试会调用，调用方也可用；布尔入口不自校验）另做保守的 AABB 预检加点/接触
+  探测，不做精确壳-壳求交。
 - **非流形接触是诊断失败**：边相接触的 L 形对称差诊断为
   `Errc::invalid_topology`，记录为失败而不是缝合。
 - **只接受单实体、单壳操作数**：每个输入必须恰好一个实体且该实体只有一个壳，
-  结果可为多壳。多实体输入返回 `Errc::unsupported`，消息为
+  结果可为多壳，也可为多实体（不相交并集，体积相加）。多实体输入返回
+  `Errc::unsupported`，消息为
   `"boolean_solid: expected exactly one solid per operand"`；多壳输入返回
   `Errc::unsupported`，消息为
   `"boolean_solid: multi-shell operands are deferred to M3c"`。
+- **采样偏移下限**：分类采样偏移为 max(64·tol, 1e-7·diag)。比该偏移更薄的实体
+  （如 1000×1000×2e-4 的板、tol=1e-9）会显式失败，诊断为
+  `Errc::not_closed`（`"assemble_solid: edge is used once"`），不会静默接受。
 - **门禁状态**：QA-8 是 M3a 唯一失败的出口门禁，失败原因仅是性能——并、交、
   差分别 636,040 ms、550,446 ms、559,297 ms，比 5,000 ms 门禁慢 110–127 倍；
   体积恒等式 5.93e-14 / 5.93e-14 / 5.88e-14 远优于 1e-9，正确性通过。Debug 与
