@@ -346,18 +346,24 @@ TEST_CASE("face_query: a shell contains an interior point and not an exterior on
   `coedge.next` from `loop.start`; append the start vertex of each coedge
   (`edge.v0` or `edge.v1` when `coedge.reversed`), projected with the frame.
   Return the loop with `outer == true` first, then the hole loops in
-  loop-chain order. Drop a repeated closing point.
+  loop-chain order. Drop a repeated closing point. A ring with fewer than three
+  points is not polygonal (a cap bounded by one closed curved edge) and is
+  returned as `unsupported`.
 - `point_in_face`: project `p`; `point_in_face` is true when the point is
-  inside the outer loop and outside every hole. Outer loop = the loop with
-  `outer == true`; use `boolean_point_in_ring` for each ring. Boundary is
-  decided separately by `point_on_face_boundary` (distance to every boundary
-  segment in 2D ≤ `tol`; returns false when the point is not on the plane
-  within `tol`).
-- `point_in_shell`: ray parity over the shell's faces, using a direction chosen
-  from a fixed table `{(0.5773, 0.5774, 0.5775), ...}`; for each face intersect
-  the ray with its plane, reject `t <= tol`, test `point_in_face`. If any hit is
-  within `tol` of a face boundary, retry the next direction; after the table is
-  exhausted return `numeric_failure`. Odd parity = inside.
+  inside the outer loop and outside every hole, and is NOT within `tol` of the
+  boundary. Outer loop = the loop with `outer == true`; use an exact 2D
+  point-in-ring test implemented locally from `sign_orient2d` (do not depend on
+  the private `cgeom` helper). Boundary is decided separately by
+  `point_on_face_boundary` (distance to every boundary segment in 2D ≤ `tol`;
+  returns false when the point is not on the plane within `tol`). A rim point is
+  outside the face: classification samples are always strictly inside.
+- `point_in_shell`: a point on the shell surface (any face interior or rim,
+  within `tol`) is outside. Otherwise ray parity over the shell's faces, using a
+  direction chosen from a fixed table `{(0.5773, 0.5774, 0.5775), ...}`; for
+  each face intersect the ray with its plane, reject `t <= tol`, test
+  `point_in_face`. If any hit is within `tol` of a face boundary, retry the next
+  direction; after the table is exhausted return `numeric_failure`. Odd parity =
+  inside.
 
 **Step 4: Run** Debug/Release plus standalone header compile.
 
