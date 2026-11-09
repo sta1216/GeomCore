@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <utility>
 #include <vector>
@@ -130,16 +131,34 @@ inline Error solid_boolean_second_operand_error(Error error) {
   return error;
 }
 
-// A planar shell with exactly zero signed volume has no interior to classify.
-// Reject it before the coplanar/cut pipeline, which otherwise fails later with
-// a planar_cut producer message. Curved shells are not measurable here
-// (volume.computable is false) and are diagnosed by build_faces instead.
+// A planar shell with no interior to classify is degenerate. Exact zero is not
+// a reliable test: a flat shell rotated off its plane can have a signed volume
+// at round-off scale (for example 1.4e-17 for a rotated unit flat box), which
+// would otherwise leak the later planar_cut producer messages. Reject a volume
+// whose magnitude is at or below the shell's scale-aware slack,
+//   64 * epsilon * diag^3 + tol * diag^2,
+// where diag is the shell AABB diagonal and tol is the validated modeling
+// tolerance. This also rejects a shell thinner than the modeling tolerance.
+// Curved shells are not measurable here (volume.computable is false) and are
+// diagnosed by build_faces instead.
 inline Result<void> solid_boolean_check_zero_volume(
-    const Brep& brep, ShellId shell, std::uint32_t context_a,
+    const Brep& brep, ShellId shell, double tol, std::uint32_t context_a,
     std::uint32_t context_b) {
-  const validate_shell_volume volume =
-      validate_signed_shell_volume(brep, brep.shell_faces(shell));
-  if (volume.computable && volume.volume == 0.0) {
+  const std::span<const FaceId> faces = brep.shell_faces(shell);
+  const validate_shell_volume volume = validate_signed_shell_volume(brep, faces);
+  const validate_shell_walk walk = validate_walk_shell(brep, faces);
+  const validate_shell_bounds bounds = validate_walk_bounds(walk);
+  double diag = 0.0;
+  if (bounds.ok) {
+    const double dx = bounds.hi[0] - bounds.lo[0];
+    const double dy = bounds.hi[1] - bounds.lo[1];
+    const double dz = bounds.hi[2] - bounds.lo[2];
+    diag = std::sqrt(dx * dx + dy * dy + dz * dz);
+  }
+  const double threshold = 64.0 * std::numeric_limits<double>::epsilon() *
+                               diag * diag * diag +
+                           tol * diag * diag;
+  if (volume.computable && std::abs(volume.volume) <= threshold) {
     return Error{Errc::degenerate, "boolean_solid: operand has zero volume",
                  context_a, context_b};
   }
@@ -421,8 +440,8 @@ inline Result<void> solid_boolean_classify_face(
 //                    (checked after validation so a corrupt document reports
 //                    its topology finding instead)
 //   5. closed shell  open operand shell -> Errc::unsupported
-//   6. zero volume   planar shell with exactly zero signed volume ->
-//                    Errc::degenerate
+//   6. zero volume   planar shell with zero volume at round-off or tolerance
+//                    scale -> Errc::degenerate
 //   7. curved faces  non-planar face -> Errc::unsupported (M3b deferral)
 //   8. assembly      pairwise cuts and assemble_solid diagnostics
 //
@@ -497,10 +516,10 @@ inline Result<SolidBooleanResult> boolean_solid(
   }
 
   const Result<void> volume_a = detail::solid_boolean_check_zero_volume(
-      a, shell_a, shell_a.index(), 0u);
+      a, shell_a, tol, shell_a.index(), 0u);
   if (!volume_a) return volume_a.error();
   const Result<void> volume_b = detail::solid_boolean_check_zero_volume(
-      b, shell_b, 0u, shell_b.index());
+      b, shell_b, tol, 0u, shell_b.index());
   if (!volume_b) return volume_b.error();
 
   Result<std::vector<detail::solid_boolean_face>> faces_a =

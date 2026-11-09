@@ -125,17 +125,42 @@ void check_error(const Result<SolidBooleanResult>& result, Errc code,
   CHECK(result.error().context_b == context_b);
 }
 
-Brep make_flat_box(Point3d lo, Point3d hi) {
+Vec3d rotate_x_then_z(Vec3d p, double angle_x, double angle_z) {
+  const double cx = std::cos(angle_x);
+  const double sx = std::sin(angle_x);
+  const double cz = std::cos(angle_z);
+  const double sz = std::sin(angle_z);
+  const double x = p[0];
+  const double y = cx * p[1] - sx * p[2];
+  const double z = sx * p[1] + cx * p[2];
+  return Vec3d{cz * x - sz * y, sz * x + cz * y, z};
+}
+
+// Hand-built closed box shell. A zero-height box (hi[2] == lo[2]) is a valid
+// single-shell solid for validate_topology even though make_box rejects it.
+// Rotating the flat box about x then z makes the exact-zero volume check see a
+// round-off-scale signed volume instead of an exact zero.
+Brep make_flat_box(Point3d lo, Point3d hi, double angle_x = 0.0,
+                   double angle_z = 0.0,
+                   std::array<double, 8> vertex_tols = {},
+                   double solid_tol = 1e-12, bool commit_result = true) {
   SolidEditor editor;
-  const ShellId shell = [&editor, lo, hi]() {
-    const Point3d corners[8] = {
+  const ShellId shell = [&editor, lo, hi, angle_x, angle_z, vertex_tols]() {
+    Point3d corners[8] = {
         {lo[0], lo[1], lo[2]}, {hi[0], lo[1], lo[2]}, {hi[0], hi[1], lo[2]},
         {lo[0], hi[1], lo[2]}, {lo[0], lo[1], hi[2]}, {hi[0], lo[1], hi[2]},
         {hi[0], hi[1], hi[2]}, {lo[0], hi[1], hi[2]},
     };
+    if (angle_x != 0.0 || angle_z != 0.0) {
+      for (Point3d& corner : corners) {
+        const Vec3d rotated = rotate_x_then_z(
+            Vec3d{corner[0], corner[1], corner[2]}, angle_x, angle_z);
+        corner = Point3d{rotated[0], rotated[1], rotated[2]};
+      }
+    }
     std::array<VertexId, 8> vertices{};
     for (int i = 0; i < 8; ++i) {
-      vertices[i] = take(editor.add_vertex(corners[i], 0.0));
+      vertices[i] = take(editor.add_vertex(corners[i], vertex_tols[i]));
     }
     const int edge_specs[12][2] = {{0, 1}, {1, 2},  {2, 3},  {3, 0},
                                    {4, 5}, {5, 6},  {6, 7},  {7, 4},
@@ -160,7 +185,7 @@ Brep make_flat_box(Point3d lo, Point3d hi) {
                                       {false, false, true, true}};
     std::array<FaceId, 6> faces{};
     for (int face = 0; face < 6; ++face) {
-      Vec3d normal = normals[face];
+      Vec3d normal = rotate_x_then_z(normals[face], angle_x, angle_z);
       const Point3d& corner = corners[corner_index[face]];
       const double offset =
           dot(normal, Vec3d{corner[0], corner[1], corner[2]});
@@ -176,7 +201,8 @@ Brep make_flat_box(Point3d lo, Point3d hi) {
     }
     return take(editor.add_shell(faces, true));
   }();
-  take(editor.add_solid(std::array<ShellId, 1>{shell}, 1e-12));
+  take(editor.add_solid(std::array<ShellId, 1>{shell}, solid_tol));
+  if (!commit_result) return editor.brep();
   return take(editor.commit());
 }
 
@@ -242,7 +268,6 @@ TEST_CASE("boolean_solid errors: multi-shell operands are diagnosed on either si
   const std::vector<SolidId> solids = split.solid_ids();
   REQUIRE(solids.size() == 1);
   REQUIRE(split.solid_shells(solids.front()).size() == 2);
-  const std::uint32_t solid = solids.front().index();
   const Brep operand = box({0, 0, 0}, {1, 1, 1});
   for (int side = 0; side < 2; ++side) {
     CAPTURE(side);
@@ -251,8 +276,10 @@ TEST_CASE("boolean_solid errors: multi-shell operands are diagnosed on either si
     const BrepSnapshot before_a = snapshot(a);
     const BrepSnapshot before_b = snapshot(b);
     const auto result = boolean_solid(a, b, SolidBooleanOp::union_);
-    check_error(result, Errc::unsupported, kMultiShellMessage,
-                side == 0 ? solid : 0u, side == 1 ? solid : 0u);
+    // This fixture has exactly one solid, so the owning operand's context is
+    // necessarily index 0. Nonzero operand-local context remapping is pinned by
+    // the operand-B validation cases below.
+    check_error(result, Errc::unsupported, kMultiShellMessage);
     check_unchanged(a, before_a);
     check_unchanged(b, before_b);
   }
@@ -341,7 +368,6 @@ TEST_CASE("boolean_solid errors: zero-height operands are diagnosed") {
   REQUIRE(solids.size() == 1);
   const std::span<const ShellId> shells = flat.solid_shells(solids.front());
   REQUIRE(shells.size() == 1);
-  const std::uint32_t shell = shells.front().index();
   const Brep operand = box({0, 0, 0}, {1, 1, 1});
   for (int side = 0; side < 2; ++side) {
     CAPTURE(side);
@@ -350,10 +376,77 @@ TEST_CASE("boolean_solid errors: zero-height operands are diagnosed") {
     const BrepSnapshot before_a = snapshot(a);
     const BrepSnapshot before_b = snapshot(b);
     const auto result = boolean_solid(a, b, SolidBooleanOp::union_);
-    check_error(result, Errc::degenerate, kZeroVolumeMessage,
-                side == 0 ? shell : 0u, side == 1 ? shell : 0u);
+    // The fixture has one solid and one shell, so its local context is index 0.
+    check_error(result, Errc::degenerate, kZeroVolumeMessage);
     check_unchanged(a, before_a);
     check_unchanged(b, before_b);
+  }
+}
+
+TEST_CASE("boolean_solid errors: operand-B validation contexts are remapped") {
+  const Brep unit = box({0, 0, 0}, {1, 1, 1});
+
+  SUBCASE("a face without loops in operand B") {
+    SolidEditor editor(unit);
+    const FaceId dangling = take(editor.add_face(kNoGeometry, false, 0.0));
+    REQUIRE(dangling.index() == 6u);
+    const Brep corrupt = editor.brep();
+    const BrepSnapshot before_a = snapshot(unit);
+    const BrepSnapshot before_b = snapshot(corrupt);
+    const auto result = boolean_solid(unit, corrupt, SolidBooleanOp::union_);
+    check_error(result, Errc::invalid_topology, "face has no loops", 0u, 6u);
+    check_unchanged(unit, before_a);
+    check_unchanged(corrupt, before_b);
+  }
+
+  SUBCASE("an excessive vertex tolerance in operand B") {
+    std::array<double, 8> vertex_tols{};
+    vertex_tols[3] = 1e-6;
+    const Brep loose =
+        make_flat_box({0, 0, 0}, {1, 1, 1}, 0.0, 0.0, vertex_tols, 1e-12,
+                      false);
+    REQUIRE(validate_topology(loose).ok());
+    REQUIRE_FALSE(validate_tolerances(loose).ok());
+    const BrepSnapshot before_a = snapshot(unit);
+    const BrepSnapshot before_b = snapshot(loose);
+    const auto result = boolean_solid(unit, loose, SolidBooleanOp::union_);
+    check_error(result, Errc::tolerance_violation,
+                "vertex tolerance exceeds the edge tolerance", 0u, 3u);
+    check_unchanged(unit, before_a);
+    check_unchanged(loose, before_b);
+  }
+}
+
+TEST_CASE("boolean_solid errors: tilted flat operands are degenerate") {
+  const Brep flat = make_flat_box({0, 0, 0}, {1, 1, 0}, 0.6, 0.4);
+  REQUIRE(validate_topology(flat).ok());
+  REQUIRE(validate_tolerances(flat).ok());
+  const std::vector<SolidId> solids = flat.solid_ids();
+  REQUIRE(solids.size() == 1);
+  const std::span<const ShellId> shells = flat.solid_shells(solids.front());
+  REQUIRE(shells.size() == 1);
+  const detail::validate_shell_volume volume =
+      detail::validate_signed_shell_volume(flat, flat.shell_faces(shells.front()));
+  REQUIRE(volume.computable);
+  CAPTURE(volume.volume);
+  CHECK(volume.volume != 0.0);
+  CHECK(std::abs(volume.volume) <= 1e-12);
+
+  const Brep operand = box({0, 0, 0}, {1, 1, 1});
+  for (int side = 0; side < 2; ++side) {
+    for (const SolidBooleanOp op :
+         {SolidBooleanOp::union_, SolidBooleanOp::intersection}) {
+      CAPTURE(side);
+      CAPTURE(op_name(op));
+      const Brep& a = side == 0 ? flat : operand;
+      const Brep& b = side == 0 ? operand : flat;
+      const BrepSnapshot before_a = snapshot(a);
+      const BrepSnapshot before_b = snapshot(b);
+      const auto result = boolean_solid(a, b, op);
+      check_error(result, Errc::degenerate, kZeroVolumeMessage);
+      check_unchanged(a, before_a);
+      check_unchanged(b, before_b);
+    }
   }
 }
 
@@ -397,6 +490,28 @@ TEST_CASE("boolean_solid errors: precedence is options, shape, then surfaces") {
     const auto result =
         boolean_solid(multi, unit, SolidBooleanOp::union_, options);
     check_error(result, Errc::tolerance_violation, kToleranceMessage);
+  }
+
+  SUBCASE("an empty document is reported before a curved face") {
+    const Brep empty;
+    for (int side = 0; side < 2; ++side) {
+      CAPTURE(side);
+      const Brep& a = side == 0 ? empty : cylinder;
+      const Brep& b = side == 0 ? cylinder : empty;
+      const auto result = boolean_solid(a, b, SolidBooleanOp::union_);
+      check_error(result, Errc::unsupported, kExactlyOneMessage);
+    }
+  }
+
+  SUBCASE("a zero-volume operand is reported before a curved face") {
+    const Brep tilted = make_flat_box({0, 0, 0}, {1, 1, 0}, 0.6, 0.4);
+    for (int side = 0; side < 2; ++side) {
+      CAPTURE(side);
+      const Brep& a = side == 0 ? tilted : cylinder;
+      const Brep& b = side == 0 ? cylinder : tilted;
+      const auto result = boolean_solid(a, b, SolidBooleanOp::union_);
+      check_error(result, Errc::degenerate, kZeroVolumeMessage);
+    }
   }
 }
 
