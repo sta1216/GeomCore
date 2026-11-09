@@ -345,7 +345,7 @@ TEST_CASE("boolean_solid errors: curved operands are unsupported") {
 TEST_CASE("boolean_solid errors: multi-shell operands are unsupported") {
   const Brep split = make_split_shell_box();
   REQUIRE_FALSE(validate_topology(split).ok());
-  CHECK(validate_topology(split).issues.front().code == Errc::unsupported);
+  CHECK(validate_topology(split).issues.front().code == Errc::not_closed);
   const Brep operand = box({0, 0, 0}, {1, 1, 1});
   const auto result = boolean_solid(split, operand, SolidBooleanOp::union_);
   REQUIRE_FALSE(result.has_value());

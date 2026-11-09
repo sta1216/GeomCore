@@ -4,8 +4,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <utility>
 #include <vector>
 
+#include <geom/brep/face_query.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/core/error.hpp>
 
@@ -31,6 +34,144 @@ namespace detail {
 // broken reference usually cascades into many derived findings, and callers only
 // need the first one (SolidEditor::commit() reports it).
 inline constexpr std::size_t kMaxValidationIssues = 8;
+
+// Signed volume enclosed by one shell, recovered from the direction its face
+// loops run. An outward shell encloses positive volume; a cavity wall's loops
+// run inward and enclose negative volume. `computable` is false when the shell
+// contains curved surface geometry: the planar polygon walk cannot infer the
+// orientation of a curved face.
+struct validate_shell_volume {
+  bool computable = false;
+  double volume = 0.0;
+};
+
+// Point overview of one shell: every loop as a point ring in traversal order,
+// the distinct vertex points, and their average. `ok` is false when a reference
+// is dangling or a loop is not a closed ring, so callers never infer orientation
+// from a partial walk.
+struct validate_shell_walk {
+  bool ok = false;
+  std::vector<std::vector<Point3d>> rings;
+  std::vector<Point3d> vertices;
+  Point3d sample{};
+};
+
+inline bool validate_shell_planar(const Brep& brep, const Face& face) {
+  if (face.surface == kNoGeometry) return true;
+  if (static_cast<std::size_t>(face.surface) >= brep.geometry().surfaces.size()) {
+    return false;
+  }
+  return std::holds_alternative<Plane3>(brep.geometry().surfaces[face.surface]);
+}
+
+inline validate_shell_walk validate_walk_shell(const Brep& brep,
+                                               std::span<const FaceId> shell_faces) {
+  validate_shell_walk walk;
+  const std::size_t coedge_limit = brep.coedge_count();
+  const std::size_t loop_limit = brep.loop_count();
+  std::vector<bool> seen(brep.vertices().size(), false);
+  for (const FaceId face_id : shell_faces) {
+    if (!brep.face_alive(face_id)) return walk;
+    const Face& face = brep.face(face_id);
+    if (!validate_shell_planar(brep, face)) return walk;
+    LoopId loop_id = face.first_loop;
+    std::size_t loop_steps = 0;
+    while (!loop_id.is_null()) {
+      if (!brep.loop_alive(loop_id) || loop_steps++ > loop_limit) return walk;
+      const Loop& loop = brep.loop(loop_id);
+      if (!brep.coedge_alive(loop.start)) return walk;
+      std::vector<Point3d> ring;
+      CoedgeId current = loop.start;
+      std::size_t steps = 0;
+      for (;;) {
+        if (!brep.coedge_alive(current)) return walk;
+        const Coedge& coedge = brep.coedge(current);
+        if (!brep.edge_alive(coedge.edge)) return walk;
+        const Edge& edge = brep.edge(coedge.edge);
+        const VertexId vertex = coedge.reversed ? edge.v1 : edge.v0;
+        if (!brep.vertex_alive(vertex)) return walk;
+        if (vertex.index() >= seen.size()) return walk;
+        ring.push_back(brep.vertex(vertex).point);
+        if (!seen[vertex.index()]) {
+          seen[vertex.index()] = true;
+          walk.vertices.push_back(brep.vertex(vertex).point);
+        }
+        const CoedgeId next = coedge.next;
+        if (!brep.coedge_alive(next)) return walk;
+        if (next == loop.start) break;
+        current = next;
+        if (++steps > coedge_limit) return walk;
+      }
+      if (ring.size() < 3u) return walk;
+      walk.rings.push_back(std::move(ring));
+      loop_id = loop.next;
+    }
+  }
+  if (walk.rings.empty() || walk.vertices.empty()) return walk;
+  for (const Point3d& point : walk.vertices) {
+    walk.sample[0] += point[0];
+    walk.sample[1] += point[1];
+    walk.sample[2] += point[2];
+  }
+  const double count = static_cast<double>(walk.vertices.size());
+  walk.sample[0] /= count;
+  walk.sample[1] /= count;
+  walk.sample[2] /= count;
+  walk.ok = std::isfinite(walk.sample[0]) && std::isfinite(walk.sample[1]) &&
+            std::isfinite(walk.sample[2]);
+  return walk;
+}
+
+inline validate_shell_volume validate_signed_shell_volume(
+    const Brep& brep, std::span<const FaceId> shell_faces) {
+  validate_shell_volume result;
+  const validate_shell_walk walk = validate_walk_shell(brep, shell_faces);
+  if (!walk.ok) return result;
+  const Point3d& reference = walk.rings.front().front();
+  double volume = 0.0;
+  for (const std::vector<Point3d>& ring : walk.rings) {
+    const Vec3d origin = ring.front() - reference;
+    for (std::size_t i = 1; i + 1u < ring.size(); ++i) {
+      const Vec3d first = ring[i] - reference;
+      const Vec3d second = ring[i + 1u] - reference;
+      volume += dot(origin, cross(first, second)) / 6.0;
+    }
+  }
+  if (!std::isfinite(volume)) return result;
+  result.computable = true;
+  result.volume = volume;
+  return result;
+}
+
+// True when every probe point of `walk` (its sample and each vertex) lies
+// strictly inside `shell`; a point on the shell surface counts as outside.
+inline Result<bool> validate_walk_inside(const Brep& brep, ShellId shell,
+                                         const validate_shell_walk& walk, double tol) {
+  const Result<bool> sample = point_in_shell(brep, shell, walk.sample, tol);
+  if (!sample) return sample;
+  if (!sample.value()) return false;
+  for (const Point3d& vertex : walk.vertices) {
+    const Result<bool> inside = point_in_shell(brep, shell, vertex, tol);
+    if (!inside) return inside;
+    if (!inside.value()) return false;
+  }
+  return true;
+}
+
+// True when any probe point of `walk` lies strictly inside `shell`. Two cavities
+// overlap when either one's shell reaches into the other.
+inline Result<bool> validate_walk_touches(const Brep& brep, ShellId shell,
+                                          const validate_shell_walk& walk, double tol) {
+  const Result<bool> sample = point_in_shell(brep, shell, walk.sample, tol);
+  if (!sample) return sample;
+  if (sample.value()) return true;
+  for (const Point3d& vertex : walk.vertices) {
+    const Result<bool> inside = point_in_shell(brep, shell, vertex, tol);
+    if (!inside) return inside;
+    if (inside.value()) return true;
+  }
+  return false;
+}
 }  // namespace detail
 
 // A positive parent tolerance more than this factor above a positive child
@@ -51,10 +192,16 @@ inline constexpr double kToleranceGrowthFactor = 10.0;
 //  5. every closed==true shell has only interior edges: each edge its faces use
 //     is used twice inside that shell; closed==false shells may have boundary
 //     edges (an open sheet). Shell contents are also validated to list no face
-//     twice, and a solid may not list a shell twice. M2 models no shell
-//     orientation, so a solid must reference exactly one shell; multi-shell
-//     solids (cavities, inner shells) are rejected as Errc::unsupported and
-//     deferred to M3.
+//     twice, and a solid may not list a shell twice.
+//  6. every solid has at least one shell. A solid with several shells is a
+//     solid with cavities: all shells must be closed, exactly one must wind
+//     outward (a positive signed volume), and every other shell must wind
+//     inward (a negative signed volume). Each cavity must lie strictly inside
+//     the outer shell and outside the other cavities. A single-shell solid
+//     keeps the M2 behavior: open sheets and curved shells are accepted without
+//     an orientation test. Shell orientation is recovered from the loop
+//     winding, so a multi-shell solid whose faces are curved cannot be
+//     classified and is reported as Errc::unsupported.
 //
 // A null Loop::next is the legitimate end of a face's loop chain, and a null
 // Face::first_loop denotes a face with no loops, so neither is a dangling
@@ -184,11 +331,8 @@ inline ValidationReport validate_topology(const Brep& brep) {
         fail(Errc::invalid_topology, id.index(), "solid shell is not alive");
       }
     }
-    // M2 has no shell orientation, so it cannot tell an outer surface from an
-    // inner cavity wall. Restricting solids to one shell keeps the boundary
-    // unambiguous; multi-shell solids arrive with M3 booleans.
-    if (solid.shell_count != 1u) {
-      fail(Errc::unsupported, id.index(), "multi-shell solids are deferred to M3");
+    if (shells.empty()) {
+      fail(Errc::invalid_topology, id.index(), "solid has no shells");
     }
   }
   if (full()) return report;
@@ -350,6 +494,124 @@ inline ValidationReport validate_topology(const Brep& brep) {
     }
     if (full()) return report;
   }
+
+  // 6. A multi-shell solid is a solid with cavities: exactly one shell winds
+  // outward and every other shell is a cavity strictly inside it. A single-shell
+  // solid keeps the M2 behavior, so open sheets and curved shells are accepted
+  // without an orientation test.
+  for (const SolidId id : brep.solid_ids()) {
+    const SolidEntity& solid = brep.solid(id);
+    const auto shells = brep.solid_shells(id);
+    if (shells.size() != solid.shell_count || shells.size() < 2u) continue;
+
+    bool closed = true;
+    for (const ShellId shell : shells) {
+      if (!brep.shell(shell).closed) {
+        fail(Errc::invalid_topology, id.index(),
+             "solid with multiple shells has an open shell");
+        closed = false;
+        break;
+      }
+    }
+    if (!closed) continue;
+
+    std::vector<detail::validate_shell_volume> volumes;
+    volumes.reserve(shells.size());
+    bool orientation_known = true;
+    for (const ShellId shell : shells) {
+      const detail::validate_shell_volume volume =
+          detail::validate_signed_shell_volume(brep, brep.shell_faces(shell));
+      if (!volume.computable) {
+        orientation_known = false;
+        break;
+      }
+      volumes.push_back(volume);
+    }
+    if (!orientation_known) {
+      fail(Errc::unsupported, id.index(),
+           "multi-shell shell orientation is not computable");
+      continue;
+    }
+
+    std::size_t outer_count = 0;
+    std::size_t outer = 0;
+    for (std::size_t i = 0; i < volumes.size(); ++i) {
+      if (volumes[i].volume > 0.0) {
+        ++outer_count;
+        outer = i;
+      }
+    }
+    if (outer_count == 0u) {
+      fail(Errc::invalid_topology, id.index(), "solid has no outer shell");
+      continue;
+    }
+    if (outer_count > 1u) {
+      fail(Errc::invalid_topology, id.index(), "solid has more than one outer shell");
+      continue;
+    }
+
+    double tol = solid.tol;
+    if (!std::isfinite(tol) || tol < 0.0) tol = 0.0;
+    std::vector<ShellId> cavity_shells;
+    std::vector<detail::validate_shell_walk> cavity_walks;
+    bool valid = true;
+    for (std::size_t i = 0; i < shells.size() && valid; ++i) {
+      if (i == outer) continue;
+      detail::validate_shell_walk walk =
+          detail::validate_walk_shell(brep, brep.shell_faces(shells[i]));
+      if (!walk.ok) {
+        fail(Errc::invalid_topology, id.index(), "cavity shell cannot be walked");
+        valid = false;
+        break;
+      }
+      const Result<bool> inside =
+          detail::validate_walk_inside(brep, shells[outer], walk, tol);
+      if (!inside) {
+        fail(inside.error().code, id.index(), inside.error().message);
+        valid = false;
+        break;
+      }
+      if (!inside.value()) {
+        fail(Errc::invalid_topology, id.index(),
+             "cavity shell is not contained in the outer shell");
+        valid = false;
+        break;
+      }
+      cavity_shells.push_back(shells[i]);
+      cavity_walks.push_back(std::move(walk));
+    }
+    if (!valid) continue;
+
+    for (std::size_t i = 0; i < cavity_shells.size() && valid; ++i) {
+      for (std::size_t j = i + 1u; j < cavity_shells.size() && valid; ++j) {
+        const Result<bool> first =
+            detail::validate_walk_touches(brep, cavity_shells[j], cavity_walks[i], tol);
+        if (!first) {
+          fail(first.error().code, id.index(), first.error().message);
+          valid = false;
+          break;
+        }
+        if (first.value()) {
+          fail(Errc::invalid_topology, id.index(), "cavity shells overlap");
+          valid = false;
+          break;
+        }
+        const Result<bool> second =
+            detail::validate_walk_touches(brep, cavity_shells[i], cavity_walks[j], tol);
+        if (!second) {
+          fail(second.error().code, id.index(), second.error().message);
+          valid = false;
+          break;
+        }
+        if (second.value()) {
+          fail(Errc::invalid_topology, id.index(), "cavity shells overlap");
+          valid = false;
+          break;
+        }
+      }
+    }
+  }
+  if (full()) return report;
 
   return report;
 }
@@ -530,13 +792,11 @@ inline ValidationReport validate_tolerances(const Brep& brep) {
 // Euler characteristic of `solid`: V - E + F - (L - F), where V/E/F are the
 // deduplicated vertices/edges/faces reached through solid -> shell -> face ->
 // loop -> coedge and L is the number of loops that bound those faces (so L - F
-// counts inner boundaries). M2 supports single-shell solids only (see
-// validate_topology), so for a closed shell the value reduces to 2 - 2g: a box
-// is 2 and a torus is 0, while a single open face is 1. Multi-shell solids
-// (cavities, inner shells) and their S/H validation are deferred to M3 together
-// with booleans; validate_topology rejects them with Errc::unsupported and the
-// message "multi-shell solids are deferred to M3". The value is intentionally
-// not asserted here: each primitive's tests assert its own value.
+// counts inner boundaries). For a closed solid the value reduces to
+// 2 * (S - H), where S is the number of shells and H the number of handles: a
+// box is 2, a through-hole or torus is 0, a solid with one fully enclosed cavity
+// has two shells and is 4, and a single open face is 1. The value is
+// intentionally not asserted here: each primitive's tests assert its own value.
 //
 // Precondition: solid_alive(solid). The function allocates its de-duplication
 // flags, so it is not noexcept; a malformed topology yields whatever the walk

@@ -240,7 +240,7 @@ TEST_CASE("assemble: square face with a rectangular hole assembles") {
   CHECK(validate_solid(brep.value()));
 }
 
-TEST_CASE("assemble: an inward cavity is one solid with negative volume") {
+TEST_CASE("assemble: an inward cavity becomes its own shell") {
   auto faces = box_faces({0, 0, 0}, {4, 4, 4});
   auto inner = box_faces({1, 1, 1}, {3, 3, 3});
   for (AssembledFace& face : inner) {
@@ -253,7 +253,8 @@ TEST_CASE("assemble: an inward cavity is one solid with negative volume") {
   CHECK(brep.value().vertex_count() == 16);
   CHECK(brep.value().edge_count() == 24);
   CHECK(brep.value().face_count() == 12);
-  CHECK(brep.value().shell_count() == 1);
+  // The outer boundary and the cavity wall are separate closed shells.
+  CHECK(brep.value().shell_count() == 2);
   CHECK(brep.value().solid_count() == 1);
   CHECK(mass_properties(brep.value()).value().volume ==
         doctest::Approx(56.0).epsilon(1e-12));

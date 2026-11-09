@@ -43,6 +43,7 @@ set(GEOM_TEST_SOURCES
   unit/brep_cone_sphere_test.cpp
   unit/brep_torus_test.cpp
   unit/brep_validate_test.cpp
+  unit/brep_shell_test.cpp
   unit/brep_assemble_test.cpp
   unit/brep_boolean_solid_test.cpp
   unit/brep_tolerance_test.cpp

@@ -1,4 +1,4 @@
-﻿// Negative-path and boundary coverage for the M2 B-rep modules.
+// Negative-path and boundary coverage for the M2 B-rep modules.
 //
 // Every case here drives a public-API guard that the happy-path suites never
 // reach: primitive validation returns, SolidEditor add_*/erase_*/split/join
@@ -965,9 +965,9 @@ TEST_CASE("validate_topology reports shell and solid container violations") {
         square.editor.add_shell(std::array<geom::FaceId, 1>{square.face}, false).value();
     square.editor.add_solid(std::array<geom::ShellId, 2>{first, second}, 0.0).value();
     const geom::ValidationReport report = geom::validate_topology(square.editor.brep());
-    CHECK(first_message(report) == "multi-shell solids are deferred to M3");
-    CHECK(report.issues.front().code == geom::Errc::unsupported);
-    CHECK(square.editor.commit().error().code == geom::Errc::unsupported);
+    CHECK(first_message(report) == "solid with multiple shells has an open shell");
+    CHECK(report.issues.front().code == geom::Errc::invalid_topology);
+    CHECK(square.editor.commit().error().code == geom::Errc::invalid_topology);
   }
 }
 

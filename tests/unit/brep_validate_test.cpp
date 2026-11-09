@@ -280,25 +280,27 @@ TEST_CASE("closed shell does not borrow edge uses from orphan faces") {
   CHECK(r.error().code == geom::Errc::not_closed);
 }
 
-TEST_CASE("box split into two shells is deferred to M3") {
+TEST_CASE("box split into two open shells is rejected") {
   Box box = make_box(true);
   const auto r = box.editor.commit();
   REQUIRE_FALSE(r.has_value());
-  CHECK(r.error().code == geom::Errc::unsupported);
-  CHECK(std::string(r.error().message) == "multi-shell solids are deferred to M3");
+  // Each three-face shell is marked closed but has a boundary, so the closed
+  // shell edge rule fires before the multi-shell rule.
+  CHECK(r.error().code == geom::Errc::not_closed);
+  CHECK(std::string(r.error().message) ==
+        "closed shell has an edge without two coedges");
 }
 
-TEST_CASE("solid with two closed shells is deferred to M3") {
+TEST_CASE("solid without an outward shell is rejected") {
   Box box = make_box();
   const geom::ShellId second = box.editor.add_shell(box.faces, true).value();
   REQUIRE(box.editor.add_solid(std::array<geom::ShellId, 2>{box.shell, second}, 0.0)
               .has_value());
-  // Both shells are individually closed, so only the single-shell policy is
-  // violated. It is reported as unsupported rather than invalid topology.
+  // Both topology-only shells wind inward, so neither is an outer shell.
   const auto r = box.editor.commit();
   REQUIRE_FALSE(r.has_value());
-  CHECK(r.error().code == geom::Errc::unsupported);
-  CHECK(std::string(r.error().message) == "multi-shell solids are deferred to M3");
+  CHECK(r.error().code == geom::Errc::invalid_topology);
+  CHECK(std::string(r.error().message) == "solid has no outer shell");
 }
 
 TEST_CASE("face without an outer loop is rejected") {

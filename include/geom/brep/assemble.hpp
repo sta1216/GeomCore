@@ -37,8 +37,10 @@ inline namespace v1 {
 // exactly twice, once in each direction, encloses a positive signed volume and
 // is an outer shell. A closed component whose normals point inward encloses a
 // negative signed volume and is a cavity; it must be contained by exactly one
-// outer component. The current topology validator defers multi-shell solids,
-// so an outer component and its cavities are placed in one closed shell.
+// outer component. Each component becomes its own closed shell, so a solid is
+// emitted with its outer shell first and one shell per contained cavity after
+// it. validate_topology() recovers the orientation from the loop winding and
+// checks that the cavities are strictly inside the outer shell.
 struct AssembledFace {
   std::vector<Point3d> outer;
   std::vector<std::vector<Point3d>> holes;
@@ -636,9 +638,17 @@ inline Result<Brep> assemble_solid(std::span<const AssembledFace> faces,
                  "assemble_solid: no outward-oriented component"};
   }
 
-  std::vector<std::vector<std::uint32_t>> shell_faces(outer_components.size());
-  for (std::size_t i = 0; i < outer_components.size(); ++i) {
-    shell_faces[i] = closed_components[outer_components[i]].faces;
+  // Each outward component becomes one solid with its outer shell first and one
+  // shell per cavity it contains. Cavities are ordered by their representative
+  // point so the emitted shell order is deterministic.
+  struct shell_group {
+    std::uint32_t outer = 0;
+    std::vector<std::uint32_t> cavities;
+  };
+  std::vector<shell_group> groups;
+  groups.reserve(outer_components.size());
+  for (const std::uint32_t outer : outer_components) {
+    groups.push_back(shell_group{outer, {}});
   }
   for (const std::uint32_t cavity : cavity_components) {
     std::vector<std::size_t> containers;
@@ -659,23 +669,40 @@ inline Result<Brep> assemble_solid(std::span<const AssembledFace> faces,
           Errc::invalid_topology,
           "assemble_solid: cavity is contained by multiple outer shells"};
     }
-    std::vector<std::uint32_t>& destination = shell_faces[containers.front()];
-    const std::vector<std::uint32_t>& cavity_faces =
-        closed_components[cavity].faces;
-    destination.insert(destination.end(), cavity_faces.begin(),
-                       cavity_faces.end());
+    groups[containers.front()].cavities.push_back(cavity);
   }
 
-  for (const std::vector<std::uint32_t>& component_faces : shell_faces) {
+  const auto emit_shell = [&](std::uint32_t component) -> Result<ShellId> {
+    const std::vector<std::uint32_t>& component_faces =
+        closed_components[component].faces;
     std::vector<FaceId> faces_of_shell;
     faces_of_shell.reserve(component_faces.size());
     for (const std::uint32_t face : component_faces) {
       faces_of_shell.push_back(face_ids[face]);
     }
-    const Result<ShellId> shell = editor.add_shell(faces_of_shell, true);
-    if (!shell) return shell.error();
-    const std::array<ShellId, 1> shells{shell.value()};
-    const Result<SolidId> solid = editor.add_solid(shells, tol);
+    return editor.add_shell(faces_of_shell, true);
+  };
+
+  for (shell_group& group : groups) {
+    std::sort(group.cavities.begin(), group.cavities.end(),
+              [&](std::uint32_t a, std::uint32_t b) {
+                const Point3d& first = closed_components[a].sample;
+                const Point3d& second = closed_components[b].sample;
+                if (first[0] != second[0]) return first[0] < second[0];
+                if (first[1] != second[1]) return first[1] < second[1];
+                return first[2] < second[2];
+              });
+    std::vector<ShellId> solid_shells;
+    solid_shells.reserve(1u + group.cavities.size());
+    const Result<ShellId> outer_shell = emit_shell(group.outer);
+    if (!outer_shell) return outer_shell.error();
+    solid_shells.push_back(outer_shell.value());
+    for (const std::uint32_t cavity : group.cavities) {
+      const Result<ShellId> cavity_shell = emit_shell(cavity);
+      if (!cavity_shell) return cavity_shell.error();
+      solid_shells.push_back(cavity_shell.value());
+    }
+    const Result<SolidId> solid = editor.add_solid(solid_shells, tol);
     if (!solid) return solid.error();
   }
   return editor.commit();
