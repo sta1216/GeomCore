@@ -99,11 +99,16 @@ only used to produce candidate geometry and sample points.
 3. **No general healing / gap bridging.** Inputs must already validate; a
    `1e-6` gap is not healed (QA-12 deferred). `assemble_solid` fails with
    `not_closed` when an edge is used once.
-4. **Coplanar support is region-level.** Two coplanar faces are handled by
-   their 2D polygon overlap; partially overlapping coplanar faces, opposite
-   normals, and stacked boxes are supported. Exact coincident vertices are
-   welded; a coplanar contact that leaves a non-manifold edge is a diagnosed
-   failure, not a repair.
+4. **Coplanar support is region-level, with one diagnosed limit.** Two
+   coplanar faces are handled by their 2D polygon overlap; partially
+   overlapping coplanar faces, opposite normals, and stacked boxes are
+   supported when the overlap ring is interior to the host face. A patch that
+   reaches the host-face loop (for example a boss glued flush to the outside of
+   a face) leaves a T-junction: it is a diagnosed `not_closed` failure
+   (`"assemble_solid: edge is used once"`), not a silent repair; propagating
+   cut vertices onto adjacent faces is deferred. Exact coincident vertices are
+   welded; a coplanar contact that leaves a non-manifold edge is likewise a
+   diagnosed failure.
 5. **Multi-shell results are supported; multi-shell inputs are not.** A solid
    with cavities is a valid result, but `boolean_solid` requires both operands
    to have exactly one shell each (message
@@ -916,8 +921,12 @@ TEST_CASE("boolean_shell: a difference that punches a through-hole has genus one
 }
 ```
 
-**Step 2: Run it** — expected RED: the difference returns `unsupported` from
-`commit()` (M2 multi-shell guard), or the cavity is mis-grouped.
+**Step 2: Run it** — expected RED: `assemble_solid` already detects the cavity
+component (Task 6) but merges it into the outer component's single shell, so
+`shell_count()` is 1 and the planned second shell is missing; `validate_topology`
+still rejects multi-shell solids. The through-hole case currently passes the
+volume/genus checks with one shell, so its RED comes from the new cavity-shell
+assertions, not from `commit()` returning `unsupported`.
 
 **Step 3: Implement**
 
@@ -928,8 +937,11 @@ TEST_CASE("boolean_shell: a difference that punches a through-hole has genus one
   `invalid_topology` with `"solid has more than one outer shell"`.
 - Keep `mass_properties` summing all oriented face contributions; add a test
   that the cavity shell contributes a negative volume.
-- In `assemble_solid`, group components by signed volume, assign cavities by
-  containment, and emit one solid per outer shell.
+- In `assemble_solid`, emit the cavity components as separate shells of the
+  owner solid instead of merging them into the outer shell: group components
+  by signed volume, assign cavities by containment, call
+  `add_solid({outer, cavities...}, tol)` per outer shell. Re-run the Task 6
+  cavity test and update it to expect two shells.
 
 **Step 4: Run** Debug/Release.
 
@@ -987,7 +999,10 @@ TEST_CASE("boolean_solid errors: boxes that meet only at an edge are not silent"
 
 **Step 3: Implement** the guards in the listed order (options → operands →
 faces → empty → assembly). Never let an `ASSERT`/`std::terminate` path be the
-diagnosis.
+diagnosis. Unify the option check on `Errc::tolerance_violation` with the
+existing message `"boolean_solid: tolerance must be positive and finite"` (Task
+7 currently returns `degenerate` for ≤0 and `non_finite` for NaN/inf); update
+the Task 7 tests that pin those two codes.
 
 **Step 4: Run** Debug/Release.
 
