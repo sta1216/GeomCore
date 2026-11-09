@@ -159,7 +159,7 @@ New tests under `tests/unit/`:
 - `brep_planar_cut_test.cpp`
 - `brep_assemble_test.cpp`
 - `brep_boolean_solid_test.cpp`
-- `brep_boolean_shell_test.cpp`
+- `brep_shell_test.cpp`
 - `brep_boolean_solid_errors_test.cpp`
 
 Bench and docs:
@@ -881,7 +881,7 @@ TEST_CASE("boolean_solid: stacked boxes merge their shared face away") {
   orientation and containment checks)
 - Modify: `include/geom/brep/assemble.hpp` (cavity assignment; already required
   by Task 6, wire it to the validator)
-- Create: `tests/unit/brep_boolean_shell_test.cpp`
+- Create: `tests/unit/brep_shell_test.cpp`
 - Modify: `tests/CMakeLists.txt`
 
 **Interfaces:**
