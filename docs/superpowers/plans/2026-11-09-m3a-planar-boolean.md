@@ -588,6 +588,33 @@ TEST_CASE("planar_cut: crossing cuts make four fragments whose areas sum to four
   for (const FaceFragment2d& f : fragments.value()) total += fragment_area(f);
   CHECK(total == doctest::Approx(4.0).epsilon(1e-12));
 }
+
+TEST_CASE("planar_cut: a closed cut loop makes an island and a holed remainder") {
+  const Brep box = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, 1e-12).value();
+  const FaceId top = plane_face(box, Vec3d{0, 0, 1}, 2.0);
+  const Segments loop{{Point3d{1.0, 1.0, 2}, Point3d{1.5, 1.0, 2}},
+                      {Point3d{1.5, 1.0, 2}, Point3d{1.5, 1.5, 2}},
+                      {Point3d{1.5, 1.5, 2}, Point3d{1.0, 1.5, 2}},
+                      {Point3d{1.0, 1.5, 2}, Point3d{1.0, 1.0, 2}}};
+  const auto fragments = cut_face_by_segments(box, top, loop, 1e-12);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 2);
+  double total = 0.0;
+  double island = 0.0;
+  std::size_t holed = 0;
+  for (const FaceFragment2d& f : fragments.value()) {
+    total += fragment_area(f);
+    if (f.holes.empty()) {
+      island += fragment_area(f);
+    } else {
+      ++holed;
+      CHECK(f.holes.size() == 1);
+    }
+  }
+  CHECK(holed == 1);
+  CHECK(island == doctest::Approx(0.25).epsilon(1e-12));
+  CHECK(total == doctest::Approx(4.0).epsilon(1e-12));
+}
 ```
 
 **Step 2: Run it** — expected RED.
@@ -609,11 +636,17 @@ TEST_CASE("planar_cut: crossing cuts make four fragments whose areas sum to four
   (`+inf` marks an intersection ratio that cannot be represented), return
   `numeric_failure` instead of building fragments from unsplit cuts. Build
   `Arrangement2`.
-- For each bounded arrangement face, collect **every** boundary cycle whose
-  half-edges carry that face id (a face may have several cycles: one outer and
-  several hole rings; do not start from a single half-edge and assume one
-  cycle). Convert each cycle to 2D; the largest-|area| cycle is the outer ring,
-  the rest are holes; normalise orientations.
+- Each bounded arrangement face owns exactly one boundary cycle, started at its
+  `Face::edge`; a nested cycle is a separate face, not part of the outer face.
+  Build the containment tree: for each bounded face, triangulate its cycle as a
+  hole-free `Polygon2d` and use the centroid of the first triangle as an
+  interior representative `rep(f)`; set `parent(f)` to the bounded face `g`
+  with `|area(g)| > |area(f)|` that contains `rep(f)` and has the smallest
+  `|area|`. The immediate children of `f` are its holes.
+- Build the fragment rings from that tree: outer ring = `f`'s cycle (normalised
+  CCW), hole rings = the cycles of `f`'s immediate children (normalised CW).
+  This is what keeps a cut that closes inside the face (for example the contact
+  outline of a smaller box resting on it) from swallowing its own interior.
 - Individual cut segments may end inside the face when the partner face ends
   there; the segments from all partner faces form the closed cut curve
   together, so the arrangement is expected to be complete. If a face still has
@@ -622,6 +655,9 @@ TEST_CASE("planar_cut: crossing cuts make four fragments whose areas sum to four
 - Build a `Polygon2d` from the rings and call `triangulate_polygon2`; the
   centroid of the first triangle is a strictly interior sample (if
   triangulation fails, try the next triangle; if none, skip the face).
+- Keep the arrangement face only when the sample is inside the original face
+  (`point_in_face` semantics on the projected loops): inside outer and outside
+  every hole.
 - Keep the arrangement face only when the sample is inside the original face
   (`point_in_face` semantics on the projected loops): inside outer and outside
   every hole.
