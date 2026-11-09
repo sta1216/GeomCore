@@ -11,6 +11,7 @@
 #include <doctest/doctest.h>
 #include <geom/brep/boolean_solid.hpp>
 #include <geom/brep/face_query.hpp>
+#include <geom/brep/mass_properties.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/solid_editor.hpp>
 #include <geom/brep/topology.hpp>
@@ -42,6 +43,10 @@ T take(const Result<T>& result) {
 
 Brep box(Point3d lo, Point3d hi) {
   return take(make_box(lo, hi, 1e-12));
+}
+
+double volume_of(const Brep& brep) {
+  return take(mass_properties(brep)).volume;
 }
 
 const char* op_name(SolidBooleanOp op) {
@@ -123,6 +128,14 @@ void check_error(const Result<SolidBooleanResult>& result, Errc code,
   CHECK(std::string_view(result.error().message) == message);
   CHECK(result.error().context_a == context_a);
   CHECK(result.error().context_b == context_b);
+}
+
+void check_success(const Result<SolidBooleanResult>& result) {
+  if (!result.has_value()) {
+    CAPTURE(static_cast<int>(result.error().code));
+    CAPTURE(std::string_view(result.error().message));
+    FAIL("expected boolean_solid to succeed");
+  }
 }
 
 Vec3d rotate_x_then_z(Vec3d p, double angle_x, double angle_z) {
@@ -447,6 +460,123 @@ TEST_CASE("boolean_solid errors: tilted flat operands are degenerate") {
       check_unchanged(a, before_a);
       check_unchanged(b, before_b);
     }
+  }
+}
+
+TEST_CASE("boolean_solid errors: slender rods are not zero volume") {
+  SolidBooleanOptions options;
+  options.tolerance = 2e-3;
+
+  SUBCASE("an axis-aligned rod unions with an overlapping cap on either side") {
+    const Brep rod = box({0, 0, 0}, {2000, 1, 1});
+    const Brep cap = box({1999, -1, -1}, {2001, 2, 2});
+    for (int side = 0; side < 2; ++side) {
+      CAPTURE(side);
+      const Brep& a = side == 0 ? rod : cap;
+      const Brep& b = side == 0 ? cap : rod;
+      const BrepSnapshot before_a = snapshot(a);
+      const BrepSnapshot before_b = snapshot(b);
+      const auto result = boolean_solid(a, b, SolidBooleanOp::union_, options);
+      check_success(result);
+      const Brep& out = result.value().brep;
+      CHECK(validate_topology(out).ok());
+      CHECK(validate_tolerances(out).ok());
+      CHECK(out.solid_count() == 1);
+      CHECK(out.shell_count() == 1);
+      const std::vector<SolidId> solids = out.solid_ids();
+      REQUIRE(solids.size() == 1);
+      const std::span<const ShellId> shells = out.solid_shells(solids.front());
+      REQUIRE(shells.size() == 1);
+      CHECK(out.shell(shells.front()).closed);
+      CHECK(volume_of(out) == doctest::Approx(2017.0).epsilon(1e-12));
+      check_unchanged(a, before_a);
+      check_unchanged(b, before_b);
+    }
+  }
+
+  SUBCASE("a rod rotated 45 degrees about z is accepted") {
+    constexpr double kPi = 3.14159265358979323846;
+    const Brep rod = make_flat_box({0, 0, 0}, {2000, 1, 1}, 0.0, kPi / 4.0);
+    REQUIRE(validate_topology(rod).ok());
+    REQUIRE(validate_tolerances(rod).ok());
+    const Brep other = box({5000, 5000, 0}, {5001, 5001, 1});
+    const auto result = boolean_solid(rod, other, SolidBooleanOp::union_, options);
+    check_success(result);
+    const Brep& out = result.value().brep;
+    CHECK(validate_topology(out).ok());
+    CHECK(out.solid_count() == 2);
+    CHECK(out.shell_count() == 2);
+    CHECK(volume_of(out) == doctest::Approx(2001.0).epsilon(1e-12));
+  }
+
+  SUBCASE("a rod translated to huge coordinates is accepted") {
+    constexpr double kBase = 1e6;
+    const Brep rod = box({kBase, 0, 0}, {kBase + 2000, 1, 1});
+    const Brep cap = box({kBase + 1999, -1, -1}, {kBase + 2001, 2, 2});
+    const auto result = boolean_solid(rod, cap, SolidBooleanOp::union_, options);
+    check_success(result);
+    const Brep& out = result.value().brep;
+    CHECK(validate_topology(out).ok());
+    CHECK(out.solid_count() == 1);
+    CHECK(out.shell_count() == 1);
+    CHECK(volume_of(out) == doctest::Approx(2017.0).epsilon(1e-9));
+  }
+}
+
+TEST_CASE("boolean_solid errors: volume threshold keeps ordinary solids") {
+  const auto accepts_difference = [](const Brep& operand, const Brep& other,
+                                     const SolidBooleanOptions& options) {
+    const BrepSnapshot before_operand = snapshot(operand);
+    const BrepSnapshot before_other = snapshot(other);
+    const double expected = volume_of(operand);
+    const auto result =
+        boolean_solid(operand, other, SolidBooleanOp::difference, options);
+    REQUIRE(result.has_value());
+    const Brep& out = result.value().brep;
+    CHECK(validate_topology(out).ok());
+    CHECK(out.solid_count() == 1);
+    CHECK(volume_of(out) == doctest::Approx(expected).epsilon(1e-12));
+    check_unchanged(operand, before_operand);
+    check_unchanged(other, before_other);
+  };
+
+  SUBCASE("a 1e-3 cube is accepted") {
+    accepts_difference(box({0, 0, 0}, {1e-3, 1e-3, 1e-3}),
+                       box({1, 1, 1}, {2, 2, 2}), SolidBooleanOptions{});
+  }
+
+  SUBCASE("a 1e-6 cube is accepted") {
+    accepts_difference(box({0, 0, 0}, {1e-6, 1e-6, 1e-6}),
+                       box({1, 1, 1}, {2, 2, 2}), SolidBooleanOptions{});
+  }
+
+  SUBCASE("a 1000 cube is accepted") {
+    accepts_difference(box({0, 0, 0}, {1000, 1000, 1000}),
+                       box({2000, 0, 0}, {2001, 1, 1}), SolidBooleanOptions{});
+  }
+
+  SUBCASE("a 1000 x 1000 x 0.1 plate is accepted") {
+    accepts_difference(box({0, 0, 0}, {1000, 1000, 0.1}),
+                       box({2000, 0, 0}, {2001, 1, 1}), SolidBooleanOptions{});
+  }
+
+  SUBCASE("a plate thinner than the tolerance is rejected") {
+    SolidBooleanOptions options;
+    options.tolerance = 1e-9;
+    const Brep plate = box({0, 0, 0}, {1, 1, 1e-10});
+    const Brep other = box({2, 0, 0}, {3, 1, 1});
+    const auto result =
+        boolean_solid(plate, other, SolidBooleanOp::difference, options);
+    check_error(result, Errc::degenerate, kZeroVolumeMessage);
+  }
+
+  SUBCASE("a huge rotated flat is rejected") {
+    const Brep flat =
+        make_flat_box({1e6, 1e6, 0}, {1e6 + 1, 1e6 + 1, 0}, 0.6, 0.4);
+    REQUIRE(validate_topology(flat).ok());
+    const Brep other = box({0, 0, 0}, {1, 1, 1});
+    const auto result = boolean_solid(flat, other, SolidBooleanOp::union_);
+    check_error(result, Errc::degenerate, kZeroVolumeMessage);
   }
 }
 

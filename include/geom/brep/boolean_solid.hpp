@@ -135,12 +135,15 @@ inline Error solid_boolean_second_operand_error(Error error) {
 // a reliable test: a flat shell rotated off its plane can have a signed volume
 // at round-off scale (for example 1.4e-17 for a rotated unit flat box), which
 // would otherwise leak the later planar_cut producer messages. Reject a volume
-// whose magnitude is at or below the shell's scale-aware slack,
-//   64 * epsilon * diag^3 + tol * diag^2,
-// where diag is the shell AABB diagonal and tol is the validated modeling
-// tolerance. This also rejects a shell thinner than the modeling tolerance.
-// Curved shells are not measurable here (volume.computable is false) and are
-// diagnosed by build_faces instead.
+// whose magnitude is at or below the larger of the round-off slack and the
+// tolerance-scale slack,
+//   64 * epsilon * diag^3 + tol * max_face_area,
+// where diag is the shell AABB diagonal, tol is the validated modeling
+// tolerance, and max_face_area is the largest 3D polygon area of a shell loop.
+// The tolerance term reduces to "the shell is thinner than tol" for a plate or
+// rod, and unlike tol * diag^2 it does not reject slender rods whose length is
+// much larger than their thickness. Curved shells are not measurable here
+// (volume.computable is false) and are diagnosed by build_faces instead.
 inline Result<void> solid_boolean_check_zero_volume(
     const Brep& brep, ShellId shell, double tol, std::uint32_t context_a,
     std::uint32_t context_b) {
@@ -155,9 +158,21 @@ inline Result<void> solid_boolean_check_zero_volume(
     const double dz = bounds.hi[2] - bounds.lo[2];
     diag = std::sqrt(dx * dx + dy * dy + dz * dz);
   }
+  double max_face_area = 0.0;
+  for (const std::vector<Point3d>& ring : walk.rings) {
+    if (ring.size() < 3) continue;
+    const Point3d& origin = ring.front();
+    Vec3d area_vector{};
+    for (std::size_t i = 1; i + 1 < ring.size(); ++i) {
+      area_vector =
+          area_vector + cross(ring[i] - origin, ring[i + 1] - origin);
+    }
+    const double area = 0.5 * norm2(area_vector);
+    if (std::isfinite(area)) max_face_area = std::max(max_face_area, area);
+  }
   const double threshold = 64.0 * std::numeric_limits<double>::epsilon() *
                                diag * diag * diag +
-                           tol * diag * diag;
+                           tol * max_face_area;
   if (volume.computable && std::abs(volume.volume) <= threshold) {
     return Error{Errc::degenerate, "boolean_solid: operand has zero volume",
                  context_a, context_b};
@@ -440,8 +455,9 @@ inline Result<void> solid_boolean_classify_face(
 //                    (checked after validation so a corrupt document reports
 //                    its topology finding instead)
 //   5. closed shell  open operand shell -> Errc::unsupported
-//   6. zero volume   planar shell with zero volume at round-off or tolerance
-//                    scale -> Errc::degenerate
+//   6. zero volume   planar shell with volume at or below tol * largest face
+//                    area (a shell thinner than tol) or at round-off scale
+//                    -> Errc::degenerate
 //   7. curved faces  non-planar face -> Errc::unsupported (M3b deferral)
 //   8. assembly      pairwise cuts and assemble_solid diagnostics
 //
