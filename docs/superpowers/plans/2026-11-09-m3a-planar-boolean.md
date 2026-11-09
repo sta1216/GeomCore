@@ -234,7 +234,8 @@ TEST_CASE("plane_frame: the basis only depends on the normal direction") {
   REQUIRE(b.has_value());
   CHECK(dot(a.value().u, b.value().u) == doctest::Approx(1.0).epsilon(1e-15));
   CHECK(dot(a.value().v, b.value().v) == doctest::Approx(1.0).epsilon(1e-15));
-  CHECK(plane_frame_plane(a.value()).offset == doctest::Approx(1.0).epsilon(1e-15));
+  CHECK(plane_frame_plane(a.value()).offset == doctest::Approx(0.2).epsilon(1e-15));
+  CHECK(plane_frame_plane(b.value()).offset == doctest::Approx(1.8).epsilon(1e-15));
 }
 ```
 
