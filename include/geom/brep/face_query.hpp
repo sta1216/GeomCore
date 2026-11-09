@@ -114,7 +114,9 @@ inline Result<Plane3> face_plane(const Brep& brep, FaceId id) {
 // The face boundary projected onto `frame` as 2D rings: the outer loop first,
 // then the holes in chain order. Adjacent coedges share their endpoints, so
 // only each coedge's start vertex is emitted; a repeated closing point is
-// dropped. The frame is usually make_plane_frame(face_plane(brep, id)).
+// dropped. A ring with fewer than three points is not a polygon; this happens
+// for a planar cap bounded by one closed curved edge, which M3a does not
+// support.
 inline Result<std::vector<std::vector<Point2d>>> face_loops_2d(const Brep& brep, FaceId id,
                                                               const PlaneFrame& frame) {
   const Result<bool> face_check = detail::face_query_check_face(brep, id);
@@ -180,6 +182,10 @@ inline Result<std::vector<std::vector<Point2d>>> face_loops_2d(const Brep& brep,
         ring.points.front()[1] == ring.points.back()[1]) {
       ring.points.pop_back();
     }
+    if (ring.points.size() < 3) {
+      return Error{Errc::unsupported, "face_query: loop is not a polygonal ring",
+                   loop_id.index(), 0u};
+    }
     rings.push_back(std::move(ring));
     loop_id = loop.next;
   }
@@ -195,8 +201,13 @@ inline Result<std::vector<std::vector<Point2d>>> face_loops_2d(const Brep& brep,
   return loops;
 }
 
-// True when p lies on the face: on its plane within `tol`, inside the outer
-// loop and outside every hole.
+// Defined below; point_in_face uses it to reject boundary points.
+inline Result<bool> point_on_face_boundary(const Brep& brep, FaceId id, const Point3d& p,
+                                           double tol);
+
+// True when p lies in the face interior: on its plane within `tol`, inside the
+// outer loop and outside every hole. A point on the boundary, including a rim
+// that a winding test would classify either way, is not interior.
 inline Result<bool> point_in_face(const Brep& brep, FaceId id, const Point3d& p, double tol) {
   const Result<bool> face_check = detail::face_query_check_face(brep, id);
   if (!face_check) return face_check.error();
@@ -221,6 +232,11 @@ inline Result<bool> point_in_face(const Brep& brep, FaceId id, const Point3d& p,
   for (std::size_t i = 1; i < rings.size(); ++i) {
     if (detail::face_query_point_in_ring(rings[i], q)) return false;
   }
+  // The winding test is boundary-ambiguous, so interior membership requires an
+  // explicit boundary rejection after the ring tests succeed.
+  const Result<bool> boundary = point_on_face_boundary(brep, id, p, tol);
+  if (!boundary) return boundary.error();
+  if (boundary.value()) return false;
   return true;
 }
 
@@ -256,10 +272,11 @@ inline Result<bool> point_on_face_boundary(const Brep& brep, FaceId id, const Po
   return false;
 }
 
-// Ray-parity containment for a closed shell. Each direction is tried in turn;
-// a hit that lands on a face boundary is ambiguous, so that direction is
-// discarded. When every direction is ambiguous the query fails instead of
-// guessing.
+// Ray-parity containment for a closed shell. A point on the shell surface,
+// including its interior faces and rims, is reported outside. Each direction is
+// tried in turn; a hit that lands on a face boundary is ambiguous, so that
+// direction is discarded. When every direction is ambiguous the query fails
+// instead of guessing.
 inline Result<bool> point_in_shell(const Brep& brep, ShellId id, const Point3d& p, double tol) {
   if (id.is_null() || !brep.shell_alive(id)) {
     return Error{Errc::index_out_of_range, "face_query: shell is not alive", id.index(), 0u};
@@ -272,6 +289,19 @@ inline Result<bool> point_in_shell(const Brep& brep, ShellId id, const Point3d& 
   const std::span<const FaceId> faces = brep.shell_faces(id);
   if (faces.empty()) {
     return Error{Errc::index_out_of_range, "face_query: shell has no faces", id.index(), 0u};
+  }
+
+  // Report every point on the shell surface as outside before tracing any ray.
+  // Checking face interiors as well as rims keeps the result independent of the
+  // ray direction; a boundary-only check would miss a face centre that the ray
+  // leaves through another face.
+  for (const FaceId face_id : faces) {
+    const Result<bool> inside = point_in_face(brep, face_id, p, tol);
+    if (!inside) return inside.error();
+    if (inside.value()) return false;
+    const Result<bool> boundary = point_on_face_boundary(brep, face_id, p, tol);
+    if (!boundary) return boundary.error();
+    if (boundary.value()) return false;
   }
 
   const Vec3d point{p[0], p[1], p[2]};
