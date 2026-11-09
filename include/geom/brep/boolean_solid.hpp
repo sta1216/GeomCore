@@ -120,6 +120,32 @@ inline Error solid_boolean_topology_error(const ValidationReport& report) {
   return Error{issue.code, issue.message, issue.entity, 0u};
 }
 
+// Moves an operand-local diagnostic from context_a to context_b. Every
+// operand-local producer reports the offending entity index in context_a, so a
+// failure while inspecting operand B is remapped here instead of being exposed
+// as if it belonged to operand A.
+inline Error solid_boolean_second_operand_error(Error error) {
+  error.context_b = error.context_a;
+  error.context_a = 0u;
+  return error;
+}
+
+// A planar shell with exactly zero signed volume has no interior to classify.
+// Reject it before the coplanar/cut pipeline, which otherwise fails later with
+// a planar_cut producer message. Curved shells are not measurable here
+// (volume.computable is false) and are diagnosed by build_faces instead.
+inline Result<void> solid_boolean_check_zero_volume(
+    const Brep& brep, ShellId shell, std::uint32_t context_a,
+    std::uint32_t context_b) {
+  const validate_shell_volume volume =
+      validate_signed_shell_volume(brep, brep.shell_faces(shell));
+  if (volume.computable && volume.volume == 0.0) {
+    return Error{Errc::degenerate, "boolean_solid: operand has zero volume",
+                 context_a, context_b};
+  }
+  return {};
+}
+
 inline Result<void> solid_boolean_check_operand(const Brep& brep) {
   const ValidationReport topology = validate_topology(brep);
   if (!topology.ok()) return solid_boolean_topology_error(topology);
@@ -386,23 +412,45 @@ inline Result<void> solid_boolean_classify_face(
 // implemented, so the assembly step diagnoses the result as `Errc::not_closed`
 // ("assemble_solid: edge is used once"). Callers can treat that as a documented
 // limitation rather than corrupt output.
+// Diagnostics are raised in this order, and each class reports its own message
+// even when another operand is also bad:
+//   1. options       invalid tolerance -> Errc::tolerance_violation
+//   2. operand shape more than one solid or shell -> Errc::unsupported
+//   3. topology      validate_topology / validate_tolerances findings
+//   4. empty operand a valid document with no solid -> Errc::unsupported
+//                    (checked after validation so a corrupt document reports
+//                    its topology finding instead)
+//   5. closed shell  open operand shell -> Errc::unsupported
+//   6. zero volume   planar shell with exactly zero signed volume ->
+//                    Errc::degenerate
+//   7. curved faces  non-planar face -> Errc::unsupported (M3b deferral)
+//   8. assembly      pairwise cuts and assemble_solid diagnostics
+//
+// The empty Brep is a valid empty document, but it is not a valid operand here:
+// it reports the same "expected exactly one solid per operand" shape error as a
+// document with several solids, never an empty successful result.
+//
+// context_a / context_b identify the offending entity: context_a in operand A,
+// context_b in operand B. boolean_solid's own operand diagnostics set only the
+// field for the operand being diagnosed (the other stays 0). Diagnostic text
+// that names no single entity (invalid tolerance, empty/oversized document)
+// leaves both 0. A diagnostic raised while cutting or assembling keeps the
+// producer's context; for an assemble_solid failure that index names an entity
+// in the result Brep, not in an operand.
 inline Result<SolidBooleanResult> boolean_solid(
     const Brep& a, const Brep& b, SolidBooleanOp op,
     const SolidBooleanOptions& options = {}) {
   const double tol = options.tolerance;
-  if (!std::isfinite(tol)) {
-    return Error{Errc::non_finite,
-                 "boolean_solid: tolerance must be positive and finite"};
-  }
-  if (!(tol > 0.0)) {
-    return Error{Errc::degenerate,
+  if (!std::isfinite(tol) || !(tol > 0.0)) {
+    return Error{Errc::tolerance_violation,
                  "boolean_solid: tolerance must be positive and finite"};
   }
 
   // Operand-shape checks run before validate_topology so a multi-shell solid
   // reports the dedicated M3c diagnosis instead of the validator's generic
-  // deferral message. An operand with no solid at all is structurally invalid,
-  // not merely unsupported, so it is left for validate_topology to reject.
+  // deferral message. A Brep with no solid at all is left to validate_topology
+  // first so an actually broken document still reports its topology finding;
+  // a valid empty document reaches the exactly-one check below.
   const std::vector<SolidId> solids_a = a.solid_ids();
   const std::vector<SolidId> solids_b = b.solid_ids();
   if (solids_a.size() > 1u || solids_b.size() > 1u) {
@@ -412,18 +460,22 @@ inline Result<SolidBooleanResult> boolean_solid(
   if (solids_a.size() == 1u &&
       a.solid_shells(solids_a.front()).size() > 1u) {
     return Error{Errc::unsupported,
-                 "boolean_solid: multi-shell operands are deferred to M3c"};
+                 "boolean_solid: multi-shell operands are deferred to M3c",
+                 solids_a.front().index(), 0u};
   }
   if (solids_b.size() == 1u &&
       b.solid_shells(solids_b.front()).size() > 1u) {
     return Error{Errc::unsupported,
-                 "boolean_solid: multi-shell operands are deferred to M3c"};
+                 "boolean_solid: multi-shell operands are deferred to M3c",
+                 0u, solids_b.front().index()};
   }
 
   const Result<void> check_a = detail::solid_boolean_check_operand(a);
   if (!check_a) return check_a.error();
   const Result<void> check_b = detail::solid_boolean_check_operand(b);
-  if (!check_b) return check_b.error();
+  if (!check_b) {
+    return detail::solid_boolean_second_operand_error(check_b.error());
+  }
 
   if (solids_a.size() != 1u || solids_b.size() != 1u) {
     return Error{Errc::unsupported,
@@ -431,23 +483,34 @@ inline Result<SolidBooleanResult> boolean_solid(
   }
   const std::span<const ShellId> shells_a = a.solid_shells(solids_a.front());
   const std::span<const ShellId> shells_b = b.solid_shells(solids_b.front());
-  if (shells_a.size() != 1u || shells_b.size() != 1u) {
-    return Error{Errc::unsupported,
-                 "boolean_solid: multi-shell operands are deferred to M3c"};
-  }
   const ShellId shell_a = shells_a.front();
   const ShellId shell_b = shells_b.front();
-  if (!a.shell(shell_a).closed || !b.shell(shell_b).closed) {
+  if (!a.shell(shell_a).closed) {
     return Error{Errc::unsupported,
-                 "boolean_solid: operand shell must be closed"};
+                 "boolean_solid: operand shell must be closed",
+                 shell_a.index(), 0u};
   }
+  if (!b.shell(shell_b).closed) {
+    return Error{Errc::unsupported,
+                 "boolean_solid: operand shell must be closed", 0u,
+                 shell_b.index()};
+  }
+
+  const Result<void> volume_a = detail::solid_boolean_check_zero_volume(
+      a, shell_a, shell_a.index(), 0u);
+  if (!volume_a) return volume_a.error();
+  const Result<void> volume_b = detail::solid_boolean_check_zero_volume(
+      b, shell_b, 0u, shell_b.index());
+  if (!volume_b) return volume_b.error();
 
   Result<std::vector<detail::solid_boolean_face>> faces_a =
       detail::solid_boolean_build_faces(a, a.shell_faces(shell_a));
   if (!faces_a) return faces_a.error();
   Result<std::vector<detail::solid_boolean_face>> faces_b =
       detail::solid_boolean_build_faces(b, b.shell_faces(shell_b));
-  if (!faces_b) return faces_b.error();
+  if (!faces_b) {
+    return detail::solid_boolean_second_operand_error(faces_b.error());
+  }
 
   SolidBooleanReport report;
   for (detail::solid_boolean_face& face : faces_a.value()) {
@@ -517,7 +580,9 @@ inline Result<SolidBooleanResult> boolean_solid(
     const Result<void> status = detail::solid_boolean_classify_face(
         b, face, a, solids_a.front(), b, solids_b.front(), op, tol, delta,
         report, kept);
-    if (!status) return status.error();
+    if (!status) {
+      return detail::solid_boolean_second_operand_error(status.error());
+    }
   }
 
   std::vector<AssembledFace> unique =

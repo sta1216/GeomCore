@@ -357,20 +357,17 @@ TEST_CASE("boolean_solid errors: multi-shell operands are unsupported") {
 TEST_CASE("boolean_solid errors: tolerances must be positive and finite") {
   const Brep a = box({0, 0, 0}, {1, 1, 1});
   const Brep b = box({0.5, 0.5, 0.5}, {1.5, 1.5, 1.5});
-  for (const double tol : {0.0, -1e-9}) {
+  for (const double tol : {0.0, -1e-9,
+                           std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity(),
+                           -std::numeric_limits<double>::infinity()}) {
     SolidBooleanOptions options;
     options.tolerance = tol;
     const auto result = boolean_solid(a, b, SolidBooleanOp::union_, options);
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == Errc::degenerate);
-  }
-  for (const double tol : {std::numeric_limits<double>::quiet_NaN(),
-                           std::numeric_limits<double>::infinity()}) {
-    SolidBooleanOptions options;
-    options.tolerance = tol;
-    const auto result = boolean_solid(a, b, SolidBooleanOp::union_, options);
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == Errc::non_finite);
+    CHECK(result.error().code == Errc::tolerance_violation);
+    CHECK(std::string_view(result.error().message) ==
+          "boolean_solid: tolerance must be positive and finite");
   }
 }
 
