@@ -345,7 +345,8 @@ TEST_CASE("face_query: a shell contains an interior point and not an exterior on
 - `face_loops_2d`: walk `face.first_loop`, then `loop.next`; for each loop walk
   `coedge.next` from `loop.start`; append the start vertex of each coedge
   (`edge.v0` or `edge.v1` when `coedge.reversed`), projected with the frame.
-  Drop a repeated closing point.
+  Return the loop with `outer == true` first, then the hole loops in
+  loop-chain order. Drop a repeated closing point.
 - `point_in_face`: project `p`; `point_in_face` is true when the point is
   inside the outer loop and outside every hole. Outer loop = the loop with
   `outer == true`; use `boolean_point_in_ring` for each ring. Boundary is
