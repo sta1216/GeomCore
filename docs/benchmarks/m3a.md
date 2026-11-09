@@ -30,22 +30,25 @@
   毫秒保留三位小数；装配、校验与结果体积测量都在计时区间之外。
 - `all` 模式在相同操作数上依次运行并、交、差。并集与交集行使用
   `|Vu + Vi - Va - Vb| / (Va + Vb)`，差集行使用 `|Vd + Vi - Va| / Va`。
-- 单个 op 通过的条件：`ms <= 5000` 且 `volume_rel_err <= 1e-9` 且结果通过
-  `validate_topology`；任一行 FAIL，进程退出码为 1。
+- 通过条件分两种：单个 op 只看 `ms <= 5000` 与 `validate_topology`，恒等式在
+  单 op 下不可用（该行打印 `identity=unavailable`、`volume_rel_err=nan`），
+  1e-9 不是单 op 门禁；`all` 模式的每一行还要求对应恒等式
+  `volume_rel_err <= 1e-9`。任一行 FAIL，进程退出码为 1。
 
 ## 冒烟：200 边
 
-`geom_bench_m3.exe 200 all`，退出码 0，总墙钟 4.4 s（其中两个操作数装配
-66 ms，不计入计时）。输出：
+`geom_bench_m3.exe 200 all`，退出码 0，总墙钟 3.2 s（其中两个操作数装配
+65.8 ms，不计入计时）。输出：
 
 ```
-QA8 op=union faces_a=202 faces_b=202 ms=1196.089 volume_rel_err=1.810e-16 target=5000ms/1e-9 PASS
-QA8 op=intersection faces_a=202 faces_b=202 ms=1075.615 volume_rel_err=1.810e-16 target=5000ms/1e-9 PASS
-QA8 op=difference faces_a=202 faces_b=202 ms=1296.292 volume_rel_err=1.086e-15 target=5000ms/1e-9 PASS
+QA8 op=union faces_a=202 faces_b=202 ms=1064.064 volume_rel_err=1.810e-16 target=5000ms/1e-9 PASS
+QA8 op=intersection faces_a=202 faces_b=202 ms=991.887 volume_rel_err=1.810e-16 target=5000ms/1e-9 PASS
+QA8 op=difference faces_a=202 faces_b=202 ms=1053.113 volume_rel_err=1.086e-15 target=5000ms/1e-9 PASS
 ```
 
 200 边时三次运算都在 1.3 s 内，恒等式误差 1e-16 量级，说明装配、布尔与体积
-测量路径本身正确。
+测量路径本身正确。冒烟行里的 PASS 只证明这条路径能跑通，不构成 QA-8 结论；
+QA-8 只由 5000 边官方运行判定。
 
 ## 官方：5000 边
 
@@ -59,29 +62,36 @@ QA8 op=intersection faces_a=5002 faces_b=5002 ms=550446.162 volume_rel_err=5.926
 QA8 op=difference faces_a=5002 faces_b=5002 ms=559296.597 volume_rel_err=5.880e-14 target=5000ms/1e-9 FAIL
 ```
 
-三次布尔调用都正常返回（否则按约定退出码为 2）；两个操作数的实测体积为
+三次布尔调用都返回了结果：`run_op` 在 `boolean_solid` 失败时会打印
+`error=...` 并以退出码 2 结束，不会走到 QA8 行（bench/bench_m3.cpp:164-171、
+:288、:295）。结果拓扑也在同一进程内、打印之前检查：`run_op` 用
+`validate_topology(brep).ok()` 设置 `topology_ok`（bench/bench_m3.cpp:176），
+`print_qa8` 把它计入 PASS/FAIL（bench/bench_m3.cpp:191-193），因此行内判定已经
+包含拓扑校验，不需要读者另行推断。两个操作数的实测体积为
 `Va = 1256.6367307022517`、`Vb = 1256.6367307022515`，恒等式相对误差 5.9e-14，
 满足 1e-9。**耗时全部超 5 s：并集约 127.2 倍、交集约 110.1 倍、差集约 111.9 倍，
 因此 QA-8 为 FAIL。**
 
 ## 结论
 
-1. **QA-8 FAIL（仅性能）**：5000 边并/交/差分别 636.0 s、550.4 s、559.3 s，
-   门禁 5 s；恒等式 5.9e-14 已满足 1e-9，拓扑有效。失败是纯性能问题，
-   与 M1b 的 QA-1 结论一致。
+1. **QA-8 FAIL（性能）**：5000 边并/交/差分别 636.0 s、550.4 s、559.3 s，
+   门禁 5 s，超出约 110–127 倍；恒等式 5.9e-14 满足 1e-9。FAIL 的直接证据是
+   时间越界（拓扑校验也计入该行判定，但行本身不区分失败来源）。与 M1b 的
+   QA-1 结论一致。
 2. 与先前的二次增长测量相符：1000 边并集 29.8 s，5000 边 636 s，边数 5 倍而
    耗时 21.3 倍（纯二次预测 25 倍），说明成本仍由逐对候选/切割主导。
 3. 同机此前的探针运行测得并集 563,564 ms，本次为 636,040 ms（+13%）。15 W
    移动处理器在长时间满载下降频会带来这一量级的波动；门禁按计划固定值判定，
    仍为 FAIL。
-4. 本次只新增基准程序，未改动库与测试；Debug 全量用例保持通过（见提交说明）。
+4. 本次只新增基准程序，未改动库与测试；Debug 构建在本机通过，
+   `ctest -C Debug` 1/1 passed，35.96 s。
 
 ## 复现
 
 ```powershell
 cmake -S . -B build-rel -DGEOM_WERROR=ON -DGEOM_BUILD_BENCH=ON
 cmake --build build-rel --config Release --target geom_bench_m3
-build-rel\Release\geom_bench_m3.exe 200 all   # 冒烟，约 4 s
+build-rel\Release\geom_bench_m3.exe 200 all   # 冒烟，约 3 s
 build-rel\Release\geom_bench_m3.exe 5000      # 官方，约 30 min
 ```
 

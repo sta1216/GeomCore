@@ -221,6 +221,12 @@ bool parse_sides(std::string_view text, std::uint32_t* out) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc > 3) {
+    std::printf("error=usage: geom_bench_m3 [sides] "
+                "[union|intersection|difference|all]\n");
+    return 2;
+  }
+
   std::uint32_t sides = kDefaultSides;
   if (argc > 1) {
     if (!parse_sides(argv[1], &sides)) {
