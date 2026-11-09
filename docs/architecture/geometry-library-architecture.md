@@ -1169,8 +1169,10 @@ FAIL，16,666 个盒体 / 99,996 面 / 199,992 三角形，
 `face_intersect`、`inside`、`planar_cut`、`assemble`、`boolean_solid`、多壳/
 腔体校验、诊断与 QA-8 基准均已实现（实现取舍见 ADR-0023）。M3a 只支持平面面：
 曲面面返回 `unsupported`；pcurve 为直线 2D 线段；与宿主面边界相接的共面补丁
-诊断为 `not_closed`；腔体不相交性用保守 AABB 判定；边相接触的 L 形对称差诊断
-为 `invalid_topology`（已记录，不做 T 型缝合）。Debug 与 Release 各 516 个
+诊断为 `not_closed`；腔体包含性与不相交性用保守的 AABB 预检加点/接触探测（不做
+精确壳-壳求交）；边相接触的 L 形对称差诊断为 `invalid_topology`（已记录，不做
+T 型缝合）。操作数必须是单实体、单壳；多实体与多壳输入均返回 `unsupported`，
+但结果可为多壳（外壳 + 腔体）。Debug 与 Release 各 516 个
 用例、455,084 条断言全绿；`/W4 /WX /utf-8` 下零警告；新增头文件均可独立编译。
 **验收状态（2026-11-10 实测，见 `docs/benchmarks/m3a.md`）**：QA-8 FAIL，两个
 5002 面棱柱的并、交、差分别耗时 636,040 ms、550,446 ms、559,297 ms（门禁

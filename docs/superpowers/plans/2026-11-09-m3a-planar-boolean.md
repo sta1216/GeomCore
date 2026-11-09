@@ -1103,4 +1103,4 @@ numbers, then commit:
       consumes `solid_editor`; `boolean_solid` consumes all of them.
 - [x] Every new public function has a failure test (Task 9 collects them).
 - [x] No global epsilon; every tolerance is a parameter.
-- [ ] Deviations 1–6 are acceptable to the reviewer.
+- [x] Deviations 1–6 are acceptable to the reviewer.

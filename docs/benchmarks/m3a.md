@@ -99,11 +99,14 @@ SSI 与 QA-9 随 M3b 交付。
 - **共面补丁不得触及宿主面边界**：与宿主面环相接的共面补丁会留下 T 型接点，
   诊断为 `Errc::not_closed`（`"assemble_solid: edge is used once"`），不做
   T 型传播或静默缝合。
-- **腔体归属用保守 AABB**：多壳结果（外壳 + 腔体壳）受支持，但腔体与外壳的
-  不相交判定是保守的 AABB 判定，不做精确壳-壳求交。
+- **腔体归属用 AABB 预检 + 点/接触探测**：多壳结果（外壳 + 腔体壳）受支持，
+  但腔体包含性与不相交判定先用保守的 AABB 预检，再做点/接触探测，不做精确
+  壳-壳求交。
 - **非流形接触是诊断失败**：边相接触的 L 形对称差诊断为
   `Errc::invalid_topology`，记录为失败而不是缝合。
-- **只接受单壳操作数**：两个输入都必须是单壳实体；多壳输入返回
+- **只接受单实体、单壳操作数**：每个输入必须恰好一个实体且该实体只有一个壳，
+  结果可为多壳。多实体输入返回 `Errc::unsupported`，消息为
+  `"boolean_solid: expected exactly one solid per operand"`；多壳输入返回
   `Errc::unsupported`，消息为
   `"boolean_solid: multi-shell operands are deferred to M3c"`。
 - **门禁状态**：QA-8 是 M3a 唯一失败的出口门禁，失败原因仅是性能——并、交、
