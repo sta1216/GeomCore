@@ -27,9 +27,11 @@ inline namespace v1 {
 // are open rings: the last point is not repeated. `normal` is the outward
 // normal of the fragment and is used to orient the face; an outer ring must
 // wind counter-clockwise about `normal`, and hole rings must wind clockwise.
-// The assembler welds coincident endpoints, builds the B-rep topology, groups
-// the fragments into closed components, and returns one solid per
-// outward-oriented component.
+// Every ring point must lie within `tol` of the plane through the first outer
+// point with normal `normal`; a non-planar ring is rejected with
+// `Errc::tolerance_violation`. The assembler welds coincident endpoints, builds
+// the B-rep topology, groups the fragments into closed components, and returns
+// one solid per outward-oriented component.
 //
 // Closed-solid convention: a component whose faces use every undirected edge
 // exactly twice, once in each direction, encloses a positive signed volume and
@@ -85,14 +87,15 @@ struct assemble_cell_hash {
   }
 };
 
-// Welds points within `tol` of an earlier point. Coordinates are snapped with
-// llround(x / tol) and the 27 neighbouring cells are searched. The cell
-// coordinate is clamped to +/-9e18 before llround: finite inputs can still make
-// x / tol overflow to infinity (a tiny tol and a huge coordinate), and
-// llround has undefined behaviour outside long long's range. Clamping keeps the
-// conversion defined; the exact-distance test below still decides whether the
-// point welds, so clamped points are not merged unless they are actually
-// within `tol`.
+// Welds points within `tol` of an earlier point. Coordinates are binned with
+// floor(x / tol), so any two points at distance <= tol land in the same cell or
+// in adjacent cells, and the 27 neighbouring cells are searched. The cell
+// coordinate is clamped to +/-9e18 before the conversion: finite inputs can
+// still make x / tol overflow to infinity (a tiny tol and a huge coordinate),
+// and converting an out-of-range floating value to long long is undefined
+// behaviour. Clamping keeps the conversion defined; the exact-distance test
+// below still decides whether the point welds, so clamped points are not merged
+// unless they are actually within `tol`.
 class assemble_welder {
  public:
   explicit assemble_welder(double tol) noexcept : tol_(tol) {}
@@ -126,6 +129,8 @@ class assemble_welder {
 
   const std::vector<Point3d>& points() const noexcept { return points_; }
 
+  double tolerance() const noexcept { return tol_; }
+
  private:
   assemble_cell cell_of(Point3d point) const noexcept {
     constexpr double kCellLimit = 9.0e18;
@@ -133,7 +138,7 @@ class assemble_welder {
       double scaled = coordinate / tol_;
       if (scaled > kCellLimit) scaled = kCellLimit;
       if (scaled < -kCellLimit) scaled = -kCellLimit;
-      return static_cast<std::int64_t>(std::llround(scaled));
+      return static_cast<std::int64_t>(std::floor(scaled));
     };
     return assemble_cell{snap(point[0]), snap(point[1]), snap(point[2])};
   }
@@ -206,6 +211,24 @@ inline Result<assemble_face_data> assemble_make_face(const AssembledFace& face,
   if (!std::isfinite(offset)) {
     return Error{Errc::non_finite,
                  "assemble_solid: face offset is not finite"};
+  }
+  // Every ring must lie on the plane selected by the supplied normal. Without
+  // this check, a non-planar input is silently projected onto the plane and can
+  // produce a plausible but wrong volume.
+  const double tolerance = welder.tolerance();
+  for (const std::vector<std::uint32_t>& ring : rings) {
+    for (const std::uint32_t index : ring) {
+      const Point3d point = welder.points()[index];
+      const double distance =
+          normal[0] * (point[0] - anchor[0]) +
+          normal[1] * (point[1] - anchor[1]) +
+          normal[2] * (point[2] - anchor[2]);
+      if (!std::isfinite(distance) || std::fabs(distance) > tolerance) {
+        return Error{
+            Errc::tolerance_violation,
+            "assemble_solid: face ring is not planar within tolerance"};
+      }
+    }
   }
   const Result<PlaneFrame> frame_result =
       make_plane_frame(Plane3{normal, offset});
@@ -550,10 +573,13 @@ inline Result<Brep> assemble_solid(std::span<const AssembledFace> faces,
         const std::uint32_t b = std::max(from, to);
         const auto found = edge_lookup.find(std::make_pair(a, b));
         const std::uint32_t edge_index = found->second;
+        // Pcurves follow the edge from v0 to v1, not the coedge traversal; the
+        // coedge's reversed flag already records traversal direction. This is
+        // the convention split_edge relies on.
         const Point2d p0 =
-            plane_frame_to_2d(data.frame, welder.points()[from]);
+            plane_frame_to_2d(data.frame, welder.points()[a]);
         const Point2d p1 =
-            plane_frame_to_2d(data.frame, welder.points()[to]);
+            plane_frame_to_2d(data.frame, welder.points()[b]);
         const std::uint32_t pcurve = editor.add_pcurve(Pcurve2d{p0, p1});
         coedges.push_back(
             CoedgeSpec{edge_ids[edge_index], from != a, pcurve, tol});

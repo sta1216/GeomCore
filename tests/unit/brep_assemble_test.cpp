@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include <geom/brep/assemble.hpp>
@@ -39,6 +40,37 @@ std::vector<AssembledFace> box_faces(Point3d lo, Point3d hi) {
 
 bool validate_solid(const Brep& brep) {
   return validate_topology(brep).ok() && validate_tolerances(brep).ok();
+}
+
+// Pcurves are stored in edge direction: p0 projects edge.v0 and p1 projects
+// edge.v1 into the coedge's face frame, regardless of coedge traversal.
+double pcurve_endpoint_error(const Brep& brep) {
+  double error = 0.0;
+  for (const CoedgeId coedge_id : brep.coedge_ids()) {
+    const Coedge& coedge = brep.coedge(coedge_id);
+    REQUIRE(coedge.pcurve != kNoGeometry);
+    const Edge& edge = brep.edge(coedge.edge);
+    const Face& face = brep.face(coedge.face);
+    REQUIRE(face.surface != kNoGeometry);
+    const auto* plane =
+        std::get_if<Plane3>(&brep.geometry().surfaces[face.surface]);
+    REQUIRE(plane != nullptr);
+    const Result<PlaneFrame> frame = make_plane_frame(*plane);
+    REQUIRE(frame.has_value());
+    const Point3d edge_start = brep.vertex(edge.v0).point;
+    const Point3d edge_end = brep.vertex(edge.v1).point;
+    const Point2d expected_start =
+        plane_frame_to_2d(frame.value(), edge_start);
+    const Point2d expected_end = plane_frame_to_2d(frame.value(), edge_end);
+    const Pcurve2d& pcurve = brep.geometry().pcurves[coedge.pcurve];
+    error = std::max(
+        {error,
+         std::hypot(pcurve.p0[0] - expected_start[0],
+                    pcurve.p0[1] - expected_start[1]),
+         std::hypot(pcurve.p1[0] - expected_end[0],
+                    pcurve.p1[1] - expected_end[1])});
+  }
+  return error;
 }
 
 Vec3d side_normal(Point3d a, Point3d b) {
@@ -131,6 +163,27 @@ TEST_CASE("assemble: six quads rebuild a closed box") {
   CHECK(brep.value().solid_count() == 1);
   CHECK(mass_properties(brep.value()).value().volume ==
         doctest::Approx(24.0).epsilon(1e-12));
+  CHECK(validate_solid(brep.value()));
+}
+
+TEST_CASE("assemble: a reversed outer ring is reoriented") {
+  auto faces = box_faces({0, 0, 0}, {2, 3, 4});
+  std::reverse(faces[0].outer.begin(), faces[0].outer.end());
+  const auto brep = assemble_solid(faces, 1e-9);
+  REQUIRE(brep.has_value());
+  CHECK(mass_properties(brep.value()).value().volume ==
+        doctest::Approx(24.0).epsilon(1e-12));
+  CHECK(validate_solid(brep.value()));
+}
+
+TEST_CASE("assemble: a reversed hole ring is reoriented") {
+  auto faces = square_hole_box_faces(0.0, 1.0);
+  std::reverse(faces[0].holes[0].begin(), faces[0].holes[0].end());
+  const auto brep = assemble_solid(faces, 1e-9);
+  REQUIRE(brep.has_value());
+  CHECK(mass_properties(brep.value()).value().volume ==
+        doctest::Approx(12.0).epsilon(1e-12));
+  CHECK(validate_solid(brep.value()));
 }
 
 TEST_CASE("assemble: a missing face is a diagnosed not_closed failure") {
@@ -139,7 +192,9 @@ TEST_CASE("assemble: a missing face is a diagnosed not_closed failure") {
   const auto brep = assemble_solid(faces, 1e-9);
   REQUIRE_FALSE(brep.has_value());
   CHECK(brep.error().code == Errc::not_closed);
-  CHECK(std::string_view(brep.error().message).find("edge") != std::string_view::npos);
+  CHECK(brep.error().context_a == 3u);
+  CHECK(std::string_view(brep.error().message) ==
+        "assemble_solid: edge is used once");
 }
 
 TEST_CASE("assemble: welding joins independently computed intersection points") {
@@ -165,6 +220,7 @@ TEST_CASE("assemble: keyhole notch assembles into a validated solid") {
   CHECK(brep.value().face_count() == 12);
   CHECK(brep.value().shell_count() == 1);
   CHECK(brep.value().solid_count() == 1);
+  CHECK(brep.value().geometry().surfaces.size() == 10u);
   CHECK(mass_properties(brep.value()).value().volume ==
         doctest::Approx(15.0).epsilon(1e-12));
   CHECK(validate_solid(brep.value()));
@@ -276,4 +332,47 @@ TEST_CASE("assemble: duplicate consecutive ring points weld away") {
   CHECK(brep.value().solid_count() == 1);
   CHECK(mass_properties(brep.value()).value().volume ==
         doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(validate_solid(brep.value()));
+}
+
+TEST_CASE("assemble: welder merges points exactly one tolerance apart") {
+  detail::assemble_welder welder(1e-9);
+  const auto first = welder.weld(Point3d{0.5e-9, 0.0, 0.0});
+  const auto second = welder.weld(Point3d{-0.5e-9, 0.0, 0.0});
+  REQUIRE(first.has_value());
+  REQUIRE(second.has_value());
+  CHECK(first.value() == second.value());
+  CHECK(welder.points().size() == 1);
+}
+
+TEST_CASE("assemble: a non-planar ring is rejected") {
+  auto faces = box_faces({0, 0, 0}, {1, 1, 1});
+  // Move the (0,0,1) corner out of the top plane in all three faces that
+  // share it. The side faces remain planar; the top face does not.
+  faces[0].outer[0] = Point3d{0.0, 0.0, 1.1};
+  faces[3].outer[3] = Point3d{0.0, 0.0, 1.1};
+  faces[5].outer[1] = Point3d{0.0, 0.0, 1.1};
+  const auto brep = assemble_solid(faces, 1e-9);
+  REQUIRE_FALSE(brep.has_value());
+  CHECK(brep.error().code == Errc::tolerance_violation);
+  CHECK(std::string_view(brep.error().message).find("planar") !=
+        std::string_view::npos);
+}
+
+TEST_CASE("assemble: pcurves follow edge direction and survive split_edge") {
+  const auto box = assemble_solid(box_faces({0, 0, 0}, {1, 1, 1}), 1e-9);
+  REQUIRE(box.has_value());
+  CHECK(pcurve_endpoint_error(box.value()) <= 1e-12);
+
+  const auto keyhole = assemble_solid(keyhole_box_faces(0.0, 1.0), 1e-9);
+  REQUIRE(keyhole.has_value());
+  CHECK(pcurve_endpoint_error(keyhole.value()) <= 1e-12);
+
+  SolidEditor editor(box.value());
+  const auto middle = editor.split_edge(box.value().edge_ids().front(), 0.5);
+  REQUIRE(middle.has_value());
+  const auto split = editor.commit();
+  REQUIRE(split.has_value());
+  CHECK(pcurve_endpoint_error(split.value()) <= 1e-12);
+  CHECK(validate_solid(split.value()));
 }
