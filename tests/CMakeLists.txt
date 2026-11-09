@@ -46,6 +46,7 @@ set(GEOM_TEST_SOURCES
   unit/brep_tolerance_test.cpp
   unit/brep_face_intersect_test.cpp
   unit/brep_face_query_test.cpp
+  unit/brep_inside_test.cpp
   unit/plane_frame_test.cpp
   unit/mass_properties_test.cpp
   unit/tessellate_planar_test.cpp
