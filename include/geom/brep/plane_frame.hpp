@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 
 #include <geom/core/result.hpp>
@@ -9,9 +10,10 @@ namespace geom {
 inline namespace v1 {
 
 // Orthonormal right-handed frame anchored on a plane: u x v = normal.
-// The basis depends only on the normal direction, so scaling a plane's normal
-// and offset together leaves the frame unchanged and every query against the
-// same geometric plane shares one frame.
+// The basis depends only on the normal direction, so positively scaling a
+// plane's normal and offset together leaves the frame unchanged; a negative
+// scale flips both normal and u. Every query against the same geometric plane
+// shares one frame.
 struct PlaneFrame {
   Point3d origin;
   Vec3d u;
@@ -21,10 +23,19 @@ struct PlaneFrame {
 
 namespace detail {
 
-// |v| must be nonzero; returns v / |v| computed with the scale-safe hypot.
+// Normalizes a nonzero finite vector. Scales by the largest magnitude
+// component first, so the intermediate length stays in [1, sqrt(3)] and
+// cannot overflow or underflow even for denormal or near-maximum inputs.
 inline Vec3d plane_frame_normalize(const Vec3d& v) noexcept {
-  const double h = std::hypot(v[0], v[1], v[2]);
-  return Vec3d{v[0] / h, v[1] / h, v[2] / h};
+  const double ax = std::fabs(v[0]);
+  const double ay = std::fabs(v[1]);
+  const double az = std::fabs(v[2]);
+  const double m = std::max({ax, ay, az});
+  const double x = v[0] / m;
+  const double y = v[1] / m;
+  const double z = v[2] / m;
+  const double h = std::sqrt(x * x + y * y + z * z);
+  return Vec3d{x / h, y / h, z / h};
 }
 
 // Builds an orthonormal right-handed basis (u, v) for the UNIT normal.
@@ -50,21 +61,35 @@ inline void plane_frame_basis(const Vec3d& normal, Vec3d& u, Vec3d& v) {
 
 }  // namespace detail
 
-// Validates the plane normal and builds its frame. A non-finite normal
-// component is rejected as non_finite; a zero normal as degenerate. The plane
-// offset never participates in validation: the resulting frame is valid for
-// any offset.
+// Validates the plane and builds its frame. A non-finite normal component or
+// a non-finite offset is rejected as non_finite; a zero normal as degenerate.
+// The offset must also produce a finite distance offset / |normal|, otherwise
+// the plane is rejected as non_finite. Both offset and distance are required
+// to be finite.
 inline Result<PlaneFrame> make_plane_frame(const Plane3& plane) {
   const Vec3d& raw = plane.normal;
   if (!std::isfinite(raw[0]) || !std::isfinite(raw[1]) || !std::isfinite(raw[2])) {
     return Error{Errc::non_finite, "plane normal has a non-finite component"};
   }
-  const double h = std::hypot(raw[0], raw[1], raw[2]);
-  if (h == 0.0) {
+  if (!std::isfinite(plane.offset)) {
+    return Error{Errc::non_finite, "plane offset is not finite"};
+  }
+  const double ax = std::fabs(raw[0]);
+  const double ay = std::fabs(raw[1]);
+  const double az = std::fabs(raw[2]);
+  const double m = std::max({ax, ay, az});
+  if (m == 0.0) {
     return Error{Errc::degenerate, "plane normal is zero"};
   }
-  const Vec3d normal{raw[0] / h, raw[1] / h, raw[2] / h};
-  const double distance = plane.offset / h;
+  const double x = raw[0] / m;
+  const double y = raw[1] / m;
+  const double z = raw[2] / m;
+  const double h = std::sqrt(x * x + y * y + z * z);
+  const Vec3d normal{x / h, y / h, z / h};
+  const double distance = (plane.offset / m) / h;
+  if (!std::isfinite(distance)) {
+    return Error{Errc::non_finite, "plane offset is too large for a finite frame"};
+  }
 
   PlaneFrame frame;
   frame.normal = normal;
