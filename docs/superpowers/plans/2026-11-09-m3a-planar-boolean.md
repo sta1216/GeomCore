@@ -795,14 +795,13 @@ TEST_CASE("assemble: welding joins independently computed intersection points") 
 **Step 1: Write the failing test**
 
 ```cpp
-TEST_CASE("boolean_solid: overlapping boxes, four operations") {
+TEST_CASE("boolean_solid: overlapping boxes, union/intersection/difference") {
   const Brep a = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, 1e-12).value();
   const Brep b = make_box(Point3d{1, 1, 1}, Point3d{3, 3, 3}, 1e-12).value();
   struct Case { SolidBooleanOp op; double volume; };
   for (const Case c : {Case{SolidBooleanOp::union_, 15.0},
                        Case{SolidBooleanOp::intersection, 1.0},
-                       Case{SolidBooleanOp::difference, 7.0},
-                       Case{SolidBooleanOp::symmetric_difference, 14.0}}) {
+                       Case{SolidBooleanOp::difference, 7.0}}) {
     const auto result = boolean_solid(a, b, c.op);
     REQUIRE(result.has_value());
     const Brep& out = result.value().brep;
@@ -812,6 +811,18 @@ TEST_CASE("boolean_solid: overlapping boxes, four operations") {
           doctest::Approx(c.volume).epsilon(1e-9));
     CHECK(out.solid_count() == 1);
   }
+}
+
+TEST_CASE("boolean_solid: symmetric difference of overlapping boxes is non-manifold") {
+  const Brep a = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, 1e-12).value();
+  const Brep b = make_box(Point3d{1, 1, 1}, Point3d{3, 3, 3}, 1e-12).value();
+  // The volume-14 symmetric difference is two L-shaped shells that touch along
+  // six edges (four faces per edge). A manifold single Brep cannot represent
+  // that, so the honest result is a diagnosed invalid_topology; do not weaken
+  // assemble_solid's non-manifold check to force a volume-14 solid.
+  const auto result = boolean_solid(a, b, SolidBooleanOp::symmetric_difference);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::invalid_topology);
 }
 
 TEST_CASE("boolean_solid: stacked boxes merge their shared face away") {
