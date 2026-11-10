@@ -1,9 +1,12 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <geom/brep/detail/ssi_solver.hpp>
 #include <limits>
+#include <string_view>
+#include <vector>
 
 using namespace geom::v1;
 
@@ -419,4 +422,341 @@ TEST_CASE("ssi: a displaced tangency seed does not converge") {
       refine_ssi_point(a.value(), b.value(), {0.5, -1.4707963267948966, 0.1, 0.1}, 1e-12);
   REQUIRE_FALSE(p.has_value());
   CHECK(p.error().code == Errc::numeric_failure);
+}
+
+namespace {
+
+constexpr double kTracePi = 3.141592653589793;
+
+SsiPoint traced_endpoint(const SsiSegment& segment, bool second) {
+  SsiPoint point;
+  point.ua = second ? segment.ub : segment.ua;
+  point.va = second ? segment.vb : segment.va;
+  point.p = second ? segment.b : segment.a;
+  return point;
+}
+
+void check_segment_certified(const SsiPatch& a, const SsiPatch& b, const SsiSegment& segment,
+                             double tolerance) {
+  const SsiPoint first = traced_endpoint(segment, false);
+  const SsiPoint second = traced_endpoint(segment, true);
+  CHECK(patch_contains(a, first.ua[0], first.ua[1]));
+  CHECK(patch_contains(a, second.ua[0], second.ua[1]));
+  CHECK(patch_contains(b, first.va[0], first.va[1]));
+  CHECK(patch_contains(b, second.va[0], second.va[1]));
+  CHECK(segment.residual >= 0.0);
+  CHECK(segment.residual <= tolerance);
+  // The stored residual is gap-only: the maximum of the two endpoint residuals,
+  // not a distance that could stand in for patch membership.
+  CHECK(segment.residual == std::max(ssi_residual(a, b, first), ssi_residual(a, b, second)));
+}
+
+}  // namespace
+
+TEST_CASE("ssi: trace closes the sphere-plane circle") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * kTracePi}, {-1.5, 1.5});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> seed = refine_ssi_point(a.value(), b.value(), {0.1, 0.2, 0.3, 0.4}, 1e-12);
+  REQUIRE(seed.has_value());
+  const Result<std::vector<SsiCurve>> traced =
+      trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9);
+  REQUIRE(traced.has_value());
+  REQUIRE(traced.value().size() == 1);
+
+  const SsiCurve& curve = traced.value().front();
+  CHECK(curve.closed);
+  CHECK(curve.segments.size() >= 8);
+  for (std::size_t i = 0; i < curve.segments.size(); ++i) {
+    const SsiSegment& segment = curve.segments[i];
+    check_segment_certified(a.value(), b.value(), segment, 1e-9);
+    // Every endpoint is on the unit circle in the plane z = 0. A vertex that
+    // was emitted from a raw prediction (or a stale seed) shows up here.
+    const double radius_a = std::sqrt(segment.a[0] * segment.a[0] + segment.a[1] * segment.a[1] +
+                                      segment.a[2] * segment.a[2]);
+    const double radius_b = std::sqrt(segment.b[0] * segment.b[0] + segment.b[1] * segment.b[1] +
+                                      segment.b[2] * segment.b[2]);
+    CHECK(std::fabs(radius_a - 1.0) < 1e-8);
+    CHECK(std::fabs(radius_b - 1.0) < 1e-8);
+    CHECK(std::fabs(segment.a[2]) < 1e-8);
+    CHECK(std::fabs(segment.b[2]) < 1e-8);
+    // Every emitted vertex is itself a refined point: re-refining its stored
+    // parameters reproduces it, so no unrefined prediction leaked into a
+    // segment.
+    const SsiPoint first = traced_endpoint(segment, false);
+    const Result<SsiPoint> again = refine_ssi_point(
+        a.value(), b.value(), {first.ua[0], first.ua[1], first.va[0], first.va[1]}, 1e-9);
+    REQUIRE(again.has_value());
+    for (int axis = 0; axis < 3; ++axis) CHECK(again.value().p[axis] == first.p[axis]);
+    // Adjacent segments share an endpoint bitwise, and the closing segment ends
+    // at the start vertex without duplicating it as an extra zero-length
+    // segment.
+    const SsiSegment& next = curve.segments[(i + 1) % curve.segments.size()];
+    for (int axis = 0; axis < 3; ++axis) CHECK(segment.b[axis] == next.a[axis]);
+    CHECK(segment.ub == next.ua);
+    CHECK(segment.vb == next.va);
+    // A duplicated closing vertex would show up as a zero-length segment.
+    CHECK(norm2(segment.b - segment.a) > 0.0);
+  }
+}
+
+TEST_CASE("ssi: trace stops at a bounded patch boundary") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {-0.5, 0.5}, {-0.5, 0.5});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> seed = refine_ssi_point(a.value(), b.value(), {0.1, 0.1, 0.2, 0.2}, 1e-12);
+  REQUIRE(seed.has_value());
+  const Result<std::vector<SsiCurve>> traced =
+      trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9);
+  REQUIRE(traced.has_value());
+  REQUIRE(traced.value().size() == 1);
+
+  const SsiCurve& curve = traced.value().front();
+  CHECK_FALSE(curve.closed);
+  CHECK(curve.segments.size() >= 2);
+  for (const SsiSegment& segment : curve.segments) {
+    check_segment_certified(a.value(), b.value(), segment, 1e-9);
+  }
+  // The curve must end where the patch does, not at a predicted point past the
+  // boundary: both open ends are refined vertices inside both patches.
+  const SsiSegment& first = curve.segments.front();
+  const SsiSegment& last = curve.segments.back();
+  CHECK(patch_contains(a.value(), first.ua[0], first.ua[1]));
+  CHECK(patch_contains(b.value(), first.va[0], first.va[1]));
+  CHECK(patch_contains(a.value(), last.ub[0], last.ub[1]));
+  CHECK(patch_contains(b.value(), last.vb[0], last.vb[1]));
+  CHECK(std::fabs(ssi_residual(a.value(), b.value(), traced_endpoint(last, true))) <= 1e-9);
+  // The arc is bounded by the narrow A patch (u in [-0.5, 0.5], v = 0), so its
+  // u coordinates must not run past the domain.
+  for (const SsiSegment& segment : curve.segments) {
+    CHECK(segment.ua[0] >= -0.5);
+    CHECK(segment.ua[0] <= 0.5);
+    CHECK(segment.ub[0] >= -0.5);
+    CHECK(segment.ub[0] <= 0.5);
+  }
+}
+
+TEST_CASE("ssi: traced segments are contiguous") {
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> seed = refine_ssi_point(a.value(), b.value(), {0.1, 0.1, 0.1, 0.1}, 1e-12);
+  REQUIRE(seed.has_value());
+  const Result<std::vector<SsiCurve>> traced =
+      trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9, 64);
+  REQUIRE(traced.has_value());
+  REQUIRE(traced.value().size() == 1);
+
+  const SsiCurve& curve = traced.value().front();
+  CHECK_FALSE(curve.closed);
+  CHECK(curve.segments.size() >= 2);
+  for (std::size_t i = 0; i + 1 < curve.segments.size(); ++i) {
+    for (int axis = 0; axis < 3; ++axis) {
+      CHECK(std::fabs(curve.segments[i].b[axis] - curve.segments[i + 1].a[axis]) < 1e-12);
+      CHECK(curve.segments[i].b[axis] == curve.segments[i + 1].a[axis]);
+    }
+    CHECK(curve.segments[i].ub == curve.segments[i + 1].ua);
+    CHECK(curve.segments[i].vb == curve.segments[i + 1].va);
+  }
+  for (const SsiSegment& segment : curve.segments) {
+    check_segment_certified(a.value(), b.value(), segment, 1e-9);
+  }
+}
+
+TEST_CASE("ssi: coincident seeds on one circle trace a single closed curve") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * kTracePi}, {-1.5, 1.5});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> seed = refine_ssi_point(a.value(), b.value(), {0.1, 0.2, 0.3, 0.4}, 1e-12);
+  const Result<SsiPoint> folded =
+      refine_ssi_point(a.value(), b.value(), {0.1 + 2 * kTracePi, 0.2, 0.3, 0.4}, 1e-12);
+  REQUIRE(seed.has_value());
+  REQUIRE(folded.has_value());
+  // The two seeds name the same point after the periodic fold, so only one
+  // curve is traced. The surviving seed is chosen by the deterministic seed
+  // ordering, so swapping the inputs cannot change the output.
+  const Result<std::vector<SsiCurve>> traced =
+      trace_ssi_curves(a.value(), b.value(), {seed.value(), folded.value()}, 1e-9);
+  const Result<std::vector<SsiCurve>> swapped =
+      trace_ssi_curves(a.value(), b.value(), {folded.value(), seed.value()}, 1e-9);
+  REQUIRE(traced.has_value());
+  REQUIRE(swapped.has_value());
+  REQUIRE(traced.value().size() == 1);
+  REQUIRE(swapped.value().size() == 1);
+  CHECK(traced.value().front().closed);
+  REQUIRE(traced.value().front().segments.size() == swapped.value().front().segments.size());
+  for (std::size_t i = 0; i < traced.value().front().segments.size(); ++i) {
+    const SsiSegment& one = traced.value().front().segments[i];
+    const SsiSegment& two = swapped.value().front().segments[i];
+    CHECK(one.ua == two.ua);
+    CHECK(one.ub == two.ub);
+    CHECK(one.va == two.va);
+    CHECK(one.vb == two.vb);
+    CHECK(one.residual == two.residual);
+    for (int axis = 0; axis < 3; ++axis) {
+      CHECK(one.a[axis] == two.a[axis]);
+      CHECK(one.b[axis] == two.b[axis]);
+    }
+  }
+}
+
+TEST_CASE("ssi: two disjoint intersection segments trace two curves") {
+  const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{cylinder}, {0, 2 * kTracePi}, {-1, 1});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, 0.5}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> right =
+      refine_ssi_point(a.value(), b.value(), {kTracePi / 3.0, 0.0, 0.0, 0.8660254037844386}, 1e-12);
+  const Result<SsiPoint> left = refine_ssi_point(
+      a.value(), b.value(), {-kTracePi / 3.0, 0.0, 0.0, -0.8660254037844386}, 1e-12);
+  REQUIRE(right.has_value());
+  REQUIRE(left.has_value());
+  const Result<std::vector<SsiCurve>> traced =
+      trace_ssi_curves(a.value(), b.value(), {right.value(), left.value()}, 1e-9);
+  REQUIRE(traced.has_value());
+  REQUIRE(traced.value().size() == 2);
+  for (const SsiCurve& curve : traced.value()) {
+    CHECK_FALSE(curve.closed);
+    CHECK(curve.segments.size() >= 2);
+    for (const SsiSegment& segment : curve.segments) {
+      check_segment_certified(a.value(), b.value(), segment, 1e-9);
+    }
+    // Each curve is one vertical line: the cylinder angle is constant.
+    const double u = curve.segments.front().ua[0];
+    CHECK(std::fabs(std::fabs(u) - kTracePi / 3.0) < 1e-9);
+    for (const SsiSegment& segment : curve.segments) {
+      CHECK(std::fabs(segment.ua[0] - u) < 1e-12);
+    }
+  }
+  // Deterministic output: the curves are ordered by their first vertex.
+  const SsiCurve& first_curve = traced.value()[0];
+  const SsiCurve& second_curve = traced.value()[1];
+  CHECK(first_curve.segments.front().ua < second_curve.segments.front().ua);
+}
+
+TEST_CASE("ssi: an unrefinable seed is skipped without corrupting the trace") {
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> good = refine_ssi_point(a.value(), b.value(), {0.1, 0.1, 0.1, 0.1}, 1e-12);
+  REQUIRE(good.has_value());
+  SsiPoint bad;
+  bad.ua = {5.0, 5.0};
+  bad.va = {5.0, 5.0};
+  for (const std::vector<SsiPoint>& seeds :
+       {std::vector<SsiPoint>{bad, good.value()}, std::vector<SsiPoint>{good.value(), bad}}) {
+    const Result<std::vector<SsiCurve>> traced =
+        trace_ssi_curves(a.value(), b.value(), seeds, 1e-9, 64);
+    REQUIRE(traced.has_value());
+    REQUIRE(traced.value().size() == 1);
+    CHECK_FALSE(traced.value().front().closed);
+    CHECK(traced.value().front().segments.size() >= 2);
+  }
+}
+
+TEST_CASE("ssi: a closed trace exhausts a three-step budget") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * kTracePi}, {-1.5, 1.5});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> seed = refine_ssi_point(a.value(), b.value(), {0.1, 0.2, 0.3, 0.4}, 1e-12);
+  REQUIRE(seed.has_value());
+  const Result<std::vector<SsiCurve>> traced =
+      trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9, 3);
+  REQUIRE_FALSE(traced.has_value());
+  CHECK(traced.error().code == Errc::numeric_failure);
+  CHECK(std::string_view(traced.error().message) == "trace_ssi_curves: step budget exhausted");
+}
+
+TEST_CASE("ssi: trace validates tolerance and step budget") {
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> seed = refine_ssi_point(a.value(), b.value(), {0.1, 0.1, 0.1, 0.1}, 1e-12);
+  REQUIRE(seed.has_value());
+  for (const double tolerance :
+       {0.0, -0.0, -1e-9, std::numeric_limits<double>::quiet_NaN(),
+        std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity()}) {
+    const Result<std::vector<SsiCurve>> traced =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, tolerance);
+    REQUIRE_FALSE(traced.has_value());
+    CHECK(traced.error().code == Errc::tolerance_violation);
+  }
+  // The tolerance outranks a bad budget, matching refine_ssi_point.
+  const Result<std::vector<SsiCurve>> ordered =
+      trace_ssi_curves(a.value(), b.value(), {seed.value()}, 0.0, 0);
+  REQUIRE_FALSE(ordered.has_value());
+  CHECK(ordered.error().code == Errc::tolerance_violation);
+  for (const int budget : {0, -1, -4096}) {
+    const Result<std::vector<SsiCurve>> traced =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9, budget);
+    REQUIRE_FALSE(traced.has_value());
+    CHECK(traced.error().code == Errc::numeric_failure);
+  }
+}
+
+TEST_CASE("ssi: trace output is independent of seed order") {
+  const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{cylinder}, {0, 2 * kTracePi}, {-1, 1});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, 0.5}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> right =
+      refine_ssi_point(a.value(), b.value(), {kTracePi / 3.0, 0.0, 0.0, 0.8660254037844386}, 1e-12);
+  const Result<SsiPoint> left = refine_ssi_point(
+      a.value(), b.value(), {-kTracePi / 3.0, 0.0, 0.0, -0.8660254037844386}, 1e-12);
+  REQUIRE(right.has_value());
+  REQUIRE(left.has_value());
+  const Result<std::vector<SsiCurve>> forward =
+      trace_ssi_curves(a.value(), b.value(), {right.value(), left.value()}, 1e-9);
+  const Result<std::vector<SsiCurve>> reversed =
+      trace_ssi_curves(a.value(), b.value(), {left.value(), right.value()}, 1e-9);
+  REQUIRE(forward.has_value());
+  REQUIRE(reversed.has_value());
+  REQUIRE(forward.value().size() == reversed.value().size());
+  for (std::size_t curve_index = 0; curve_index < forward.value().size(); ++curve_index) {
+    const SsiCurve& first = forward.value()[curve_index];
+    const SsiCurve& second = reversed.value()[curve_index];
+    CHECK(first.closed == second.closed);
+    REQUIRE(first.segments.size() == second.segments.size());
+    for (std::size_t i = 0; i < first.segments.size(); ++i) {
+      const SsiSegment& one = first.segments[i];
+      const SsiSegment& two = second.segments[i];
+      for (int axis = 0; axis < 3; ++axis) {
+        CHECK(one.a[axis] == two.a[axis]);
+        CHECK(one.b[axis] == two.b[axis]);
+      }
+      CHECK(one.ua == two.ua);
+      CHECK(one.ub == two.ub);
+      CHECK(one.va == two.va);
+      CHECK(one.vb == two.vb);
+      CHECK(one.residual == two.residual);
+    }
+  }
 }
