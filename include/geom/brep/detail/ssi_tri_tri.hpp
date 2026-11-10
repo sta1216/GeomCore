@@ -204,12 +204,22 @@ inline TriTriResult ssi_tri_result_from_points(const std::array<Point3d, 8>& poi
 
 }  // namespace detail
 
-// Intersects the closed triangles (p0, p1, p2) and (q0, q1, q2). The tolerance
-// is the only geometric authority; there is no global epsilon. Degenerate or
-// non-finite input, and any invalid tolerance, classify as touching. Coplanar
-// triangles always classify as coplanar, even when they are disjoint. Segment
-// endpoints are ordered lexicographically by (x, y, z) for determinism; for a
-// touching result a and b both hold the contact point.
+// Intersects the closed triangles (p0, p1, p2) and (q0, q1, q2).
+//
+// The tolerance is the only geometric authority; there is no global epsilon.
+// It must be finite and strictly positive: zero, negative, NaN and infinity all
+// classify as touching. The six vertices must be finite, and the two triangles
+// should have coordinates of comparable scale (within roughly 1e150 of each
+// other); extreme mixed-scale input may underflow in the normalized frame.
+// The call is normalized into a power-of-two frame before any geometric
+// predicate is evaluated, so ordinary finite coordinates cannot overflow or
+// underflow the cross/dot products. A tolerance that underflows to zero in
+// that frame is allowed, and only exact coplanarity then counts.
+//
+// Degenerate or non-finite input classifies as touching. Coplanar triangles
+// always classify as coplanar, even when they are disjoint. Segment endpoints
+// are ordered lexicographically by (x, y, z) for determinism; for a touching
+// result a and b both hold the contact point.
 inline TriTriResult tri_tri_intersect(Point3d p0, Point3d p1, Point3d p2, Point3d q0, Point3d q1,
                                       Point3d q2, double tolerance) {
   TriTriResult result;
@@ -217,10 +227,35 @@ inline TriTriResult tri_tri_intersect(Point3d p0, Point3d p1, Point3d p2, Point3
     result.kind = TriTriKind::touching;
     return result;
   }
-  if (!(tolerance >= 0.0) || !std::isfinite(tolerance)) {
+  if (!(tolerance > 0.0) || !std::isfinite(tolerance)) {
     result.kind = TriTriKind::touching;
     return result;
   }
+
+  // Choose a power of two that puts the largest coordinate in [1, 2). The
+  // scale stays finite for every finite input because exponent - 1 <= 1023.
+  const std::array<Point3d, 6> input{p0, p1, p2, q0, q1, q2};
+  double max_abs = 0.0;
+  for (const Point3d& p : input) {
+    max_abs = std::max({max_abs, std::fabs(p[0]), std::fabs(p[1]), std::fabs(p[2])});
+  }
+  if (max_abs == 0.0) {
+    result.kind = TriTriKind::touching;
+    return result;
+  }
+  int exponent = 0;
+  std::frexp(max_abs, &exponent);
+  const double scale = std::ldexp(1.0, exponent - 1);
+  const double tol = tolerance / scale;
+  const auto rescale = [scale](Point3d p) {
+    return Point3d{p[0] / scale, p[1] / scale, p[2] / scale};
+  };
+  p0 = rescale(p0);
+  p1 = rescale(p1);
+  p2 = rescale(p2);
+  q0 = rescale(q0);
+  q1 = rescale(q1);
+  q2 = rescale(q2);
 
   const Vec3d np = cross(p1 - p0, p2 - p0);
   const Vec3d nq = cross(q1 - q0, q2 - q0);
@@ -228,8 +263,8 @@ inline TriTriResult tri_tri_intersect(Point3d p0, Point3d p1, Point3d p2, Point3
     result.kind = TriTriKind::touching;
     return result;
   }
-  if (detail::ssi_tri_degenerate(p0, p1, p2, np, tolerance) ||
-      detail::ssi_tri_degenerate(q0, q1, q2, nq, tolerance)) {
+  if (detail::ssi_tri_degenerate(p0, p1, p2, np, tol) ||
+      detail::ssi_tri_degenerate(q0, q1, q2, nq, tol)) {
     result.kind = TriTriKind::touching;
     return result;
   }
@@ -243,18 +278,18 @@ inline TriTriResult tri_tri_intersect(Point3d p0, Point3d p1, Point3d p2, Point3
     const Point3d qi = i == 0 ? q0 : (i == 1 ? q1 : q2);
     dq[i] = detail::ssi_tri_signed_distance(pi, q0, nq);
     dp[i] = detail::ssi_tri_signed_distance(qi, p0, np);
-    all_q_near = all_q_near && std::fabs(dq[i]) <= tolerance;
-    all_p_near = all_p_near && std::fabs(dp[i]) <= tolerance;
+    all_q_near = all_q_near && std::fabs(dq[i]) <= tol;
+    all_p_near = all_p_near && std::fabs(dp[i]) <= tol;
   }
   if (all_q_near || all_p_near) {
     result.kind = TriTriKind::coplanar;
     return result;
   }
 
-  const bool p_above = dq[0] > tolerance && dq[1] > tolerance && dq[2] > tolerance;
-  const bool p_below = dq[0] < -tolerance && dq[1] < -tolerance && dq[2] < -tolerance;
-  const bool q_above = dp[0] > tolerance && dp[1] > tolerance && dp[2] > tolerance;
-  const bool q_below = dp[0] < -tolerance && dp[1] < -tolerance && dp[2] < -tolerance;
+  const bool p_above = dq[0] > tol && dq[1] > tol && dq[2] > tol;
+  const bool p_below = dq[0] < -tol && dq[1] < -tol && dq[2] < -tol;
+  const bool q_above = dp[0] > tol && dp[1] > tol && dp[2] > tol;
+  const bool q_below = dp[0] < -tol && dp[1] < -tol && dp[2] < -tol;
   if (p_above || p_below || q_above || q_below) {
     return result;
   }
@@ -262,30 +297,38 @@ inline TriTriResult tri_tri_intersect(Point3d p0, Point3d p1, Point3d p2, Point3
   const int q_axis = detail::ssi_tri_dominant_axis(nq);
   std::array<Point3d, 8> p_points{};
   std::size_t p_count = 0;
-  detail::ssi_tri_collect_edge(p0, p1, dq[0], dq[1], tolerance, p_points, p_count);
-  detail::ssi_tri_collect_edge(p1, p2, dq[1], dq[2], tolerance, p_points, p_count);
-  detail::ssi_tri_collect_edge(p2, p0, dq[2], dq[0], tolerance, p_points, p_count);
+  detail::ssi_tri_collect_edge(p0, p1, dq[0], dq[1], tol, p_points, p_count);
+  detail::ssi_tri_collect_edge(p1, p2, dq[1], dq[2], tol, p_points, p_count);
+  detail::ssi_tri_collect_edge(p2, p0, dq[2], dq[0], tol, p_points, p_count);
 
   const int p_axis = detail::ssi_tri_dominant_axis(np);
   std::array<Point3d, 8> q_points{};
   std::size_t q_count = 0;
-  detail::ssi_tri_collect_edge(q0, q1, dp[0], dp[1], tolerance, q_points, q_count);
-  detail::ssi_tri_collect_edge(q1, q2, dp[1], dp[2], tolerance, q_points, q_count);
-  detail::ssi_tri_collect_edge(q2, q0, dp[2], dp[0], tolerance, q_points, q_count);
+  detail::ssi_tri_collect_edge(q0, q1, dp[0], dp[1], tol, q_points, q_count);
+  detail::ssi_tri_collect_edge(q1, q2, dp[1], dp[2], tol, q_points, q_count);
+  detail::ssi_tri_collect_edge(q2, q0, dp[2], dp[0], tol, q_points, q_count);
 
   std::array<Point3d, 8> inside{};
   std::size_t inside_count = 0;
   for (std::size_t i = 0; i < p_count; ++i) {
-    if (detail::ssi_tri_point_in_triangle(p_points[i], q0, q1, q2, q_axis, tolerance)) {
-      detail::ssi_tri_add_point(inside, inside_count, p_points[i], tolerance);
+    if (detail::ssi_tri_point_in_triangle(p_points[i], q0, q1, q2, q_axis, tol)) {
+      detail::ssi_tri_add_point(inside, inside_count, p_points[i], tol);
     }
   }
   for (std::size_t i = 0; i < q_count; ++i) {
-    if (detail::ssi_tri_point_in_triangle(q_points[i], p0, p1, p2, p_axis, tolerance)) {
-      detail::ssi_tri_add_point(inside, inside_count, q_points[i], tolerance);
+    if (detail::ssi_tri_point_in_triangle(q_points[i], p0, p1, p2, p_axis, tol)) {
+      detail::ssi_tri_add_point(inside, inside_count, q_points[i], tol);
     }
   }
-  return detail::ssi_tri_result_from_points(inside, inside_count);
+
+  result = detail::ssi_tri_result_from_points(inside, inside_count);
+  if (result.kind == TriTriKind::segment || result.kind == TriTriKind::touching) {
+    for (int i = 0; i < 3; ++i) {
+      result.a[i] *= scale;
+      result.b[i] *= scale;
+    }
+  }
+  return result;
 }
 
 }  // namespace v1

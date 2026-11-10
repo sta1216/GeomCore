@@ -95,15 +95,16 @@ TEST_CASE("ssi: disjoint coplanar triangles are still coplanar") {
   CHECK(r.kind == TriTriKind::coplanar);
 }
 
-TEST_CASE("ssi: invalid tolerance is touching") {
-  const TriTriResult nan_tol =
-      tri_tri_intersect(Point3d{-1, 0, 0}, Point3d{1, 0, 0}, Point3d{0, 1, 0}, Point3d{0, -1, -1},
-                        Point3d{0, 1, -1}, Point3d{0, 1, 1}, std::nan(""));
-  CHECK(nan_tol.kind == TriTriKind::touching);
-  const TriTriResult negative_tol =
-      tri_tri_intersect(Point3d{-1, 0, 0}, Point3d{1, 0, 0}, Point3d{0, 1, 0}, Point3d{0, -1, -1},
-                        Point3d{0, 1, -1}, Point3d{0, 1, 1}, -1e-12);
-  CHECK(negative_tol.kind == TriTriKind::touching);
+TEST_CASE("ssi: only finite positive tolerance is accepted") {
+  const auto intersect = [](double tolerance) {
+    return tri_tri_intersect(Point3d{-1, 0, 0}, Point3d{1, 0, 0}, Point3d{0, 1, 0},
+                             Point3d{0, -1, -1}, Point3d{0, 1, -1}, Point3d{0, 1, 1}, tolerance);
+  };
+  CHECK(intersect(0.0).kind == TriTriKind::touching);
+  CHECK(intersect(-0.0).kind == TriTriKind::touching);
+  CHECK(intersect(-1e-12).kind == TriTriKind::touching);
+  CHECK(intersect(std::nan("")).kind == TriTriKind::touching);
+  CHECK(intersect(std::numeric_limits<double>::infinity()).kind == TriTriKind::touching);
 }
 
 TEST_CASE("ssi: a non-finite vertex makes the intersection touching") {
@@ -141,4 +142,81 @@ TEST_CASE("ssi: tolerance is the only authority for near-coplanar input") {
   };
   CHECK(intersect(1e-9).kind == TriTriKind::none);
   CHECK(intersect(1e-3).kind == TriTriKind::coplanar);
+}
+
+TEST_CASE("ssi: detail point-in-triangle includes exactly the tolerance band") {
+  const double tol = 1e-6;
+  const Point3d t0{0, 0, 0};
+  const Point3d t1{1, 0, 0};
+  const Point3d t2{0, 1, 0};
+  CHECK(detail::ssi_tri_point_in_triangle(Point3d{0.25, -0.5 * tol, 0}, t0, t1, t2, 2, tol));
+  CHECK_FALSE(detail::ssi_tri_point_in_triangle(Point3d{0.25, -1.5 * tol, 0}, t0, t1, t2, 2, tol));
+}
+
+TEST_CASE("ssi: detail degeneracy accepts an area above tolerance squared") {
+  const double tol = 1e-3;
+  const Point3d p0{0, 0, 0};
+  const Point3d p1{1, 0, 0};
+  const Point3d p2{0.5, 2e-5, 0};
+  const Vec3d normal = cross(p1 - p0, p2 - p0);
+  // Area 1e-5 lies between tol^2 (1e-6) and tol (1e-3).
+  CHECK_FALSE(detail::ssi_tri_degenerate(p0, p1, p2, normal, tol));
+}
+
+TEST_CASE("ssi: detail degeneracy rejects an edge shorter than tolerance") {
+  const double tol = 1e-3;
+  const Point3d p0{0, 0, 0};
+  const Point3d p1{5e-4, 0, 0};
+  const Point3d p2{0, 1, 0};
+  const Vec3d normal = cross(p1 - p0, p2 - p0);
+  // Edge 5e-4 is at most tol, while the area 2.5e-4 exceeds tol^2.
+  CHECK(detail::ssi_tri_degenerate(p0, p1, p2, normal, tol));
+}
+
+TEST_CASE("ssi: coplanar is detected from either triangle's plane") {
+  // Tiny P lies within tol of large tilted Q's plane; Q's vertices are far
+  // from P's plane (z = 0).
+  const TriTriResult tiny_near_q =
+      tri_tri_intersect(Point3d{0, 0, 0}, Point3d{1e-3, 0, 0}, Point3d{0, 1e-3, 0},
+                        Point3d{0, 0, 0}, Point3d{1000, 0, 1}, Point3d{0, 1000, 0}, 1e-6);
+  CHECK(tiny_near_q.kind == TriTriKind::coplanar);
+
+  // Mirror case: tiny Q lies within tol of large tilted P's plane.
+  const TriTriResult tiny_near_p =
+      tri_tri_intersect(Point3d{0, 0, 0}, Point3d{1000, 0, 1}, Point3d{0, 1000, 0},
+                        Point3d{0, 0, 0}, Point3d{1e-3, 0, 0}, Point3d{0, 1e-3, 0}, 1e-6);
+  CHECK(tiny_near_p.kind == TriTriKind::coplanar);
+}
+
+TEST_CASE("ssi: large coordinates still classify") {
+  const double s = 1e200;
+  const TriTriResult crossing =
+      tri_tri_intersect(Point3d{-s, 0, 0}, Point3d{s, 0, 0}, Point3d{0, s, 0}, Point3d{0, -s, -s},
+                        Point3d{0, s, -s}, Point3d{0, s, s}, 1e-12);
+  REQUIRE(crossing.kind == TriTriKind::segment);
+  CHECK(crossing.a[0] == 0.0);
+  CHECK(crossing.a[1] == 0.0);
+  CHECK(crossing.b[0] == 0.0);
+  CHECK(std::fabs(crossing.b[1] - s) <= 1e188);
+
+  const TriTriResult separated =
+      tri_tri_intersect(Point3d{0, 0, 0}, Point3d{s, 0, 0}, Point3d{0, s, 0}, Point3d{0, 0, s},
+                        Point3d{s, 0, s}, Point3d{0, s, s}, 1e-12);
+  CHECK(separated.kind == TriTriKind::none);
+}
+
+TEST_CASE("ssi: small coordinates still classify when the tolerance is scaled") {
+  const double s = 1e-100;
+  const auto intersect = [s](double tolerance) {
+    return tri_tri_intersect(Point3d{-s, 0, 0}, Point3d{s, 0, 0}, Point3d{0, s, 0},
+                             Point3d{0, -s, -s}, Point3d{0, s, -s}, Point3d{0, s, s}, tolerance);
+  };
+  const TriTriResult crossing = intersect(1e-112);
+  REQUIRE(crossing.kind == TriTriKind::segment);
+  CHECK(std::fabs(crossing.a[1]) <= 1e-112);
+  CHECK(std::fabs(crossing.b[1] - s) <= 1e-112);
+
+  // At an absolute tolerance far above the geometry the triangle is
+  // degenerate, so the result is conservatively touching.
+  CHECK(intersect(1e-12).kind == TriTriKind::touching);
 }
