@@ -1983,37 +1983,27 @@ inline constexpr std::size_t kSsiDriverNoSeed = static_cast<std::size_t>(-1);
 // branches (~0.6 apart at z=0.4) into one curve.
 inline std::vector<SsiPoint> ssi_driver_curve_seeds(
     const SsiPatch& a, const SsiPatch& b, const std::vector<SsiPoint>& seeds,
-    const std::vector<std::array<std::size_t, 2>>& segments, double seed_tolerance,
-    double max_chord_error_a = 0.0, double max_chord_error_b = 0.0) {
-  // The patch pair is kept in the interface for symmetry with the tracing
-  // helpers; the union itself only compares the refined 3D endpoints.
-  (void)a;
-  (void)b;
+    const std::vector<std::array<std::size_t, 2>>& segments, double seed_tolerance) {
   const std::size_t count = seeds.size();
   std::vector<std::size_t> parent(count);
   for (std::size_t index = 0; index < count; ++index) parent[index] = index;
 
-  // The tessellation, not the solver tolerance, bounds how far apart two
-  // endpoints that name the same intersection point can be: adaptive leaves
-  // create hanging nodes, so segments from neighbouring triangle pairs meet
-  // about one chord error apart. The cluster radius has to cover that error or
-  // one loop is reported as several arcs. The cost is that two genuinely
-  // distinct branches closer than 2*chord_error merge; that near-tangency case
-  // is diagnosed by the Task 6 predicates and recorded as an M3b-1 limitation.
-  seed_tolerance =
-      std::max(seed_tolerance, 1.5 * std::max(max_chord_error_a, max_chord_error_b));
-
-  // Near a pole the parameter slide can spread duplicate seeds a few times
-  // farther than one chord error even though their 3D points still coincide,
-  // so the radius also gets a small fraction of the smaller patch diagonal.
-  // It stays well below the spacing of distinct branches (about 0.6 on the
-  // test torus).
+  // The tessellation, not the solver tolerance, spreads the refined endpoints
+  // that name one intersection point: adjacent triangle pairs can land a small
+  // distance apart along the curve, and near a crest or a pole the Newton slide
+  // makes that spread larger still. A small fraction of the smaller patch's 3D
+  // bounding-box diagonal covers the spread while staying below the separation
+  // of genuinely distinct branches: the two torus circles at z=0.499 are 0.063
+  // apart and the radius there is 0.050, while the 0.6 separation at z=0.4 has
+  // a wide margin. The cost is that branches closer than twice the radius can
+  // still merge; that near-tangency case is diagnosed by the Task 6 predicates
+  // and is a known M3b-1 limitation.
   const Box3d bounds_a = patch_bounds(a, seed_tolerance);
   const Box3d bounds_b = patch_bounds(b, seed_tolerance);
   if (!bounds_a.is_empty() && !bounds_b.is_empty()) {
     const double diagonal_a = norm2(bounds_a.hi - bounds_a.lo);
     const double diagonal_b = norm2(bounds_b.hi - bounds_b.lo);
-    seed_tolerance = std::max(seed_tolerance, 0.01 * std::min(diagonal_a, diagonal_b));
+    seed_tolerance = std::max(seed_tolerance, 0.007 * std::min(diagonal_a, diagonal_b));
   }
 
   // A widened radius can also reach across to a different branch that passes

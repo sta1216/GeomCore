@@ -94,12 +94,12 @@ inline SsiIssue ssi_driver_issue(SsiDiagnostic code, const char* message) noexce
 // per mesh segment. The work counters are deliberately left at their zero-work
 // defaults: this driver only produces the curves and the diagnostics.
 inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOptions& options) {
-  // The seed clustering assumes at least 16 cells per patch side: coarser
+  // The seed clustering assumes at least 64 cells per patch side: coarser
   // meshes make neighbouring triangle pair seeds land far enough apart that one
   // loop splits into duplicate, argument-order-dependent curves. The floor is
   // part of this task's contract; Task 9 extends the general option checks.
-  if (options.max_depth < 4) {
-    return Error{Errc::unsupported, "ssi: max_depth must be at least 4"};
+  if (options.max_depth < 6) {
+    return Error{Errc::unsupported, "ssi: max_depth must be at least 6"};
   }
   SsiResult result;
   const double tolerance = options.tolerance;
@@ -212,9 +212,8 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
 
   const double seed_tolerance =
       std::max(64.0 * tolerance, 1e-9 * std::max(diagonal_a, diagonal_b));
-  const std::vector<SsiPoint> representatives = detail::ssi_driver_curve_seeds(
-      a, b, seeds, segments, seed_tolerance, patch_mesh_a.max_chord_error,
-      patch_mesh_b.max_chord_error);
+  const std::vector<SsiPoint> representatives =
+      detail::ssi_driver_curve_seeds(a, b, seeds, segments, seed_tolerance);
   Result<std::vector<SsiCurve>> curves = trace_ssi_curves(a, b, representatives, tolerance);
   if (!curves.has_value()) return curves.error();
   result.curves = std::move(curves.value());
