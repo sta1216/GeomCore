@@ -41,9 +41,12 @@ M3b-1 采用选项 3。交付物是 header-only 的 `geom/brep/ssi.hpp` 与
 - **横截输出**：有序折线，每段 `residual ≤ tolerance`，端点为精化后的公共点；
   曲线按首点、参数与段数排序，保证同一输入位级确定。
 - **退化诊断**：重合 → `coincident`；相切 → `tangent_contact`；补丁退化 →
-  `degenerate_patch`；种子不收敛/预算耗尽/容差低于坐标分辨率 → `no_convergence`。
-  诊断绝不静默返回空集。
-- **相切/重合判定**：先比较 `SurfaceGeometry` 变体与载体（NURBS 不走重合捷径），
+  `degenerate_patch`；种子不收敛或容差低于坐标分辨率 → `no_convergence`；段预算耗尽 →
+  `numeric_failure`（`"ssi: segment budget exhausted"`）。诊断绝不静默返回空集：
+  即使细分后没有任何段（例如切入深度低于三角化分辨率，或 NURBS 自身重合且无重合谓词），
+  只要三角形对报告过接触，也返回 `no_convergence`（`"ssi: no intersection curve could be certified
+  at this tolerance"`）而不是空结果。
+- **相切/重合判定**：先比较 `SurfaceGeometry` 变体与载体（NURBS 没有重合谓词，自身重合靠空曲线诊断兜底，绝不返回空集），
   再在 9×9 参数网格上做有符号距离与法向对齐检查；相切另做 21×21 单侧符号测试，
   几何带为 `max(1e-12·(1+max|p|), 0.05·tolerance)`。
 - **细分**：弦高容差 `max(1e-3·diagonal, 64·tolerance)`，自适应四叉树每格取 9 个

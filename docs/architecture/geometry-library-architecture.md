@@ -1188,12 +1188,12 @@ Windows 10 19045、MSVC 19.44、Release。因此 **M3a 功能范围已达成，Q
 （实现取舍见 ADR-0024）：自适应细分 + AABB 宽相 + 三角-三角种子 + 四参数 Newton +
 3D 分量聚类 + 周期缝感知闭合。输入是未修剪的参数补丁；横截相交输出有序折线且每段
 `residual ≤ tolerance`；相切、重合、退化补丁与不收敛返回 `SsiIssue` 诊断码，不静默
-返回空集；追踪在参数域边界停止，精确边界求交与边拆分留给 M3b-2；`max_depth` 下限为
+返回空集（无段但三角对报告过接触时返回 `no_convergence`）；段预算耗尽返回 `numeric_failure`；追踪在参数域边界停止，精确边界求交与边拆分留给 M3b-2；`max_depth` 下限为
 6，容差下限为 `2·eps·max(1,max|corner|)`，`rejected_segments` 是
 `max(0, extracted - accepted)` 的饱和差。QA-9 语料 200/200 例（球-平面极点相切、
 不同写法/尺度的重合平面、同轴等半径圆柱、圆环-平面相切）全部被诊断（100
 `tangent_contact` + 100 `coincident`），无无效输出；
-Debug 与 Release 各 671 个用例、549,427 条断言全绿，`/W4 /WX /utf-8` 下零警告。
+Debug 与 Release 各 673 个用例、549,443 条断言全绿，`/W4 /WX /utf-8` 下零警告。
 **验收状态（2026-11-11 实测，见 `docs/benchmarks/m3b-ssi.md`）**：QA-9 基准 FAIL，
 单位球-平面 1000 次横截调用中位数 15.91 ms/对（min 9.39 ms、max 24.48 ms），目标
 100 µs/对，约 159 倍；正确性通过（1000 次调用各 1 条曲线，共 31,000 段，最大残差

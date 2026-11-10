@@ -903,3 +903,32 @@ TEST_CASE("ssi: curves are ordered by their first point") {
   CHECK(std::fabs(flipped_lower[1] + 0.8660254037844386) < 1e-9);
   CHECK(std::fabs(flipped_upper[1] - 0.8660254037844386) < 1e-9);
 }
+
+TEST_CASE("ssi: a cut below the tessellation resolution is diagnosed") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846}, {-0.5 * 3.14159265358979323846, 0.5 * 3.14159265358979323846});
+  const Result<SsiPatch> b = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 1.0 - 1e-10}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  REQUIRE(result.has_value());
+  CHECK(result.value().curves.empty());
+  REQUIRE(result.value().issues.size() == 1);
+  CHECK(result.value().issues[0].code == SsiDiagnostic::no_convergence);
+  CHECK(result.value().candidate_pairs > 0);
+}
+
+TEST_CASE("ssi: coincident NURBS patches are diagnosed, not silently empty") {
+  const NurbsSurface patch = planar_nurbs();
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{patch}, {0, 1}, {0, 1});
+  const Result<SsiPatch> b = make_ssi_patch(SurfaceGeometry{patch}, {0, 1}, {0, 1});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  REQUIRE(result.has_value());
+  CHECK(result.value().curves.empty());
+  REQUIRE(result.value().issues.size() == 1);
+  CHECK(result.value().issues[0].code == SsiDiagnostic::no_convergence);
+}

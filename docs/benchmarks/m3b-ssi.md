@@ -76,7 +76,7 @@ QA9 curves=1000 segments=31000 candidate_pairs=200000 rejected_segments=65000 ma
 2. **QA-9 基准 FAIL（性能）**：1000 次单位球-平面横截求交的中位数 15.91 ms/对，
    目标 100 µs/对，约 159 倍；min/median/max 分别 9.39 / 15.91 / 24.48 ms。
 3. 正确性侧全部通过：每次调用 1 条曲线，共 31,000 段，最大残差 6.441e-10（≤1e-9）。
-4. 全套测试 Debug 与 Release 各 671 个用例、549,427 条断言全绿；`/W4 /WX /utf-8`
+4. 全套测试 Debug 与 Release 各 673 个用例、549,443 条断言全绿；`/W4 /WX /utf-8`
    零警告；QA-9 用例是回归通过（功能在 Task 1–Task 9 已完成，未观察到 RED）。
 
 ## 范围与限制

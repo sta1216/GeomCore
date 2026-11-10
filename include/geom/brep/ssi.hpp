@@ -218,6 +218,7 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
 
   std::vector<SsiPoint> seeds;
   std::vector<std::array<std::size_t, 2>> segments;
+  bool saw_contact = false;
   for (std::size_t index_a = 0; index_a < patch_mesh_a.triangles.size(); ++index_a) {
     const std::array<std::uint32_t, 3>& triangle_a = patch_mesh_a.triangles[index_a];
     for (std::size_t index_b = 0; index_b < patch_mesh_b.triangles.size(); ++index_b) {
@@ -228,6 +229,9 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
           patch_mesh_a.points[triangle_a[0]], patch_mesh_a.points[triangle_a[1]],
           patch_mesh_a.points[triangle_a[2]], patch_mesh_b.points[triangle_b[0]],
           patch_mesh_b.points[triangle_b[1]], patch_mesh_b.points[triangle_b[2]], tolerance);
+      if (hit.kind == TriTriKind::touching || hit.kind == TriTriKind::coplanar) {
+        saw_contact = true;
+      }
       if (hit.kind != TriTriKind::segment) continue;
       std::array<std::size_t, 2> endpoints{detail::kSsiDriverNoSeed, detail::kSsiDriverNoSeed};
       const Point3d positions[2] = {hit.a, hit.b};
@@ -268,11 +272,17 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
   } else {
     result.curves = std::move(traced.value());
   }
-  if (result.curves.empty() && !segments.empty()) {
+  if (result.curves.empty() && (saw_contact || !segments.empty())) {
     result.issues.push_back(detail::ssi_driver_issue(
-        SsiDiagnostic::no_convergence, "ssi: no seed converged to an intersection curve"));
+        SsiDiagnostic::no_convergence,
+        "ssi: no intersection curve could be certified at this tolerance"));
   }
-
+  // Empty curves cannot contribute segments; drop them before accounting. This
+  // is defensive: tracing never emits a curve without segments today.
+  result.curves.erase(
+      std::remove_if(result.curves.begin(), result.curves.end(),
+                     [](const SsiCurve& curve) { return curve.segments.empty(); }),
+      result.curves.end());
   std::uint64_t accepted_segments = 0;
   double max_residual = 0.0;
   for (const SsiCurve& curve : result.curves) {

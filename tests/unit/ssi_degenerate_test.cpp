@@ -770,6 +770,8 @@ TEST_CASE("ssi: QA-9 degenerate corpus is either stitched or diagnosed") {
   int cases = 0;
   int curves = 0;
   int diagnosed = 0;
+  int tangent = 0;
+  int coincident = 0;
   const auto check_result = [&](const SsiResult& result) {
     ++cases;
     if (result.curves.empty()) {
@@ -777,6 +779,8 @@ TEST_CASE("ssi: QA-9 degenerate corpus is either stitched or diagnosed") {
       for (const SsiIssue& issue : result.issues) {
         CHECK(issue.code != SsiDiagnostic::none);
       }
+      if (result.issues[0].code == SsiDiagnostic::tangent_contact) ++tangent;
+      if (result.issues[0].code == SsiDiagnostic::coincident) ++coincident;
       ++diagnosed;
       return;
     }
@@ -846,6 +850,9 @@ TEST_CASE("ssi: QA-9 degenerate corpus is either stitched or diagnosed") {
     check_result(result.value());
   }
 
+  CHECK(curves == 0);
   CHECK(cases == 200);
   CHECK(diagnosed == 200);
+  CHECK(tangent == 100);
+  CHECK(coincident == 100);
 }
