@@ -1993,7 +1993,7 @@ inline std::vector<SsiPoint> ssi_driver_curve_seeds(
   // makes that spread larger still. A small fraction of the smaller patch's 3D
   // bounding-box diagonal covers the spread while staying below the separation
   // of genuinely distinct branches: the two torus circles at z=0.499 are 0.063
-  // apart and the radius there is 0.050, while the 0.6 separation at z=0.4 has
+  // apart and the radius there is 0.052469, while the 0.6 separation at z=0.4 has
   // a wide margin. The cost is that branches closer than twice the radius can
   // still merge; that near-tangency case is diagnosed by the Task 6 predicates
   // and is a known M3b-1 limitation.
