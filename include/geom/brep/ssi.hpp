@@ -1,19 +1,26 @@
 #pragma once
 
-// Public surface-surface intersection diagnostics.
+// Public surface-surface intersection diagnostics and driver.
 //
-// ssi() is declared here and implemented by the intersection driver; this
-// header only pins the shared vocabulary so the diagnostics predicates and the
-// driver agree on result types. The predicates themselves are inline functions
-// in detail/ssi_solver.hpp, next to the point/curve tracing helpers they are
-// used with.
+// ssi() is the header-only intersection driver: it classifies degenerate,
+// coincident, and tangent input, tessellates both patches, turns the endpoints
+// of the triangle-triangle intersection segments into Newton seeds, and traces
+// the curves. The predicates and the point/curve tracing helpers it builds on
+// are inline functions in detail/ssi_solver.hpp; this header pins the shared
+// vocabulary and the orchestration so every translation unit sees the same
+// definition.
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include <geom/brep/detail/ssi_patch.hpp>
 #include <geom/brep/detail/ssi_solver.hpp>
+#include <geom/brep/detail/ssi_tri_tri.hpp>
 #include <geom/core/result.hpp>
 
 namespace geom {
@@ -63,8 +70,146 @@ struct SsiOptions {
   std::uint64_t max_segments = 100000;
 };
 
-// Traces the intersection of two patches. Defined by the intersection driver.
-Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOptions& options);
+namespace detail {
+
+// Builds one structural diagnostic. params stays zero for issues that do not
+// name a parameter location.
+inline SsiIssue ssi_driver_issue(SsiDiagnostic code, const char* message) noexcept {
+  SsiIssue issue;
+  issue.code = code;
+  issue.message = message;
+  return issue;
+}
+
+}  // namespace detail
+
+// Traces the intersection of two patches. Degenerate, coincident, and tangent
+// input is classified before the tessellator runs; otherwise both patches are
+// tessellated adaptively, every AABB-overlapping triangle pair is intersected,
+// and the segment endpoints become Newton seeds. Segments that share a refined
+// endpoint belong to the same intersection curve, so one seed per connected
+// segment component is traced: one curve yields one traced curve instead of one
+// per mesh segment. The work counters are deliberately left at their zero-work
+// defaults: this driver only produces the curves and the diagnostics.
+inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOptions& options) {
+  SsiResult result;
+  const double tolerance = options.tolerance;
+
+  // A patch whose 3D extent is inside the acceptance band has no well-defined
+  // parameterization to trace on, so it is diagnosed before any predicate or
+  // tessellation work.
+  const Box3d bounds_a = patch_bounds(a, tolerance);
+  const Box3d bounds_b = patch_bounds(b, tolerance);
+  if (bounds_a.is_empty() || bounds_b.is_empty()) {
+    result.issues.push_back(detail::ssi_driver_issue(SsiDiagnostic::degenerate_patch,
+                                                     "ssi: patch bounds are not finite"));
+    return result;
+  }
+  const double diagonal_a = norm2(bounds_a.diagonal());
+  const double diagonal_b = norm2(bounds_b.diagonal());
+  if (!std::isfinite(diagonal_a) || !std::isfinite(diagonal_b) || diagonal_a <= tolerance ||
+      diagonal_b <= tolerance) {
+    result.issues.push_back(detail::ssi_driver_issue(
+        SsiDiagnostic::degenerate_patch, "ssi: patch is degenerate within tolerance"));
+    return result;
+  }
+
+  if (surfaces_coincident(a, b, tolerance)) {
+    result.issues.push_back(detail::ssi_driver_issue(
+        SsiDiagnostic::coincident, "ssi: surfaces are coincident over the shared domain"));
+    return result;
+  }
+  if (patches_tangent(a, b, tolerance)) {
+    result.issues.push_back(detail::ssi_driver_issue(
+        SsiDiagnostic::tangent_contact, "ssi: patches touch tangentially"));
+    return result;
+  }
+
+  Box3d bounds = bounds_a;
+  bounds.expand(bounds_b);
+  const double diagonal = norm2(bounds.diagonal());
+  if (!std::isfinite(diagonal) || !(diagonal > 0.0)) {
+    result.issues.push_back(detail::ssi_driver_issue(SsiDiagnostic::degenerate_patch,
+                                                     "ssi: patch bounds are degenerate"));
+    return result;
+  }
+  const double chord_tolerance = std::max(1e-3 * diagonal, 64.0 * tolerance);
+  const Result<SsiPatchMesh> mesh_a = tessellate_ssi_patch(a, chord_tolerance, options.max_depth);
+  if (!mesh_a.has_value()) {
+    result.issues.push_back(detail::ssi_driver_issue(SsiDiagnostic::degenerate_patch,
+                                                     mesh_a.error().message));
+    return result;
+  }
+  const Result<SsiPatchMesh> mesh_b = tessellate_ssi_patch(b, chord_tolerance, options.max_depth);
+  if (!mesh_b.has_value()) {
+    result.issues.push_back(detail::ssi_driver_issue(SsiDiagnostic::degenerate_patch,
+                                                     mesh_b.error().message));
+    return result;
+  }
+  const SsiPatchMesh& patch_mesh_a = mesh_a.value();
+  const SsiPatchMesh& patch_mesh_b = mesh_b.value();
+  if (patch_mesh_a.triangles.empty() || patch_mesh_b.triangles.empty()) {
+    result.issues.push_back(detail::ssi_driver_issue(
+        SsiDiagnostic::degenerate_patch, "ssi: patch tessellation produced no triangles"));
+    return result;
+  }
+
+  // Broad phase: one AABB per triangle, built in mesh order so the seed order is
+  // a pure function of the tessellation.
+  std::vector<Box3d> boxes_a;
+  boxes_a.reserve(patch_mesh_a.triangles.size());
+  for (const std::array<std::uint32_t, 3>& triangle : patch_mesh_a.triangles) {
+    boxes_a.push_back(detail::ssi_driver_triangle_bounds(patch_mesh_a, triangle));
+  }
+  std::vector<Box3d> boxes_b;
+  boxes_b.reserve(patch_mesh_b.triangles.size());
+  for (const std::array<std::uint32_t, 3>& triangle : patch_mesh_b.triangles) {
+    boxes_b.push_back(detail::ssi_driver_triangle_bounds(patch_mesh_b, triangle));
+  }
+
+  std::vector<SsiPoint> seeds;
+  std::vector<std::array<std::size_t, 2>> segments;
+  for (std::size_t index_a = 0; index_a < patch_mesh_a.triangles.size(); ++index_a) {
+    const std::array<std::uint32_t, 3>& triangle_a = patch_mesh_a.triangles[index_a];
+    for (std::size_t index_b = 0; index_b < patch_mesh_b.triangles.size(); ++index_b) {
+      if (!detail::ssi_driver_bounds_overlap(boxes_a[index_a], boxes_b[index_b])) continue;
+      const std::array<std::uint32_t, 3>& triangle_b = patch_mesh_b.triangles[index_b];
+      const TriTriResult hit = tri_tri_intersect(
+          patch_mesh_a.points[triangle_a[0]], patch_mesh_a.points[triangle_a[1]],
+          patch_mesh_a.points[triangle_a[2]], patch_mesh_b.points[triangle_b[0]],
+          patch_mesh_b.points[triangle_b[1]], patch_mesh_b.points[triangle_b[2]], tolerance);
+      if (hit.kind != TriTriKind::segment) continue;
+      std::array<std::size_t, 2> endpoints{detail::kSsiDriverNoSeed, detail::kSsiDriverNoSeed};
+      const Point3d positions[2] = {hit.a, hit.b};
+      for (int endpoint = 0; endpoint < 2; ++endpoint) {
+        std::array<double, 2> ua{};
+        std::array<double, 2> va{};
+        if (!detail::ssi_driver_triangle_uv(patch_mesh_a, triangle_a, positions[endpoint], ua)) {
+          continue;
+        }
+        if (!detail::ssi_driver_triangle_uv(patch_mesh_b, triangle_b, positions[endpoint], va)) {
+          continue;
+        }
+        const Result<SsiPoint> refined =
+            refine_ssi_point(a, b, {ua[0], ua[1], va[0], va[1]}, tolerance);
+        if (!refined.has_value()) continue;
+        if (!(refined.value().residual <= tolerance)) continue;
+        endpoints[static_cast<std::size_t>(endpoint)] = seeds.size();
+        seeds.push_back(refined.value());
+      }
+      segments.push_back(endpoints);
+    }
+  }
+
+  const double seed_tolerance =
+      std::max(64.0 * tolerance, 1e-9 * std::max(diagonal_a, diagonal_b));
+  const std::vector<SsiPoint> representatives =
+      detail::ssi_driver_curve_seeds(a, b, seeds, segments, seed_tolerance);
+  Result<std::vector<SsiCurve>> curves = trace_ssi_curves(a, b, representatives, tolerance);
+  if (!curves.has_value()) return curves.error();
+  result.curves = std::move(curves.value());
+  return result;
+}
 
 }  // namespace v1
 }  // namespace geom

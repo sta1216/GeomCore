@@ -9,6 +9,7 @@
 #include <geom/core/error.hpp>
 #include <geom/core/result.hpp>
 #include <limits>
+#include <map>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -1633,6 +1634,192 @@ inline bool patches_tangent(const SsiPatch& a, const SsiPatch& b, double toleran
   if (!detail::ssi_diagnostic_sign_test(b, a.surface, tolerance)) return false;
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// Driver helpers
+//
+// These support the ssi() orchestration in brep/ssi.hpp: they turn
+// triangle-triangle endpoints into patch parameters, refine them into
+// seeds, and group the seeds into one traceable seed per intersection
+// curve. They live here so the public driver header stays a thin
+// vocabulary plus orchestration layer.
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+// Barycentric coordinates of p projected onto triangle (q0, q1, q2), clamped to
+// the closed triangle. A triangle-triangle endpoint lies on the triangle
+// boundary, so the clamp is what keeps the interpolated parameters inside the
+// patch domain instead of a few ulps outside it. False means the triangle is too
+// thin to interpolate safely or a weight is not finite.
+inline bool ssi_driver_barycentric(const Point3d& p, const Point3d& q0, const Point3d& q1,
+                                   const Point3d& q2, std::array<double, 3>& weights) noexcept {
+  const Vec3d e0 = q1 - q0;
+  const Vec3d e1 = q2 - q0;
+  const Vec3d offset = p - q0;
+  const double d00 = dot(e0, e0);
+  const double d01 = dot(e0, e1);
+  const double d11 = dot(e1, e1);
+  const double det = d00 * d11 - d01 * d01;
+  if (!std::isfinite(det) || !(det > 1e-20 * d00 * d11)) return false;
+  const double d20 = dot(offset, e0);
+  const double d21 = dot(offset, e1);
+  const double raw1 = (d11 * d20 - d01 * d21) / det;
+  const double raw2 = (d00 * d21 - d01 * d20) / det;
+  const double raw0 = 1.0 - raw1 - raw2;
+  if (!std::isfinite(raw0) || !std::isfinite(raw1) || !std::isfinite(raw2)) return false;
+  const double clamped0 = std::min(1.0, std::max(0.0, raw0));
+  const double clamped1 = std::min(1.0, std::max(0.0, raw1));
+  const double clamped2 = std::min(1.0, std::max(0.0, raw2));
+  const double sum = clamped0 + clamped1 + clamped2;
+  if (!(sum > 0.0)) return false;
+  weights = {clamped0 / sum, clamped1 / sum, clamped2 / sum};
+  return true;
+}
+
+// Interpolates the (u, v) parameters stored for one triangle at a 3D point.
+inline bool ssi_driver_triangle_uv(const SsiPatchMesh& mesh,
+                                   const std::array<std::uint32_t, 3>& triangle, const Point3d& p,
+                                   std::array<double, 2>& uv) noexcept {
+  std::array<double, 3> weights{};
+  if (!ssi_driver_barycentric(p, mesh.points[triangle[0]], mesh.points[triangle[1]],
+                              mesh.points[triangle[2]], weights)) {
+    return false;
+  }
+  const std::array<double, 2>& uv0 = mesh.uv[triangle[0]];
+  const std::array<double, 2>& uv1 = mesh.uv[triangle[1]];
+  const std::array<double, 2>& uv2 = mesh.uv[triangle[2]];
+  uv[0] = weights[0] * uv0[0] + weights[1] * uv1[0] + weights[2] * uv2[0];
+  uv[1] = weights[0] * uv0[1] + weights[1] * uv1[1] + weights[2] * uv2[1];
+  return std::isfinite(uv[0]) && std::isfinite(uv[1]);
+}
+
+inline Box3d ssi_driver_triangle_bounds(const SsiPatchMesh& mesh,
+                                        const std::array<std::uint32_t, 3>& triangle) noexcept {
+  Box3d bounds = Box3d::empty();
+  bounds.expand(mesh.points[triangle[0]]);
+  bounds.expand(mesh.points[triangle[1]]);
+  bounds.expand(mesh.points[triangle[2]]);
+  return bounds;
+}
+
+inline bool ssi_driver_bounds_overlap(const Box3d& first, const Box3d& second) noexcept {
+  for (int axis = 0; axis < 3; ++axis) {
+    if (first.lo[axis] > second.hi[axis] || second.lo[axis] > first.hi[axis]) return false;
+  }
+  return true;
+}
+
+// Total order on refined seeds. The parameter pairs dominate so clustering and
+// output never depend on mesh traversal order; the remaining keys only break
+// exact ties deterministically.
+inline bool ssi_driver_seed_less(const SsiPoint& left, const SsiPoint& right) noexcept {
+  if (left.ua < right.ua) return true;
+  if (right.ua < left.ua) return false;
+  if (left.va < right.va) return true;
+  if (right.va < left.va) return false;
+  if (left.residual < right.residual) return true;
+  if (right.residual < left.residual) return false;
+  if (left.p[0] != right.p[0]) return left.p[0] < right.p[0];
+  if (left.p[1] != right.p[1]) return left.p[1] < right.p[1];
+  return left.p[2] < right.p[2];
+}
+
+inline std::size_t ssi_driver_seed_root(std::vector<std::size_t>& parent,
+                                        std::size_t index) noexcept {
+  std::size_t root = index;
+  while (parent[root] != root) root = parent[root];
+  while (parent[index] != root) {
+    const std::size_t next = parent[index];
+    parent[index] = root;
+    index = next;
+  }
+  return root;
+}
+
+// Stands for a triangle-triangle endpoint that did not survive Newton
+// refinement, so a half-refined segment contributes only the endpoint it has.
+inline constexpr std::size_t kSsiDriverNoSeed = static_cast<std::size_t>(-1);
+
+// Collapses the refined triangle-triangle endpoints into one seed per traced
+// curve. Two seeds name the same intersection point when they agree on both
+// parameter pairs within seed_tolerance, and the two endpoints of one segment
+// name two points of the same curve. Both relations are unioned, so a connected
+// component is one intersection curve: adjacent mesh triangles share endpoints
+// and the chain of segments is exactly the curve. One deterministic
+// representative (the smallest parameter pair) is returned per component;
+// without this, tracing every distinct point of a curve would retrace the same
+// curve once per point.
+inline std::vector<SsiPoint> ssi_driver_curve_seeds(
+    const SsiPatch& a, const SsiPatch& b, const std::vector<SsiPoint>& seeds,
+    const std::vector<std::array<std::size_t, 2>>& segments, double seed_tolerance) {
+  const std::size_t count = seeds.size();
+  std::vector<std::size_t> parent(count);
+  for (std::size_t index = 0; index < count; ++index) parent[index] = index;
+
+  // Duplicates of one intersection point sit at the same 3D location to within
+  // rounding, so a hash of the refined point finds them without a quadratic scan;
+  // the neighbourhood probe keeps a pair from being missed when it straddles a
+  // cell wall. The parameter agreement below is the actual clustering rule.
+  std::map<std::array<long long, 3>, std::vector<std::size_t>> buckets;
+  const auto cell_of = [seed_tolerance](const Point3d& point) {
+    std::array<long long, 3> cell{};
+    for (int axis = 0; axis < 3; ++axis) {
+      const double scaled = point[axis] / seed_tolerance;
+      const double finite = std::isfinite(scaled) ? scaled : 0.0;
+      cell[static_cast<std::size_t>(axis)] = static_cast<long long>(std::floor(finite));
+    }
+    return cell;
+  };
+  for (std::size_t index = 0; index < count; ++index) {
+    buckets[cell_of(seeds[index].p)].push_back(index);
+  }
+  for (std::size_t index = 0; index < count; ++index) {
+    const std::array<long long, 3> cell = cell_of(seeds[index].p);
+    for (int dx = -2; dx <= 2; ++dx) {
+      for (int dy = -2; dy <= 2; ++dy) {
+        for (int dz = -2; dz <= 2; ++dz) {
+          const auto found = buckets.find(
+              std::array<long long, 3>{cell[0] + dx, cell[1] + dy, cell[2] + dz});
+          if (found == buckets.end()) continue;
+          for (const std::size_t other : found->second) {
+            if (other <= index) continue;
+            const double distance_a =
+                ssi_trace_param_distance(a.surface, seeds[index].ua, seeds[other].ua);
+            if (!(distance_a <= seed_tolerance)) continue;
+            const double distance_b =
+                ssi_trace_param_distance(b.surface, seeds[index].va, seeds[other].va);
+            if (!(distance_b <= seed_tolerance)) continue;
+            const std::size_t root_first = ssi_driver_seed_root(parent, index);
+            const std::size_t root_second = ssi_driver_seed_root(parent, other);
+            if (root_first != root_second) parent[root_second] = root_first;
+          }
+        }
+      }
+    }
+  }
+  for (const std::array<std::size_t, 2>& segment : segments) {
+    if (segment[0] >= count || segment[1] >= count) continue;
+    const std::size_t root_first = ssi_driver_seed_root(parent, segment[0]);
+    const std::size_t root_second = ssi_driver_seed_root(parent, segment[1]);
+    if (root_first != root_second) parent[root_second] = root_first;
+  }
+  std::vector<SsiPoint> representatives;
+  std::vector<std::size_t> slot(count, kSsiDriverNoSeed);
+  for (std::size_t index = 0; index < count; ++index) {
+    const std::size_t root = ssi_driver_seed_root(parent, index);
+    if (slot[root] == kSsiDriverNoSeed) {
+      slot[root] = representatives.size();
+      representatives.push_back(seeds[index]);
+    } else if (ssi_driver_seed_less(seeds[index], representatives[slot[root]])) {
+      representatives[slot[root]] = seeds[index];
+    }
+  }
+  std::stable_sort(representatives.begin(), representatives.end(), ssi_driver_seed_less);
+  return representatives;
+}
+
+}  // namespace detail
 
 }  // namespace v1
 }  // namespace geom
