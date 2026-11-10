@@ -60,10 +60,10 @@ struct SsiResult {
   std::uint64_t candidate_pairs = 0;
   // Segments in the returned curves.
   std::uint64_t accepted_segments = 0;
-  // Extracted triangle-pair segments that the returned curves do not account
-  // for. When the trace resolves a curve more finely than the tessellated seed
-  // set, several trace segments can share one extracted segment; the difference
-  // then saturates at zero rather than going negative.
+  // Saturated accounting difference max(0, extracted - accepted). Trace
+  // refinement can emit many output segments per extracted seed segment, so
+  // accepted may exceed the extracted count; this is therefore not a count of
+  // untouched geometry, only of the unconsumed extraction surplus.
   std::uint64_t rejected_segments = 0;
   // Largest residual over the returned segments; zero when nothing was traced.
   double max_residual = 0.0;
@@ -101,8 +101,8 @@ inline SsiIssue ssi_driver_issue(SsiDiagnostic code, const char* message) noexce
 // endpoint belong to the same intersection curve, so one seed per connected
 // segment component is traced: one curve yields one traced curve instead of one
 // per mesh segment. The counters record the broad phase (candidate pairs), the
-// traced output (accepted segments and the worst residual), and the extracted
-// triangle-pair segments that the traced curves did not consume (rejected).
+// traced output (accepted segments and the worst residual), and the saturated
+// difference between extracted triangle-pair segments and accepted output.
 // Curves are ordered by their first point and diagnostics by code and
 // parameters, so two calls on identical input produce bit-identical output.
 inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOptions& options) {
@@ -154,9 +154,9 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
 
   // A band below the arithmetic resolution of the coordinates cannot be
   // certified: the evaluator resolves points to a few ulp of the model scale, so
-  // a tighter request accepts only bit-identical evaluations and reports a
-  // residual that is zero by construction. The floor is two ulp of the largest
-  // coordinate magnitude; requests at or above it trace, requests below it are
+  // a tighter request cannot be certified whether or not a particular evaluation
+  // happens to be bit-identical. The floor is two ulp of max(1, largest
+  // coordinate magnitude); requests at or above it trace, requests below it are
   // diagnosed instead of being returned as an empty "converged" result.
   double max_abs = 0.0;
   for (const Box3d* bounds : {&bounds_a, &bounds_b}) {

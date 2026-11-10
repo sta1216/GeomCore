@@ -614,6 +614,11 @@ TEST_CASE("ssi: validates options and patches") {
   broken.max_segments = 0;
   expect_error(broken, Errc::numeric_failure,
                "ssi: tolerance must be positive and finite");
+  // Depth is validated before the segment budget.
+  SsiOptions broken_depth{1e-9};
+  broken_depth.max_depth = 0;
+  broken_depth.max_segments = 0;
+  expect_error(broken_depth, Errc::unsupported, "ssi: max_depth must be at least 6");
 }
 
 TEST_CASE("ssi: identical inputs produce identical output") {
@@ -773,12 +778,14 @@ TEST_CASE("ssi: the tolerance floor is two ulp of the coordinate magnitude") {
   CHECK(gated.value().issues[0].code == SsiDiagnostic::no_convergence);
   const Result<SsiResult> at_floor = ssi(a.value(), b.value(), SsiOptions{floor});
   REQUIRE(at_floor.has_value());
+  REQUIRE(at_floor.value().curves.size() == 1);
+  CHECK(at_floor.value().curves[0].closed);
   for (const SsiIssue& issue : at_floor.value().issues) {
     CHECK(issue.code != SsiDiagnostic::no_convergence);
   }
 }
 
-TEST_CASE("ssi: rejected segments count extracted segments that no curve uses") {
+TEST_CASE("ssi: rejected segments report the saturated extracted-vs-accepted surplus") {
   // Perpendicular planes: every extracted segment belongs to the returned line.
   const Result<SsiPatch> plane_z = make_ssi_patch(
       SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
@@ -794,10 +801,11 @@ TEST_CASE("ssi: rejected segments count extracted segments that no curve uses") 
   CHECK(plane_extracted == 2);
   CHECK(planes.value().accepted_segments == 21);
   // A coarse planar tessellation yields fewer extracted segments than trace
-  // steps, so the difference saturates at zero instead of going negative.
+  // steps (accepted can exceed extracted), so the difference saturates at zero.
   CHECK(planes.value().rejected_segments == 0);
 
-  // Sphere/plane: the traced curve uses 31 of the 96 extracted segments.
+  // Sphere/plane: accepted 31 of the 96 extracted segments; the saturated
+  // surplus is 65 (trace segmentation is finer than seed segmentation).
   const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
   const Result<SsiPatch> sphere_patch = make_ssi_patch(
       SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846}, {-1.5, 1.5});
@@ -824,7 +832,7 @@ TEST_CASE("ssi: rejected segments count extracted segments that no curve uses") 
   CHECK(sphere_result.value().max_residual > 0.0);
   CHECK(sphere_result.value().max_residual <= 1e-9);
 
-  // Cylinder/plane: two open lines; some extracted segments are discarded.
+  // Cylinder/plane: two open lines; the saturated surplus is reported.
   const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
   const Result<SsiPatch> cylinder_patch = make_ssi_patch(
       SurfaceGeometry{cylinder}, {0, 2 * 3.141592653589793}, {0, 1});
