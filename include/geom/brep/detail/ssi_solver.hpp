@@ -35,13 +35,6 @@ inline constexpr double kSsiSolverPivotThreshold = 1e-13;
 // |F|; 2^-40 shrinks a unit step to below 1e-12, far past any useful motion.
 inline constexpr int kSsiSolverMaxHalvings = 40;
 
-// Iteration cap for the projected Newton foot point used by ssi_residual.
-inline constexpr int kSsiSolverFootIterations = 32;
-
-inline bool ssi_solver_finite(const Vec3d& value) noexcept {
-  return std::isfinite(value[0]) && std::isfinite(value[1]) && std::isfinite(value[2]);
-}
-
 // Folds the periodic axes of one parameter pair in place. Returns false only
 // for a non-finite value, which callers treat as a contract violation.
 inline bool ssi_solver_wrap(const SurfaceGeometry& surface,
@@ -124,87 +117,17 @@ inline bool ssi_solver_solve3(std::array<std::array<double, 3>, 3> matrix, const
   return true;
 }
 
-// 2x2 solve for the projected foot point, with the same scale-invariant pivot
-// rule as ssi_solver_solve3.
-inline bool ssi_solver_solve2(const std::array<std::array<double, 2>, 2>& m,
-                              const std::array<double, 2>& rhs,
-                              std::array<double, 2>& solution) noexcept {
-  const double column_max[2] = {std::max(std::fabs(m[0][0]), std::fabs(m[1][0])),
-                                std::max(std::fabs(m[0][1]), std::fabs(m[1][1]))};
-  if (!(column_max[0] > 0.0) || !(column_max[1] > 0.0)) return false;
-  const double determinant = m[0][0] * m[1][1] - m[0][1] * m[1][0];
-  if (!std::isfinite(determinant) ||
-      std::fabs(determinant) <= kSsiSolverPivotThreshold * column_max[0] * column_max[1]) {
-    return false;
-  }
-  const double first = (rhs[0] * m[1][1] - m[0][1] * rhs[1]) / determinant;
-  const double second = (m[0][0] * rhs[1] - rhs[0] * m[1][0]) / determinant;
-  if (!std::isfinite(first) || !std::isfinite(second)) return false;
-  solution = {first, second};
-  return true;
-}
-
-// Distance from `target` to `surface`, by projected Newton iteration on the
-// foot point. The orthonormal frame (e1, e2) spans the tangent plane, so the
-// 2x2 projected normal equations are exactly the full Gauss-Newton system for
-// a point already on the surface; each accepted step lowers the sampled
-// distance. `start` is the partner parameter pair, which makes the first
-// sample no farther than the current gap, so the result is always a real
-// distance and never larger than that gap.
-inline double ssi_solver_point_surface_distance(const SurfaceGeometry& surface,
-                                                const Point3d& target,
-                                                std::array<double, 2> start) noexcept {
-  const Result<SurfacePoint> first = surface_eval(surface, start[0], start[1]);
-  if (!first.has_value() || !surface_point_finite(first.value())) {
-    return std::numeric_limits<double>::infinity();
-  }
-  double best = norm2(target - first.value().p);
-  if (!std::isfinite(best)) return std::numeric_limits<double>::infinity();
-  SurfacePoint current = first.value();
-  for (int iteration = 0; iteration < kSsiSolverFootIterations && best > 0.0; ++iteration) {
-    const Vec3d offset = target - current.p;
-    const double du_length = norm2(current.du);
-    const Vec3d normal = cross(current.du, current.dv);
-    const double normal_length = norm2(normal);
-    if (!(du_length > 0.0) || !(normal_length > 0.0)) break;
-    const Vec3d e1{current.du[0] / du_length, current.du[1] / du_length, current.du[2] / du_length};
-    const Vec3d unit_normal{normal[0] / normal_length, normal[1] / normal_length,
-                            normal[2] / normal_length};
-    const Vec3d e2 = cross(unit_normal, e1);
-    std::array<std::array<double, 2>, 2> system{};
-    system[0][0] = dot(current.du, e1);
-    system[0][1] = dot(current.dv, e1);
-    system[1][0] = dot(current.du, e2);
-    system[1][1] = dot(current.dv, e2);
-    const std::array<double, 2> rhs{dot(offset, e1), dot(offset, e2)};
-    std::array<double, 2> step{};
-    if (!ssi_solver_solve2(system, rhs, step)) break;
-    std::array<double, 2> candidate{start[0] + step[0], start[1] + step[1]};
-    if (!std::isfinite(step[0]) || !std::isfinite(step[1]) || !std::isfinite(candidate[0]) ||
-        !std::isfinite(candidate[1])) {
-      break;
-    }
-    if (!ssi_solver_wrap(surface, candidate)) break;
-    const Result<SurfacePoint> sample = surface_eval(surface, candidate[0], candidate[1]);
-    if (!sample.has_value() || !surface_point_finite(sample.value())) break;
-    const double candidate_distance = norm2(target - sample.value().p);
-    if (!std::isfinite(candidate_distance) || !(candidate_distance < best)) break;
-    best = candidate_distance;
-    start = candidate;
-    current = sample.value();
-  }
-  return best;
-}
-
 }  // namespace detail
 
-// Residual of a candidate intersection point. It is recomputed from the two
-// parameter pairs, never from the stored p, so a stale or forged point cannot
-// mask a parameter mismatch: all three terms are genuine geometric distances.
-// The two point-to-surface legs are computed to the whole surface (the foot
-// point is unconstrained, exactly like the gap); both are bounded by the gap,
-// so the max reports the gap while still rejecting a point that is far from
-// either surface. Non-finite input or a failed evaluation yields +inf.
+// Residual of a candidate intersection point: the distance between the two
+// surface points at the stored parameter pairs, recomputed here so a stale or
+// forged p cannot mask a parameter mismatch. This is only the parameter gap.
+// It does not certify that the two parameter pairs correspond to the same
+// geometric point on a self-intersecting patch, and it does not check patch
+// membership: seams and poles can map distinct pairs onto one point, and a
+// candidate outside a patch can still show a small gap. Callers that need
+// those guarantees must check them separately (patch_contains), exactly as
+// refine_ssi_point does. Non-finite input or a failed evaluation yields +inf.
 inline double ssi_residual(const SsiPatch& a, const SsiPatch& b, const SsiPoint& point) noexcept {
   std::array<double, 2> ua{point.ua[0], point.ua[1]};
   std::array<double, 2> va{point.va[0], point.va[1]};
@@ -219,11 +142,7 @@ inline double ssi_residual(const SsiPatch& a, const SsiPatch& b, const SsiPoint&
   }
   const double gap = norm2(on_a.value().p - on_b.value().p);
   if (!std::isfinite(gap)) return std::numeric_limits<double>::infinity();
-  const double distance_to_b =
-      detail::ssi_solver_point_surface_distance(b.surface, on_a.value().p, va);
-  const double distance_to_a =
-      detail::ssi_solver_point_surface_distance(a.surface, on_b.value().p, ua);
-  return std::max(gap, std::max(distance_to_a, distance_to_b));
+  return gap;
 }
 
 // Refines a four-parameter seed on the intersection of two patches with the
@@ -349,8 +268,11 @@ inline Result<SsiPoint> refine_ssi_point(const SsiPatch& a, const SsiPatch& b,
     }
     std::array<double, 4> delta{};
     for (int slot = 0; slot < 3; ++slot) {
+      // The columns were divided by `scale` above, so the solution of the
+      // scaled system describes the same direction at 1/scale of its true
+      // length: undo that division before applying the step.
       delta[static_cast<std::size_t>(variable[static_cast<std::size_t>(slot)])] =
-          solution[static_cast<std::size_t>(slot)];
+          solution[static_cast<std::size_t>(slot)] * inverse_scale;
     }
 
     bool accepted = false;

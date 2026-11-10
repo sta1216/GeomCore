@@ -84,6 +84,11 @@ TEST_CASE("ssi: invalid tolerances are rejected before any math") {
       a.value(), b.value(), {std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0, 0.0}, 0.0);
   REQUIRE_FALSE(ordered.has_value());
   CHECK(ordered.error().code == Errc::tolerance_violation);
+  // The tolerance also outranks a non-positive iteration budget.
+  const Result<SsiPoint> over_budget =
+      refine_ssi_point(a.value(), b.value(), {0.3, 0.4, 0.2, 0.9}, 0.0, 0);
+  REQUIRE_FALSE(over_budget.has_value());
+  CHECK(over_budget.error().code == Errc::tolerance_violation);
 }
 
 TEST_CASE("ssi: non-finite seeds are rejected") {
@@ -147,6 +152,12 @@ TEST_CASE("ssi: non-positive iteration budgets are rejected") {
     REQUIRE_FALSE(p.has_value());
     CHECK(p.error().code == Errc::numeric_failure);
   }
+  // The budget outranks a non-finite seed: the contract order is tolerance,
+  // budget, seed, patches.
+  const Result<SsiPoint> ordered = refine_ssi_point(
+      a.value(), b.value(), {std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0, 0.0}, 1e-10, 0);
+  REQUIRE_FALSE(ordered.has_value());
+  CHECK(ordered.error().code == Errc::numeric_failure);
 }
 
 TEST_CASE("ssi: a seed outside either patch is rejected without clamping") {
@@ -239,7 +250,7 @@ TEST_CASE("ssi: both torus parameters are wrapped into the stored domain") {
   }
 }
 
-TEST_CASE("ssi: residual measures the gap and both point-to-surface distances") {
+TEST_CASE("ssi: residual is the parameter gap and ignores the stored point") {
   const Result<SsiPatch> a =
       make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
   const Result<SsiPatch> b =
@@ -247,7 +258,9 @@ TEST_CASE("ssi: residual measures the gap and both point-to-surface distances") 
   REQUIRE(a.has_value());
   REQUIRE(b.has_value());
   // The stored p is the exact intersection point, but the parameters are not:
-  // a residual that trusts p, or that returns a constant, is caught here.
+  // a residual that trusts p, or that returns a constant, is caught here. The
+  // residual is only the parameter gap: it certifies neither the correspondence
+  // of the two parameter pairs nor their patch membership.
   SsiPoint off;
   off.ua = {0.5, 0.5};
   off.va = {0.5, 0.5};
@@ -262,4 +275,133 @@ TEST_CASE("ssi: residual measures the gap and both point-to-surface distances") 
   hit.va = {0.0, 0.3};
   hit.p = {0.0, 0.3, 0.0};
   CHECK(ssi_residual(a.value(), b.value(), hit) <= 1e-12);
+}
+
+TEST_CASE("ssi: the Newton step does not depend on the model scale") {
+  // The Jacobian columns are divided by their largest entry so the 3x3 minors
+  // stay O(1); the solved step is in those scaled units and must be converted
+  // back. Without that conversion the step is `scale` times too large and the
+  // line search cannot recover it, so a large or tiny model stalls.
+  auto gap_between = [](const Result<SurfacePoint>& first, const Result<SurfacePoint>& second) {
+    double squared = 0.0;
+    for (int i = 0; i < 3; ++i) {
+      const double difference = first.value().p[i] - second.value().p[i];
+      squared += difference * difference;
+    }
+    return std::sqrt(squared);
+  };
+  for (const double radius : {1e-3, 1e3}) {
+    const double tolerance = 1e-12 * radius;
+    const Sphere3 first{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, radius};
+    const Sphere3 second{Point3d{radius, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, radius};
+    const Result<SsiPatch> a =
+        make_ssi_patch(SurfaceGeometry{first}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+    const Result<SsiPatch> b =
+        make_ssi_patch(SurfaceGeometry{second}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const Result<SsiPoint> p =
+        refine_ssi_point(a.value(), b.value(), {1.2472, 0.1, 1.9444, -0.1}, tolerance);
+    REQUIRE(p.has_value());
+    CHECK(p.value().residual <= tolerance);
+    const Result<SurfacePoint> on_a =
+        surface_eval(a.value().surface, p.value().ua[0], p.value().ua[1]);
+    const Result<SurfacePoint> on_b =
+        surface_eval(b.value().surface, p.value().va[0], p.value().va[1]);
+    REQUIRE(on_a.has_value());
+    REQUIRE(on_b.has_value());
+    CHECK(gap_between(on_a, on_b) <= tolerance);
+    CHECK(patch_contains(a.value(), p.value().ua[0], p.value().ua[1]));
+    CHECK(patch_contains(b.value(), p.value().va[0], p.value().va[1]));
+  }
+  // The same factor scale for a curved/planar pair at a large size.
+  const double radius = 1e3;
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, radius};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+  const Result<SsiPatch> b = make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0.25 * radius}},
+                                            {-2 * radius, 2 * radius}, {-2 * radius, 2 * radius});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> p =
+      refine_ssi_point(a.value(), b.value(), {0.1, 0.2, -97.83, 975.2}, 1e-12 * radius);
+  REQUIRE(p.has_value());
+  CHECK(p.value().residual <= 1e-12 * radius);
+  const Result<SurfacePoint> on_a =
+      surface_eval(a.value().surface, p.value().ua[0], p.value().ua[1]);
+  const Result<SurfacePoint> on_b =
+      surface_eval(b.value().surface, p.value().va[0], p.value().va[1]);
+  REQUIRE(on_a.has_value());
+  REQUIRE(on_b.has_value());
+  CHECK(gap_between(on_a, on_b) <= 1e-12 * radius);
+  CHECK(patch_contains(a.value(), p.value().ua[0], p.value().ua[1]));
+  CHECK(patch_contains(b.value(), p.value().va[0], p.value().va[1]));
+}
+
+TEST_CASE("ssi: a solution across the periodic seam is stored folded") {
+  // The raw seed parameter is just past +pi and the intersection point next to
+  // it stays there, so the solution's raw u is in (pi, pi + 0.1) and the stored
+  // representative must be folded into (-pi, -3.0). A solver that omits the
+  // fold returns the raw value and fails the sign, the bound, and the patch
+  // containment check.
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, -0.5}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> p = refine_ssi_point(a.value(), b.value(), {3.2, 1.0, -0.8, -0.3}, 1e-10);
+  REQUIRE(p.has_value());
+  CAPTURE(p.value().ua[0]);
+  CAPTURE(p.value().ua[1]);
+  CHECK(p.value().residual <= 1e-10);
+  CHECK(p.value().ua[0] < -3.0);
+  CHECK(p.value().ua[0] >= -3.141592653589793);
+  CHECK(patch_contains(a.value(), p.value().ua[0], p.value().ua[1]));
+  const Result<SurfacePoint> on_a =
+      surface_eval(a.value().surface, p.value().ua[0], p.value().ua[1]);
+  const Result<SurfacePoint> on_b =
+      surface_eval(b.value().surface, p.value().va[0], p.value().va[1]);
+  REQUIRE(on_a.has_value());
+  REQUIRE(on_b.has_value());
+  for (int i = 0; i < 3; ++i) {
+    CHECK(std::fabs(on_a.value().p[i] - on_b.value().p[i]) <= 1e-10);
+  }
+}
+
+TEST_CASE("ssi: a seed that is already a solution returns without a step") {
+  // The spheres touch the plane at one point and the seed is that point exactly,
+  // so the convergence test at the top of the loop must succeed before any
+  // Newton step (tangency is otherwise a numeric_failure).
+  const Sphere3 sphere{Point3d{0, 0, 1}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-2, 2});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> p =
+      refine_ssi_point(a.value(), b.value(), {0.5, -1.5707963267948966, 0.0, 0.0}, 1e-12);
+  REQUIRE(p.has_value());
+  CHECK(p.value().residual <= 1e-12);
+  CHECK(p.value().ua[0] == 0.5);
+  CHECK(p.value().ua[1] == -1.5707963267948966);
+  CHECK(p.value().va[0] == 0.0);
+  CHECK(p.value().va[1] == 0.0);
+  CHECK(std::fabs(p.value().p[2]) <= 1e-15);
+}
+
+TEST_CASE("ssi: a displaced tangency seed does not converge") {
+  const Sphere3 sphere{Point3d{0, 0, 1}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> p =
+      refine_ssi_point(a.value(), b.value(), {0.5, -1.4707963267948966, 0.1, 0.1}, 1e-12);
+  REQUIRE_FALSE(p.has_value());
+  CHECK(p.error().code == Errc::numeric_failure);
 }
