@@ -925,19 +925,21 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
 // Gauss-Newton that re-closes the gap, and the mismatch at least halves per
 // round. Tangency then requires:
 //  - the refined gap is within `tolerance`;
-//  - the unit normals at the refined contact are parallel to 1e-9;
+//  - the unit normals at the refined contact are parallel: |cross| < 1e-10;
 //  - the patches are not coincident (surfaces_coincident is false);
 //  - both refined contact parameters are inside their patches (patch_contains);
-//  - a one-sided contact test: 5x5 samples around each contact, spanning
-//    max(1e-3 of the patch span, 16 * tolerance), must not fall on both sides
-//    of the other carrier beyond a band of max(1e-12 relative to the sample
-//    magnitude, 0.3 * tolerance). The round-off floor keeps double-precision
-//    noise at an exact contact neutral; the 0.3 * tolerance floor keeps a
-//    sample that stays within a third of the accepted gap from being read as a
-//    crossing side, while a real crossing (a full tolerance of separation over
-//    the sampled neighbourhood) is still seen on both sides. A cutting,
-//    crossing, or interpenetrating pair gives samples on both sides and is
-//    rejected; a true contact gives samples on one side only.
+//  - a global one-sided test over each whole patch domain. A fixed 21x21
+//    parameter grid (endpoints included; periodic axes wrap by 2*pi) is
+//    evaluated on the patch, and every sample's exact signed distance to the
+//    other carrier must stay on one side. Two bands are checked: the tolerance
+//    band `tolerance`, and a geometric band max(1e-12 * (1 + max|p|),
+//    0.05 * tolerance). A pair is rejected when either band has samples beyond
+//    both +band and -band. A crossing or cutting pair is then caught however
+//    shallow the cut: the tolerance band alone would treat a cut whose cap is
+//    0.1 * tolerance above the other carrier as neutral, while the geometric
+//    band sees that cap, and the round-off floor keeps double-precision noise
+//    at an exact contact neutral. A true contact, however shallow, has samples
+//    on one side only.
 //
 // NURBS patches are unsupported by both predicates: their exact signed
 // implicit distance is not available without a Newton projection, so neither
@@ -967,32 +969,29 @@ inline constexpr double kSsiDiagnosticDamping = 1e-10;
 // a parameter drift whose size is the normal tilt, so a second pass alternates
 // a damped Gauss-Newton step on the normal mismatch (finite-difference normal
 // Jacobian) with contact Gauss-Newton that re-closes the gap. Each round halves
-// the mismatch, so 24 rounds take a 1e-6 starting mismatch down to 1e-13.
-inline constexpr int kSsiDiagnosticAlignRounds = 24;
+// the mismatch, so 32 rounds take a 1e-6 starting mismatch down to 1e-16.
+inline constexpr int kSsiDiagnosticAlignRounds = 32;
 inline constexpr int kSsiDiagnosticAlignGaussNewtonIterations = 4;
 inline constexpr double kSsiDiagnosticAlignStep = 1e-6;
 
-// One-sided contact test: a 5x5 neighbourhood around each refined contact.
-inline constexpr int kSsiDiagnosticContactTestGrid = 5;
-inline constexpr double kSsiDiagnosticContactTestSpanFraction = 1e-3;
-inline constexpr double kSsiDiagnosticContactTestSpanTolerance = 16.0;
+// Global one-sided test: a fixed 21x21 parameter grid over the whole patch
+// domain, and two neutral bands: the caller's tolerance and a geometric band
+// that is 0.05 * tolerance above the round-off floor. The first catches a
+// crossing that separates the carriers by a full tolerance or more; the second
+// catches a cut whose cap is only a fraction of the tolerance above the other
+// carrier, which the tolerance band alone would treat as neutral.
+inline constexpr int kSsiDiagnosticGlobalTestGrid = 21;
+inline constexpr double kSsiDiagnosticGlobalTestFraction = 0.05;
 
 // Carrier frame slack (1 - |unit dot unit|) and refined-contact normal slack.
+// The normal check is strict: a crossing at 1e-9 rad must be rejected.
 inline constexpr double kSsiDiagnosticFrameSlack = 1e-12;
-inline constexpr double kSsiDiagnosticNormalSlack = 1e-9;
+inline constexpr double kSsiDiagnosticNormalSlack = 1e-10;
 
-// Relative round-off band for the one-sided contact test. Samples whose signed
-// distance is smaller than this are treated as neutral rather than as a side,
-// so double-precision noise at a true contact is not mistaken for a crossing
-// while a real crossing deeper than the round-off floor is still seen on both
-// sides (a crossing of half the tolerance is far above this band).
+// Relative round-off floor of the geometric band: samples whose signed distance
+// is within 1e-12 * (1 + max|p|) of the other carrier are treated as neutral,
+// so double-precision noise at an exact contact is not read as a crossing side.
 inline constexpr double kSsiDiagnosticSignSlack = 1e-12;
-
-// Fraction of the tolerance used as the neutral band of the one-sided contact
-// test: a sample within 0.3 * tolerance of the other carrier is not evidence of
-// a crossing side. A crossing that separates the carriers by a full tolerance
-// over the sampled neighbourhood still gives samples on both sides.
-inline constexpr double kSsiDiagnosticSignFraction = 0.3;
 
 inline constexpr int kSsiDiagnosticGridCapacity =
     kSsiDiagnosticCoincidenceGrid * kSsiDiagnosticCoincidenceGrid;
@@ -1089,14 +1088,21 @@ inline bool ssi_diagnostic_same_carrier(const SurfaceGeometry& a, const SurfaceG
     const Cone3* cone_b = std::get_if<Cone3>(&b);
     if (cone_b == nullptr) return false;
     // A double cone is fixed by its apex, axis line, and half angle. The apex
-    // is invariant under an axis flip to the other nappe.
+    // is invariant under an axis flip to the other nappe. The half angle is an
+    // angle, so its comparison is scaled by the carrier's geometric size: a
+    // 1e-10 rad difference is irrelevant on a millimetre-scale cone and
+    // significant on a kilometre-scale one.
     if (!ssi_diagnostic_unit_parallel(cone_a->axis, cone_b->axis)) return false;
-    if (std::fabs(cone_a->half_angle - cone_b->half_angle) > tolerance) return false;
     const Point3d apex_a =
         cone_a->origin + cone_a->axis * (cone_a->radius / std::tan(cone_a->half_angle));
     const Point3d apex_b =
         cone_b->origin + cone_b->axis * (cone_b->radius / std::tan(cone_b->half_angle));
-    return norm2(apex_a - apex_b) <= tolerance;
+    if (norm2(apex_a - apex_b) > tolerance) return false;
+    const double scale = std::max(std::max(norm2(ssi_diagnostic_vec(apex_a)),
+                                           norm2(ssi_diagnostic_vec(apex_b))),
+                                  std::max(cone_a->radius, cone_b->radius));
+    const double angular_scale = std::max(scale, 1e-300);
+    return std::fabs(cone_a->half_angle - cone_b->half_angle) * angular_scale <= tolerance;
   }
   if (const Torus3* torus_a = std::get_if<Torus3>(&a)) {
     const Torus3* torus_b = std::get_if<Torus3>(&b);
@@ -1383,7 +1389,7 @@ inline bool ssi_diagnostic_align_contact(const SsiPatch& a, const SsiPatch& b,
     const Vec3d mismatch = cross(normal_a, normal_b);
     if (!ssi_diagnostic_vec_finite(mismatch)) return false;
     const double mismatch_norm = norm2(mismatch);
-    if (mismatch_norm <= kSsiDiagnosticNormalSlack) {
+    if (mismatch_norm < kSsiDiagnosticNormalSlack) {
       return ssi_diagnostic_store_contact(a, b, parameters, contact);
     }
     std::array<Vec3d, 4> columns{};
@@ -1462,7 +1468,7 @@ inline bool ssi_diagnostic_align_contact(const SsiPatch& a, const SsiPatch& b,
   }
   const Vec3d remainder = cross(normal_a, normal_b);
   if (!ssi_diagnostic_vec_finite(remainder)) return false;
-  if (!(norm2(remainder) <= kSsiDiagnosticNormalSlack)) return false;
+  if (!(norm2(remainder) < kSsiDiagnosticNormalSlack)) return false;
   return ssi_diagnostic_store_contact(a, b, parameters, contact);
 }
 
@@ -1502,46 +1508,47 @@ inline bool ssi_diagnostic_refine_contact(const SsiPatch& a, const SsiPatch& b,
   return ssi_diagnostic_store_contact(a, b, parameters, contact);
 }
 
-// One-sided contact test: the 5x5 neighbourhood of `contact` on `patch` must
-// not contain samples on both sides of `other`'s carrier beyond the neutral
-// band (max(1e-12 relative, 0.3 * tolerance)). A cutting or crossing carrier
-// produces both signs; a touching carrier produces one.
-inline bool ssi_diagnostic_contact_one_sided(const SsiPatch& patch,
-                                             const std::array<double, 2>& contact,
-                                             const SurfaceGeometry& other,
-                                             double tolerance) noexcept {
-  const double span_u = std::max(kSsiDiagnosticContactTestSpanFraction * (patch.u[1] - patch.u[0]),
-                                 kSsiDiagnosticContactTestSpanTolerance * tolerance);
-  const double span_v = std::max(kSsiDiagnosticContactTestSpanFraction * (patch.v[1] - patch.v[0]),
-                                 kSsiDiagnosticContactTestSpanTolerance * tolerance);
-  const double denominator = static_cast<double>(kSsiDiagnosticContactTestGrid - 1);
-  bool positive = false;
-  bool negative = false;
-  for (int iu = 0; iu < kSsiDiagnosticContactTestGrid; ++iu) {
-    const double offset_u =
-        (static_cast<double>(iu) / denominator - 0.5) * span_u;
-    const double u = ssi_diagnostic_place(contact[0] + offset_u, patch.u[0], patch.u[1],
-                                          surface_periodic(patch.surface, 0));
-    for (int iv = 0; iv < kSsiDiagnosticContactTestGrid; ++iv) {
-      const double offset_v =
-          (static_cast<double>(iv) / denominator - 0.5) * span_v;
-      const double v = ssi_diagnostic_place(contact[1] + offset_v, patch.v[0], patch.v[1],
-                                            surface_periodic(patch.surface, 1));
+// Global one-sided test: the whole domain of `patch` is sampled on a fixed
+// 21x21 parameter grid (endpoints included; periodic axes wrap by 2*pi) and
+// every sample's signed distance to `other`'s carrier must stay on one side.
+// Two bands are checked: the tolerance band and the geometric band
+// max(1e-12 * (1 + max|p|), 0.05 * tolerance). Either band showing samples
+// beyond both +band and -band rejects the pair. A crossing or cutting carrier
+// produces both signs; a touching carrier produces one. The grid is fixed and
+// stack-allocated, so the test stays noexcept and allocation-free.
+inline bool ssi_diagnostic_sign_test(const SsiPatch& patch, const SurfaceGeometry& other,
+                                     double tolerance) noexcept {
+  const double denominator = static_cast<double>(kSsiDiagnosticGlobalTestGrid - 1);
+  const double geometric_fraction = kSsiDiagnosticGlobalTestFraction * tolerance;
+  bool tolerance_positive = false;
+  bool tolerance_negative = false;
+  bool geometric_positive = false;
+  bool geometric_negative = false;
+  for (int iu = 0; iu < kSsiDiagnosticGlobalTestGrid; ++iu) {
+    const double u = ssi_diagnostic_place(
+        patch.u[0] + (patch.u[1] - patch.u[0]) * (static_cast<double>(iu) / denominator),
+        patch.u[0], patch.u[1], surface_periodic(patch.surface, 0));
+    for (int iv = 0; iv < kSsiDiagnosticGlobalTestGrid; ++iv) {
+      const double v = ssi_diagnostic_place(
+          patch.v[0] + (patch.v[1] - patch.v[0]) * (static_cast<double>(iv) / denominator),
+          patch.v[0], patch.v[1], surface_periodic(patch.surface, 1));
       const Result<SurfacePoint> evaluated = surface_eval(patch.surface, u, v);
       if (!evaluated.has_value() || !surface_point_finite(evaluated.value())) return false;
       const Point3d& point = evaluated.value().p;
       const double signed_distance = ssi_diagnostic_signed_distance(other, point);
       if (!std::isfinite(signed_distance)) return false;
-      // Neutral band: round-off at the sample scale, and a third of the
-      // tolerance so that a sample remaining within the accepted gap does not
-      // count as a crossing side.
       const double magnitude = std::max(std::max(std::fabs(point[0]), std::fabs(point[1])),
                                         std::fabs(point[2]));
-      const double side_band = std::max(kSsiDiagnosticSignSlack * (1.0 + magnitude),
-                                        kSsiDiagnosticSignFraction * tolerance);
-      if (signed_distance > side_band) positive = true;
-      if (signed_distance < -side_band) negative = true;
-      if (positive && negative) return false;
+      const double geometric_band =
+          std::max(kSsiDiagnosticSignSlack * (1.0 + magnitude), geometric_fraction);
+      if (signed_distance > tolerance) tolerance_positive = true;
+      if (signed_distance < -tolerance) tolerance_negative = true;
+      if (signed_distance > geometric_band) geometric_positive = true;
+      if (signed_distance < -geometric_band) geometric_negative = true;
+      if ((tolerance_positive && tolerance_negative) ||
+          (geometric_positive && geometric_negative)) {
+        return false;
+      }
     }
   }
   return true;
@@ -1584,9 +1591,9 @@ inline bool surfaces_coincident(const SsiPatch& a, const SsiPatch& b,
 
 // True when the two carriers touch within `tolerance` at a refined contact with
 // parallel normals and do not coincide. The refined contact must be inside both
-// patches, and the one-sided test described in the banner comment rejects
-// carriers that cross, cut, or interpenetrate. NURBS patches answer false
-// because their tangency cannot be certified without an exact projection.
+// patches, and the global one-sided test described in the banner comment
+// rejects carriers that cross, cut, or interpenetrate. NURBS patches answer
+// false because their tangency cannot be certified without an exact projection.
 inline bool patches_tangent(const SsiPatch& a, const SsiPatch& b, double tolerance) noexcept {
   if (!std::isfinite(tolerance) || !(tolerance > 0.0)) return false;
   if (std::holds_alternative<NurbsSurface>(a.surface) ||
@@ -1612,13 +1619,9 @@ inline bool patches_tangent(const SsiPatch& a, const SsiPatch& b, double toleran
   if (!normal_a.has_value() || !normal_b.has_value()) return false;
   const Vec3d normal_cross = cross(normal_a.value(), normal_b.value());
   if (!detail::ssi_diagnostic_vec_finite(normal_cross)) return false;
-  if (!(norm2(normal_cross) <= detail::kSsiDiagnosticNormalSlack)) return false;
-  if (!detail::ssi_diagnostic_contact_one_sided(a, contact.uv_a, b.surface, tolerance)) {
-    return false;
-  }
-  if (!detail::ssi_diagnostic_contact_one_sided(b, contact.uv_b, a.surface, tolerance)) {
-    return false;
-  }
+  if (!(norm2(normal_cross) < detail::kSsiDiagnosticNormalSlack)) return false;
+  if (!detail::ssi_diagnostic_sign_test(a, b.surface, tolerance)) return false;
+  if (!detail::ssi_diagnostic_sign_test(b, a.surface, tolerance)) return false;
   return true;
 }
 

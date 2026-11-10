@@ -345,8 +345,8 @@ TEST_CASE("ssi: coincidence of NURBS surfaces is documented as unsupported") {
 
 TEST_CASE("ssi: near-parallel crossing planes are not tangent") {
   // Both planes pass through the origin, so the gap at the contact is exactly
-  // zero. The 1e-7 rad crossing is far above the 1e-9 normal-parallel test and
-  // far below the old 1e-6 heuristic; only the one-sided test rejects it.
+  // zero. The 1e-7 rad crossing is far above the strict 1e-10 normal guard and
+  // the global sign test sees both sides across the crossing line.
   for (const double angle : {1e-7, 1e-6}) {
     CAPTURE(angle);
     const Result<SsiPatch> a = square_plane_patch({0, 0, 1}, 0.0, 2.0);
@@ -566,4 +566,122 @@ TEST_CASE("ssi: coincidence rejects a domain sample outside the band") {
   }
   CHECK(outside == 1);
   CHECK_FALSE(surfaces_coincident(a.value(), b.value(), kTolerance));
+}
+
+TEST_CASE("ssi: crossing planes at a nanosized angle are not tangent") {
+  // The normal mismatch (1e-9 rad) is above the strict 1e-10 normal guard, and
+  // the patches straddle the crossing line, so the global sign test also sees
+  // both sides. The off-origin variant crosses near z = 1 with unequal extents.
+  const double angle = 1e-9;
+  const Result<SsiPatch> origin_a = square_plane_patch({0, 0, 1}, 0.0, 2.0);
+  const Result<SsiPatch> origin_b =
+      square_plane_patch({std::sin(angle), 0.0, std::cos(angle)}, 0.0, 3.0);
+  REQUIRE(origin_a.has_value());
+  REQUIRE(origin_b.has_value());
+  CHECK_FALSE(patches_tangent(origin_a.value(), origin_b.value(), kTolerance));
+  CHECK_FALSE(patches_tangent(origin_b.value(), origin_a.value(), kTolerance));
+
+  const double off_angle = 2.0 * angle;
+  const Result<SsiPatch> offset_a = square_plane_patch({0, 0, 1}, 1.0, 2.0);
+  const Result<SsiPatch> offset_b =
+      square_plane_patch({std::sin(off_angle), 0.0, std::cos(off_angle)}, 1.0, 3.0);
+  REQUIRE(offset_a.has_value());
+  REQUIRE(offset_b.has_value());
+  CHECK_FALSE(patches_tangent(offset_a.value(), offset_b.value(), kTolerance));
+}
+
+TEST_CASE("ssi: a sphere cut within the tolerance band is not tangent") {
+  // The plane sits a fraction of the tolerance below the pole, so the gap is
+  // inside the band and the normals are parallel. The cap above the plane is
+  // only a fraction of the tolerance deep, which the tolerance band alone would
+  // treat as neutral; the geometric band sees it while the far side of the
+  // sphere is negative, so the global sign test rejects every cut.
+  const Result<SsiPatch> sphere = full_sphere_patch(kUnitSphere);
+  REQUIRE(sphere.has_value());
+  for (const double fraction : {0.1, 0.2, 0.25, 0.3, 0.5, 0.9, 1.5}) {
+    CAPTURE(fraction);
+    const Result<SsiPatch> plane =
+        square_plane_patch({0, 0, 1}, 1.0 - fraction * kTolerance, 2.0);
+    REQUIRE(plane.has_value());
+    CHECK_FALSE(patches_tangent(sphere.value(), plane.value(), kTolerance));
+  }
+  // Exactly at the pole the pair touches from one side and is tangent.
+  const Result<SsiPatch> touching = square_plane_patch({0, 0, 1}, 1.0, 2.0);
+  REQUIRE(touching.has_value());
+  CHECK(patches_tangent(sphere.value(), touching.value(), kTolerance));
+}
+
+TEST_CASE("ssi: cone coincidence scales the half-angle comparison by the carrier size") {
+  // The half angle is an angle: a 1e-10 rad difference is negligible on a
+  // millimetre-scale cone and invisible on a kilometre-scale one, so the
+  // comparison is scaled by max(|apex|, radius).
+  const double tiny = 1e-3;
+  const Result<SsiPatch> tiny_a = make_ssi_patch(
+      SurfaceGeometry{
+          Cone3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, tiny, 0.25 * kPi}},
+      {0.0, kTwoPi}, {0.0, tiny});
+  const Result<SsiPatch> tiny_b = make_ssi_patch(
+      SurfaceGeometry{
+          Cone3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, tiny,
+                0.25 * kPi + 1e-10}},
+      {0.0, kTwoPi}, {0.0, tiny});
+  REQUIRE(tiny_a.has_value());
+  REQUIRE(tiny_b.has_value());
+  CHECK(surfaces_coincident(tiny_a.value(), tiny_b.value(), 1e-12));
+
+  const Result<SsiPatch> different = make_ssi_patch(
+      SurfaceGeometry{
+          Cone3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, tiny,
+                0.25 * kPi + 1e-6}},
+      {0.0, kTwoPi}, {0.0, tiny});
+  REQUIRE(different.has_value());
+  CHECK_FALSE(surfaces_coincident(tiny_a.value(), different.value(), 1e-12));
+
+  const double large = 1e3;
+  const Result<SsiPatch> large_a = make_ssi_patch(
+      SurfaceGeometry{
+          Cone3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, large, 0.25 * kPi}},
+      {0.0, kTwoPi}, {0.0, large});
+  const Result<SsiPatch> large_b = make_ssi_patch(
+      SurfaceGeometry{
+          Cone3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, large,
+                0.25 * kPi + 1e-10}},
+      {0.0, kTwoPi}, {0.0, large});
+  REQUIRE(large_a.has_value());
+  REQUIRE(large_b.has_value());
+  CHECK(surfaces_coincident(large_a.value(), large_b.value(), 1e-6));
+}
+
+TEST_CASE("ssi: the global sign test covers a finite cylinder patch") {
+  const Result<SsiPatch> cylinder = make_ssi_patch(
+      SurfaceGeometry{
+          Cylinder3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0}},
+      {0.0, kTwoPi}, {-0.5, 0.5});
+  REQUIRE(cylinder.has_value());
+  const Result<SsiPatch> tangent_plane = square_plane_patch({1, 0, 0}, 1.0, 2.0);
+  REQUIRE(tangent_plane.has_value());
+  CHECK(patches_tangent(cylinder.value(), tangent_plane.value(), kTolerance));
+
+  // Half a tolerance inside the cylinder the carriers cut along a strip: the
+  // gap is zero, but the samples of the cylinder span both sides of the plane.
+  const Result<SsiPatch> cutting_plane =
+      square_plane_patch({1, 0, 0}, 1.0 - 0.5 * kTolerance, 2.0);
+  REQUIRE(cutting_plane.has_value());
+  CHECK_FALSE(patches_tangent(cylinder.value(), cutting_plane.value(), kTolerance));
+}
+
+TEST_CASE("ssi: a shallow crossing inside the coincidence band is still not tangent") {
+  // The patches are small enough that a 1e-7 rad crossing moves their samples
+  // by only ~1e-11, and the equal offsets make the carriers the same plane
+  // within the tolerance: the pair is coincident, so tangency is rejected at
+  // that gate. It is still a crossing, not a contact.
+  const double angle = 1e-7;
+  const double extent = 1e-4;
+  const Result<SsiPatch> a = square_plane_patch({0, 0, 1}, 0.0, extent);
+  const Result<SsiPatch> b =
+      square_plane_patch({std::sin(angle), 0.0, std::cos(angle)}, 0.0, extent);
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  CHECK(surfaces_coincident(a.value(), b.value(), kTolerance));
+  CHECK_FALSE(patches_tangent(a.value(), b.value(), kTolerance));
 }
