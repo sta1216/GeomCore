@@ -838,7 +838,9 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
       }
     }
     if (points.size() < 2) {
-      return Error{Errc::numeric_failure, "trace_ssi_curves: seed has no traceable extent"};
+      // This seed has no extent, but other seeds may still describe real
+      // curves; only an all-empty result is reported below.
+      continue;
     }
     const bool weld = closed && norm2(points.back().p - points.front().p) > 0.0;
     if (weld) {
