@@ -63,7 +63,9 @@ struct SsiResult {
 // Budget for one SSI request. tolerance is the geometric acceptance band,
 // max_depth bounds the adaptive patch subdivision, and max_segments bounds the
 // traced output. An invalid tolerance or a non-positive budget is rejected by
-// ssi() rather than silently clamped.
+// ssi() rather than silently clamped. max_depth must be at least 4: the seed
+// clustering assumes at least 16 cells per patch side, and coarser meshes
+// produce duplicate curves whose count depends on the argument order.
 struct SsiOptions {
   double tolerance = 1e-9;
   int max_depth = 12;
@@ -92,6 +94,13 @@ inline SsiIssue ssi_driver_issue(SsiDiagnostic code, const char* message) noexce
 // per mesh segment. The work counters are deliberately left at their zero-work
 // defaults: this driver only produces the curves and the diagnostics.
 inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOptions& options) {
+  // The seed clustering assumes at least 16 cells per patch side: coarser
+  // meshes make neighbouring triangle pair seeds land far enough apart that one
+  // loop splits into duplicate, argument-order-dependent curves. The floor is
+  // part of this task's contract; Task 9 extends the general option checks.
+  if (options.max_depth < 4) {
+    return Error{Errc::unsupported, "ssi: max_depth must be at least 4"};
+  }
   SsiResult result;
   const double tolerance = options.tolerance;
 
@@ -203,8 +212,9 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
 
   const double seed_tolerance =
       std::max(64.0 * tolerance, 1e-9 * std::max(diagonal_a, diagonal_b));
-  const std::vector<SsiPoint> representatives =
-      detail::ssi_driver_curve_seeds(a, b, seeds, segments, seed_tolerance);
+  const std::vector<SsiPoint> representatives = detail::ssi_driver_curve_seeds(
+      a, b, seeds, segments, seed_tolerance, patch_mesh_a.max_chord_error,
+      patch_mesh_b.max_chord_error);
   Result<std::vector<SsiCurve>> curves = trace_ssi_curves(a, b, representatives, tolerance);
   if (!curves.has_value()) return curves.error();
   result.curves = std::move(curves.value());

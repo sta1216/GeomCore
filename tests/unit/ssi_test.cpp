@@ -1,4 +1,5 @@
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 #include <doctest/doctest.h>
@@ -336,6 +337,105 @@ TEST_CASE("ssi: an unreferenced seed is its own component") {
   const std::vector<SsiPoint> representatives = detail::ssi_driver_curve_seeds(
       patch.value(), patch.value(), {one, two}, {}, 1e-6);
   CHECK(representatives.size() == 2);
+}
+
+TEST_CASE("ssi: max_depth below the clustering floor is rejected") {
+  // The seed clustering assumes at least 16 cells per patch side; coarser
+  // meshes produce duplicate and argument-order-dependent curves, so the
+  // option is rejected before any tessellation or predicate work.
+  const Torus3 torus{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 2.0, 0.5};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{torus}, {0, 2 * 3.141592653589793},
+                                            {0, 2 * 3.141592653589793});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0.1}}, {-4, 4}, {-4, 4});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  for (const int depth : {1, 3}) {
+    INFO("depth=" << depth);
+    const Result<SsiResult> rejected = ssi(a.value(), b.value(), SsiOptions{1e-9, depth});
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == Errc::unsupported);
+    CHECK(std::strcmp(rejected.error().message, "ssi: max_depth must be at least 4") == 0);
+  }
+  const Result<SsiResult> accepted = ssi(a.value(), b.value(), SsiOptions{1e-9, 4});
+  REQUIRE(accepted.has_value());
+  CHECK(accepted.value().curves.size() == 2);
+}
+
+TEST_CASE("ssi: a wide plane patch does not merge the torus branches") {
+  // The two torus-plane circles at z=0.4 have radii 1.7 and 2.3, so they are
+  // about 0.6 apart. A seed radius scaled by the plane patch's bounding box
+  // grows with the plane extent and merges them; the union must instead be a
+  // 3D distance bounded by the tessellation error.
+  const Torus3 torus{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 2.0, 0.5};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{torus}, {0, 2 * 3.141592653589793},
+                                            {0, 2 * 3.141592653589793});
+  REQUIRE(a.has_value());
+  for (const double extent : {4.0, 12.0}) {
+    INFO("extent=" << extent);
+    const Result<SsiPatch> b = make_ssi_patch(
+        SurfaceGeometry{Plane3{{0, 0, 1}, 0.4}}, {-extent, extent}, {-extent, extent});
+    REQUIRE(b.has_value());
+    const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-9});
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().curves.size() == 2);
+    for (const SsiCurve& curve : result.value().curves) {
+      CHECK(curve.closed);
+      double length = 0.0;
+      for (const SsiSegment& s : curve.segments) length += norm2(s.b - s.a);
+      CHECK(length >= 2 * 3.141592653589793 * 1.69);
+      CHECK(length <= 2 * 3.141592653589793 * 2.31);
+    }
+  }
+}
+
+TEST_CASE("ssi: a trace that cannot close or reach a boundary is rejected") {
+  // The intersection circle leaves the v band at v=1.5028, but the sphere patch
+  // ends at v=1.55, so the circle is entirely inside and must close. The walk
+  // instead keeps circling; the lap guard has to stop it instead of returning a
+  // seven-lap arc.
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793},
+                                            {-1.55, 1.55});
+  const double inv_root2 = 1.0 / std::sqrt(2.0);
+  const Result<SsiPatch> b = make_ssi_patch(
+      SurfaceGeometry{Plane3{{inv_root2, 0.0, inv_root2}, 0.75}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  if (!result.has_value()) {
+    CHECK(result.error().code == Errc::numeric_failure);
+    CHECK(std::strcmp(result.error().message,
+                      "trace_ssi_curves: curve does not close or reach a boundary") == 0);
+  } else {
+    REQUIRE(result.value().curves.size() == 1);
+    CHECK_FALSE(result.value().curves[0].closed);
+    double length = 0.0;
+    for (const SsiSegment& s : result.value().curves[0].segments) length += norm2(s.b - s.a);
+    CHECK(length <= 6.0);
+  }
+}
+
+TEST_CASE("ssi: a boundary-clipped arc ends on the v boundary") {
+  // The circle leaves the v band at v=1.5028, so both trimmed ends must sit on
+  // |v|=1.5 within the boundary tolerance rather than a fraction of a radian
+  // short of it.
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793},
+                                            {-1.5, 1.5});
+  const double inv_root2 = 1.0 / std::sqrt(2.0);
+  const Result<SsiPatch> b = make_ssi_patch(
+      SurfaceGeometry{Plane3{{inv_root2, 0.0, inv_root2}, 0.75}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().curves.size() == 1);
+  const SsiCurve& curve = result.value().curves[0];
+  CHECK_FALSE(curve.closed);
+  REQUIRE(curve.segments.size() >= 2);
+  CHECK(std::fabs(std::fabs(curve.segments.front().ua[1]) - 1.5) <= 1e-6);
+  CHECK(std::fabs(std::fabs(curve.segments.back().ub[1]) - 1.5) <= 1e-6);
 }
 
 TEST_CASE("ssi: crossing branches keep separate seed components") {
