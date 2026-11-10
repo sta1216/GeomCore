@@ -277,6 +277,21 @@ TEST_CASE("ssi: residual is the parameter gap and ignores the stored point") {
   CHECK(ssi_residual(a.value(), b.value(), hit) <= 1e-12);
 }
 
+TEST_CASE("ssi: residual is infinite when a surface evaluation fails") {
+  // R and r are both finite and 0 < r < R, but R + r overflows in eval(), so
+  // this is a genuine evaluation failure rather than a rejected patch.
+  const Torus3 huge{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.5e308, 1.4e308};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{huge}, {0, 2 * 3.141592653589793}, {0, 2 * 3.141592653589793});
+  REQUIRE(a.has_value());
+  SsiPoint point;
+  point.ua = {0.0, 0.0};
+  point.va = {0.0, 0.0};
+  const double residual = ssi_residual(a.value(), a.value(), point);
+  CHECK(std::isinf(residual));
+  CHECK(residual > 0.0);
+}
+
 TEST_CASE("ssi: the Newton step does not depend on the model scale") {
   // The Jacobian columns are divided by their largest entry so the 3x3 minors
   // stay O(1); the solved step is in those scaled units and must be converted
