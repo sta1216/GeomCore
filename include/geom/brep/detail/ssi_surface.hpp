@@ -123,7 +123,16 @@ inline Result<Vec3d> ssi_normal_from_derivatives(const Vec3d& du, const Vec3d& d
 // make_plane_frame, so its (u, v) parameterization is the orthonormal frame and
 // a rejected plane propagates make_plane_frame's Errc; every other surface uses
 // its own parameterization and is rejected as degenerate when invalid.
+//
+// surface_eval and surface_normal reject a non-finite u or v with
+// Errc::non_finite before any evaluation. The raw eval()/du()/dv()/normal()
+// members of the analytic and NURBS surfaces remain unchecked by design: they
+// are low-level and return non-finite values instead of reporting an error,
+// which is why SSI always queries through these wrappers.
 inline Result<SurfacePoint> surface_eval(const SurfaceGeometry& surface, double u, double v) {
+  if (!std::isfinite(u) || !std::isfinite(v)) {
+    return Error{Errc::non_finite, "ssi: surface parameter is not finite"};
+  }
   return std::visit(
       [u, v](const auto& s) -> Result<SurfacePoint> {
         using Surface = std::decay_t<decltype(s)>;
@@ -139,8 +148,12 @@ inline Result<SurfacePoint> surface_eval(const SurfaceGeometry& surface, double 
 // Unit surface normal, oriented like cross(du, dv) of the parameterization.
 // Planes and NURBS surfaces build it from the partials; the analytic surfaces
 // use their closed forms, which stay unit at poles and apexes where the cross
-// product of the partials vanishes.
+// product of the partials vanishes. A non-finite u or v is rejected with
+// Errc::non_finite, matching surface_eval.
 inline Result<Vec3d> surface_normal(const SurfaceGeometry& surface, double u, double v) {
+  if (!std::isfinite(u) || !std::isfinite(v)) {
+    return Error{Errc::non_finite, "ssi: surface parameter is not finite"};
+  }
   return std::visit(
       [u, v](const auto& s) -> Result<Vec3d> {
         using Surface = std::decay_t<decltype(s)>;
@@ -165,7 +178,9 @@ inline Result<Vec3d> surface_normal(const SurfaceGeometry& surface, double u, do
 
 // True when `axis` (0 = u, 1 = v) is periodic with 2*pi: the angular parameter
 // of a cylinder, cone, sphere or torus. Planes and NURBS surfaces are bounded
-// parameterizations, so neither axis is periodic for them.
+// parameterizations, so neither axis is periodic for them. Any other axis is
+// not a surface parameter, so it is reported as non-periodic rather than as an
+// error; wrap_surface_param does report Errc::index_out_of_range for it.
 inline bool surface_periodic(const SurfaceGeometry& surface, int axis) noexcept {
   if (axis != 0 && axis != 1) return false;
   return std::visit(
@@ -185,9 +200,14 @@ inline bool surface_periodic(const SurfaceGeometry& surface, int axis) noexcept 
 }
 
 // Folds a periodic parameter into [-pi, pi) and returns a non-periodic one
-// unchanged. A non-finite parameter is rejected before folding, because
-// std::remainder would only turn it into NaN.
+// unchanged. `axis` must be 0 (u) or 1 (v): an invalid axis is a caller error
+// and is reported as Errc::index_out_of_range even though surface_periodic
+// treats it as merely non-periodic. A non-finite parameter is rejected before
+// folding, because std::remainder would only turn it into NaN.
 inline Result<double> wrap_surface_param(const SurfaceGeometry& surface, int axis, double value) {
+  if (axis != 0 && axis != 1) {
+    return Error{Errc::index_out_of_range, "ssi: surface axis must be 0 or 1"};
+  }
   if (!std::isfinite(value)) {
     return Error{Errc::non_finite, "ssi: surface parameter is not finite"};
   }
