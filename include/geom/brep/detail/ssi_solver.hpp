@@ -579,7 +579,7 @@ inline SsiTraceEnd ssi_trace_close(const SsiPatch& a, const SsiPatch& b, SsiPoin
   const double span_a = std::hypot(a.u[1] - a.u[0], a.v[1] - a.v[0]);
   const double span_b = std::hypot(b.u[1] - b.u[0], b.v[1] - b.v[0]);
   const double param_window =
-      std::max(32.0 * tolerance, 1e-9 * std::max(span_a, span_b));
+      std::max(32.0 * tolerance, 1e-6 * std::max(span_a, span_b));
   double gap = norm2(base.p - start.p);
   if (!(gap > target)) return SsiTraceEnd::closed;
   // Aim for a vertex `target` short of the start rather than at the start
@@ -751,75 +751,6 @@ inline SsiTraceHalf ssi_trace_half(const SsiPatch& a, const SsiPatch& b, const S
 
 }  // namespace detail
 
-// Distance from a point to one closed polyline segment, clamped to the
-// segment. Used only to decide whether two traced loops are the same curve.
-inline double ssi_curve_point_segment_distance(const Point3d& point, const Point3d& first,
-                                               const Point3d& second) noexcept {
-  double length2 = 0.0;
-  double projection = 0.0;
-  for (int axis = 0; axis < 3; ++axis) {
-    const double edge = second[axis] - first[axis];
-    length2 += edge * edge;
-    projection += (point[axis] - first[axis]) * edge;
-  }
-  double t = 0.0;
-  if (length2 > 0.0) t = std::clamp(projection / length2, 0.0, 1.0);
-  double distance2 = 0.0;
-  for (int axis = 0; axis < 3; ++axis) {
-    const double delta =
-        point[axis] - (first[axis] + t * (second[axis] - first[axis]));
-    distance2 += delta * delta;
-  }
-  return std::sqrt(distance2);
-}
-
-// Largest distance from any vertex of `one` to the polyline `two`. Coincident
-// closed loops differ only by the sagitta of the tessellation that seeded them,
-// which is a small fraction of the loop size; distinct loops differ by their
-// separation.
-inline double ssi_curve_one_sided_distance(const SsiCurve& one, const SsiCurve& two) noexcept {
-  double worst = 0.0;
-  for (const SsiSegment& segment : one.segments) {
-    double best = std::numeric_limits<double>::infinity();
-    for (const SsiSegment& other : two.segments) {
-      best = std::min(best, ssi_curve_point_segment_distance(segment.a, other.a, other.b));
-    }
-    worst = std::max(worst, best);
-  }
-  return worst;
-}
-
-// Two closed traces describe the same loop when their vertex sets are
-// mutually within a small relative distance. Seed scatter from the curved
-// triangle tessellation can start several traces of one loop; this collapses
-// them after tracing, where the geometry is available, rather than widening the
-// seed-clustering tolerance and merging genuinely distinct branches.
-inline bool ssi_curves_coincide(const SsiCurve& one, const SsiCurve& two) noexcept {
-  if (!one.closed || !two.closed || one.segments.empty() || two.segments.empty()) return false;
-  const auto box_diagonal = [](const SsiCurve& curve) {
-    const Point3d& first = curve.segments.front().a;
-    std::array<double, 3> low{first[0], first[1], first[2]};
-    std::array<double, 3> high = low;
-    for (const SsiSegment& segment : curve.segments) {
-      for (int axis = 0; axis < 3; ++axis) {
-        low[axis] = std::min({low[axis], segment.a[axis], segment.b[axis]});
-        high[axis] = std::max({high[axis], segment.a[axis], segment.b[axis]});
-      }
-    }
-    double diagonal2 = 0.0;
-    for (int axis = 0; axis < 3; ++axis) {
-      const double extent = high[axis] - low[axis];
-      diagonal2 += extent * extent;
-    }
-    return std::sqrt(diagonal2);
-  };
-  const double diagonal = std::max(box_diagonal(one), box_diagonal(two));
-  if (!std::isfinite(diagonal) || !(diagonal > 0.0)) return false;
-  const double tolerance = 0.02 * diagonal;
-  return ssi_curve_one_sided_distance(one, two) <= tolerance &&
-         ssi_curve_one_sided_distance(two, one) <= tolerance;
-}
-
 // Traces the intersection curves of two validated SSI patches from refined
 // seeds. Each curve is walked in both null-space directions; a walk that
 // returns to its start closes the curve through a refined vertex within
@@ -953,34 +884,6 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
       // curves; only an all-empty result is reported below.
       continue;
     }
-    if (!closed && points.size() >= 4) {
-      // A loop that is clipped by a patch boundary walks into the boundary on
-      // both sides and stops. Its two ends then sit on the same boundary a
-      // short distance apart; report the clipped loop as closed, with the
-      // boundary chord as its closing weld, instead of presenting it as an
-      // open curve with a spurious gap.
-      const Point3d& first_point = points.front().p;
-      std::array<double, 3> low{first_point[0], first_point[1], first_point[2]};
-      std::array<double, 3> high = low;
-      for (const SsiPoint& point : points) {
-        for (int axis = 0; axis < 3; ++axis) {
-          low[static_cast<std::size_t>(axis)] =
-              std::min(low[static_cast<std::size_t>(axis)], point.p[axis]);
-          high[static_cast<std::size_t>(axis)] =
-              std::max(high[static_cast<std::size_t>(axis)], point.p[axis]);
-        }
-      }
-      double diagonal2 = 0.0;
-      for (int axis = 0; axis < 3; ++axis) {
-        const double extent = high[static_cast<std::size_t>(axis)] - low[static_cast<std::size_t>(axis)];
-        diagonal2 += extent * extent;
-      }
-      const double curve_diagonal = std::sqrt(diagonal2);
-      if (std::isfinite(curve_diagonal) && curve_diagonal > 0.0 &&
-          norm2(points.back().p - first_point) <= 0.25 * curve_diagonal) {
-        closed = true;
-      }
-    }
     const bool weld = closed && norm2(points.back().p - points.front().p) > 0.0;
     if (weld) {
       if (segments_used >= max_steps) {
@@ -1027,24 +930,7 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
     }
     return left.segments.size() < right.segments.size();
   });
-  // The tessellated triangle plane departs from the curved surface by its
-  // sagitta, so two segments that share one triangle crossing can refine their
-  // seeds to points a sagitta apart. The seed union deliberately uses a tight
-  // parameter tolerance and does not merge those, which can leave several
-  // full-loop traces of the same geometric curve. Collapse them after tracing.
-  std::vector<SsiCurve> unique_curves;
-  unique_curves.reserve(curves.size());
-  for (SsiCurve& curve : curves) {
-    bool duplicate = false;
-    for (const SsiCurve& kept : unique_curves) {
-      if (ssi_curves_coincide(curve, kept)) {
-        duplicate = true;
-        break;
-      }
-    }
-    if (!duplicate) unique_curves.push_back(std::move(curve));
-  }
-  return unique_curves;
+  return curves;
 }
 
 // ---------------------------------------------------------------------------
@@ -1909,6 +1795,51 @@ inline std::vector<SsiPoint> ssi_driver_curve_seeds(
   std::vector<std::size_t> parent(count);
   for (std::size_t index = 0; index < count; ++index) parent[index] = index;
 
+  // The tessellation, not the solver tolerance, bounds how far apart two
+  // endpoints that name the same intersection point can be: adaptive leaves
+  // create hanging nodes, so segments from neighbouring triangle pairs meet
+  // about one chord error apart. The cluster radius has to cover that error or
+  // one loop is reported as several arcs. The cost is that two genuinely
+  // distinct branches closer than 2*chord_error merge; that near-tangency case
+  // is diagnosed by the Task 6 predicates and recorded as an M3b-1 limitation.
+  const Box3d bounds_a = patch_bounds(a, seed_tolerance);
+  const Box3d bounds_b = patch_bounds(b, seed_tolerance);
+  if (!bounds_a.is_empty() && !bounds_b.is_empty()) {
+    const double diagonal_a = norm2(bounds_a.hi - bounds_a.lo);
+    const double diagonal_b = norm2(bounds_b.hi - bounds_b.lo);
+    const double chord_error =
+        std::max(2e-2 * std::max(diagonal_a, diagonal_b), seed_tolerance);
+    seed_tolerance = std::max(seed_tolerance, 2.0 * chord_error);
+  }
+
+  // A widened radius can also reach across to a different branch that passes
+  // close by, so a candidate merge must agree in direction as well: adjacent
+  // mesh segments continue the same curve and are nearly collinear, while two
+  // crossing branches leave their common neighbourhood at an angle.
+  std::vector<std::array<double, 3>> seed_tangent(count);
+  std::vector<bool> seed_tangent_valid(count, false);
+  for (const std::array<std::size_t, 2>& segment : segments) {
+    if (segment[0] >= count || segment[1] >= count || segment[0] == segment[1]) continue;
+    const Vec3d direction = seeds[segment[1]].p - seeds[segment[0]].p;
+    const double length = norm2(direction);
+    if (!(length > 0.0)) continue;
+    const std::array<double, 3> unit{direction[0] / length, direction[1] / length,
+                                     direction[2] / length};
+    seed_tangent[segment[0]] = unit;
+    seed_tangent_valid[segment[0]] = true;
+    seed_tangent[segment[1]] = unit;
+    seed_tangent_valid[segment[1]] = true;
+  }
+  const auto same_direction = [&](std::size_t first, std::size_t second) {
+    if (!seed_tangent_valid[first] || !seed_tangent_valid[second]) return true;
+    double dot = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+      dot += seed_tangent[first][static_cast<std::size_t>(axis)] *
+             seed_tangent[second][static_cast<std::size_t>(axis)];
+    }
+    return std::fabs(dot) >= 0.9;
+  };
+
   // Duplicates of one intersection point sit at the same 3D location to within
   // rounding, so a hash of the refined point finds them without a quadratic scan;
   // the neighbourhood probe keeps a pair from being missed when it straddles a
@@ -1940,6 +1871,7 @@ inline std::vector<SsiPoint> ssi_driver_curve_seeds(
             if (!(distance_a <= seed_tolerance)) continue;
             const double distance_b = ssi_param_distance(b, seeds[index].va, seeds[other].va);
             if (!(distance_b <= seed_tolerance)) continue;
+            if (!same_direction(index, other)) continue;
             const std::size_t root_first = ssi_driver_seed_root(parent, index);
             const std::size_t root_second = ssi_driver_seed_root(parent, other);
             if (root_first != root_second) parent[root_second] = root_first;

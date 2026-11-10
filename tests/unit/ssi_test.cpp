@@ -129,7 +129,7 @@ TEST_CASE("ssi: a planar NURBS patch intersects a plane in one line") {
 
 TEST_CASE("ssi: a full sphere cut by a plane closes across the u seam") {
   const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
-  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5707963267948966, 1.5707963267948966});
   const Result<SsiPatch> b = make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0.2}}, {-2, 2}, {-2, 2});
   REQUIRE(a.has_value());
   REQUIRE(b.has_value());
@@ -155,7 +155,7 @@ TEST_CASE("ssi: ssi_param_distance wraps periodic axes") {
 
 TEST_CASE("ssi: oblique sphere cuts yield one closed curve for every plane extent") {
   const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
-  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5707963267948966, 1.5707963267948966});
   REQUIRE(a.has_value());
   const double inv_root2 = 1.0 / std::sqrt(2.0);
   for (const double offset : {0.5, 0.75}) {
@@ -175,6 +175,57 @@ TEST_CASE("ssi: oblique sphere cuts yield one closed curve for every plane exten
       }
     }
   }
+}
+
+TEST_CASE("ssi: a boundary-clipped arc stays open") {
+  // The plane cuts the sphere in a full latitude circle; trimming the sphere
+  // patch just short of one full turn clips that circle into a single arc whose
+  // ends sit on the patch u boundary. The arc is almost closed in space, so a
+  // heuristic that closes a trace by comparing its end gap to its overall size
+  // would wrongly report it closed (and invent a chord through the patch).
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793 - 0.4},
+                     {-1.5707963267948966, 1.5707963267948966});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0.2}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().curves.size() == 1);
+  const SsiCurve& curve = result.value().curves[0];
+  CHECK_FALSE(curve.closed);
+  REQUIRE(curve.segments.size() >= 2);
+  // Both ends are trimmed by the patch u boundary, u = 0 or u = 2*pi - 0.4
+  // (stored folded into [-pi, pi)).
+  const auto on_boundary = [](double u) {
+    return std::fabs(u) < 1e-6 || std::fabs(u + 0.4) < 1e-6;
+  };
+  CHECK(on_boundary(curve.segments.front().ua[0]));
+  CHECK(on_boundary(curve.segments.back().ub[0]));
+  // The two trimmed ends sit at opposite sides of the removed wedge.
+  CHECK(std::fabs(std::remainder(curve.segments.front().ua[0] - curve.segments.back().ub[0],
+                                 2 * 3.141592653589793)) > 0.3);
+}
+
+TEST_CASE("ssi: a cut next to the sphere pole closes") {
+  // The intersection circle at z=0.995 has radius 0.0999. Near the pole a small
+  // 3D gap maps to a much larger parameter gap (|du| shrinks with cos(v)), so
+  // the closure window has to be wide enough in parameter space to accept the
+  // closing step instead of halving it away.
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793},
+                     {-1.5707963267948966, 1.5707963267948966});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0.995}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().curves.size() == 1);
+  CHECK(result.value().curves[0].closed);
 }
 
 TEST_CASE("ssi: torus-plane transverse cuts are argument-order independent") {
@@ -284,5 +335,29 @@ TEST_CASE("ssi: an unreferenced seed is its own component") {
   two.p = Point3d{-0.2, 0.7, 0.3};
   const std::vector<SsiPoint> representatives = detail::ssi_driver_curve_seeds(
       patch.value(), patch.value(), {one, two}, {}, 1e-6);
+  CHECK(representatives.size() == 2);
+}
+
+TEST_CASE("ssi: crossing branches keep separate seed components") {
+  // A widened seed radius can reach a different branch that passes close by.
+  // Two seeds at the same location and parameters but leaving along different
+  // directions must not be merged; the tangent guard keeps them apart.
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> patch = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846},
+      {-1.5707963267948966, 1.5707963267948966});
+  REQUIRE(patch.has_value());
+  SsiPoint first;
+  first.ua = {0.2, 0.1};
+  first.va = {0.3, 0.4};
+  first.p = Point3d{0.9, 0.1, 0.2};
+  SsiPoint second = first;
+  SsiPoint third = first;
+  third.p = Point3d{1.2, 0.1, 0.2};
+  SsiPoint fourth = first;
+  fourth.p = Point3d{0.9, 0.1, 0.5};
+  const std::vector<std::array<std::size_t, 2>> segments = {{0, 2}, {1, 3}};
+  const std::vector<SsiPoint> representatives = detail::ssi_driver_curve_seeds(
+      patch.value(), patch.value(), {first, second, third, fourth}, segments, 1e-6);
   CHECK(representatives.size() == 2);
 }
