@@ -127,6 +127,86 @@ TEST_CASE("ssi: a planar NURBS patch intersects a plane in one line") {
   }
 }
 
+TEST_CASE("ssi: a full sphere cut by a plane closes across the u seam") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+  const Result<SsiPatch> b = make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0.2}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().curves.size() == 1);
+  CHECK(result.value().curves[0].closed);
+  const auto& segments = result.value().curves[0].segments;
+  REQUIRE(segments.size() >= 8);
+  for (const SsiSegment& s : segments) {
+    CHECK(std::fabs(s.a[2] - 0.2) < 1e-8);
+    CHECK(std::fabs(std::sqrt(s.a[0] * s.a[0] + s.a[1] * s.a[1] + s.a[2] * s.a[2]) - 1.0) < 1e-8);
+  }
+}
+
+TEST_CASE("ssi: ssi_param_distance wraps periodic axes") {
+  const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> patch = make_ssi_patch(SurfaceGeometry{cylinder}, {0, 6.28}, {0, 1});
+  REQUIRE(patch.has_value());
+  CHECK(ssi_param_distance(patch.value(), {0.01, 0.5}, {6.273185307179586, 0.5}) ==
+        doctest::Approx(0.02).epsilon(1e-12));
+}
+
+TEST_CASE("ssi: oblique sphere cuts yield one closed curve for every plane extent") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+  REQUIRE(a.has_value());
+  const double inv_root2 = 1.0 / std::sqrt(2.0);
+  for (const double offset : {0.5, 0.75}) {
+    for (const double extent : {1.5, 2.0, 4.0, 6.0}) {
+      INFO("offset=" << offset << " extent=" << extent);
+      const Result<SsiPatch> b = make_ssi_patch(
+          SurfaceGeometry{Plane3{{inv_root2, 0.0, inv_root2}, offset}}, {-extent, extent}, {-extent, extent});
+      REQUIRE(b.has_value());
+      const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-9});
+      REQUIRE(result.has_value());
+      REQUIRE(result.value().curves.size() == 1);
+      CHECK(result.value().curves[0].closed);
+      for (const SsiSegment& s : result.value().curves[0].segments) {
+        CHECK(std::fabs(std::sqrt(s.a[0] * s.a[0] + s.a[1] * s.a[1] + s.a[2] * s.a[2]) - 1.0) < 1e-8);
+        CHECK(std::fabs(inv_root2 * (s.a[0] + s.a[2]) - offset) < 1e-8);
+        CHECK(s.residual <= 1e-9);
+      }
+    }
+  }
+}
+
+TEST_CASE("ssi: torus-plane transverse cuts are argument-order independent") {
+  const Torus3 torus{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 2.0, 0.5};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{torus}, {0, 2 * 3.141592653589793},
+                                            {0, 2 * 3.141592653589793});
+  REQUIRE(a.has_value());
+  for (const double z : {0.1, 0.2, 0.25, 0.3, 0.4}) {
+    for (const int depth : {4, 8, 12}) {
+      INFO("z=" << z << " depth=" << depth);
+      const Result<SsiPatch> b = make_ssi_patch(
+          SurfaceGeometry{Plane3{{0, 0, 1}, z}}, {-4, 4}, {-4, 4});
+      REQUIRE(b.has_value());
+      for (const bool swapped : {false, true}) {
+        const Result<SsiResult> result = swapped ? ssi(b.value(), a.value(), SsiOptions{1e-9, depth})
+                                                 : ssi(a.value(), b.value(), SsiOptions{1e-9, depth});
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().curves.size() == 2);
+        for (const SsiCurve& curve : result.value().curves) {
+          CHECK(curve.closed);
+          for (const SsiSegment& s : curve.segments) {
+            const double radial = std::sqrt(s.a[0] * s.a[0] + s.a[1] * s.a[1]);
+            CHECK(std::fabs((radial - 2.0) * (radial - 2.0) + s.a[2] * s.a[2] - 0.25) < 1e-7);
+            CHECK(std::fabs(s.a[2] - z) < 1e-8);
+            CHECK(s.residual <= 1e-9);
+          }
+        }
+      }
+    }
+  }
+}
+
 TEST_CASE("ssi: a wavy NURBS patch intersects a plane within tolerance") {
   const NurbsSurface patch = wavy_nurbs();
   REQUIRE(patch.is_valid());
@@ -144,4 +224,65 @@ TEST_CASE("ssi: a wavy NURBS patch intersects a plane within tolerance") {
       CHECK(std::fabs(s.b[2] - 0.25) < 1e-8);
     }
   }
+}
+
+TEST_CASE("ssi: seed components merge periodic parameter branches") {
+  const Torus3 torus{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 2.0, 0.5};
+  const double pi = 3.14159265358979323846;
+  const Result<SsiPatch> patch =
+      make_ssi_patch(SurfaceGeometry{torus}, {0, 2 * pi}, {0, 2 * pi});
+  REQUIRE(patch.has_value());
+  SsiPoint seam_a;
+  seam_a.ua = {-pi + 1e-9, 0.3};
+  seam_a.va = {0.4, 0.5};
+  seam_a.p = Point3d{2.1, 0.0, 0.4};
+  SsiPoint seam_b = seam_a;
+  seam_b.ua = {pi - 1e-9, 0.3};
+  REQUIRE(ssi_param_distance(patch.value(), seam_a.ua, seam_b.ua) < 1e-6);
+  const std::vector<SsiPoint> representatives = detail::ssi_driver_curve_seeds(
+      patch.value(), patch.value(), {seam_a, seam_b}, {}, 1e-6);
+  CHECK(representatives.size() == 1);
+}
+
+TEST_CASE("ssi: a segment refined at only one end keeps its refined seed") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> patch = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846}, {-1.5, 1.5});
+  REQUIRE(patch.has_value());
+  SsiPoint refined;
+  refined.ua = {0.2, 0.1};
+  refined.va = {0.3, 0.4};
+  refined.p = Point3d{0.9, 0.1, 0.2};
+  SsiPoint unreferenced = refined;
+  unreferenced.ua = {1.0, 0.9};
+  unreferenced.va = {-0.4, 0.7};
+  unreferenced.p = Point3d{-0.9, 0.2, -0.1};
+  const std::vector<std::array<std::size_t, 2>> segments = {
+      {0, detail::kSsiDriverNoSeed}};
+  const std::vector<SsiPoint> representatives = detail::ssi_driver_curve_seeds(
+      patch.value(), patch.value(), {refined, unreferenced}, segments, 1e-6);
+  REQUIRE(representatives.size() == 2);
+  bool kept_refined = false;
+  for (const SsiPoint& candidate : representatives) {
+    if (candidate.ua == refined.ua && candidate.va == refined.va) kept_refined = true;
+  }
+  CHECK(kept_refined);
+}
+
+TEST_CASE("ssi: an unreferenced seed is its own component") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> patch = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846}, {-1.5, 1.5});
+  REQUIRE(patch.has_value());
+  SsiPoint one;
+  one.ua = {0.1, 0.2};
+  one.va = {0.3, 0.4};
+  one.p = Point3d{0.8, 0.1, 0.2};
+  SsiPoint two = one;
+  two.ua = {-1.0, -0.5};
+  two.va = {-0.3, 0.1};
+  two.p = Point3d{-0.2, 0.7, 0.3};
+  const std::vector<SsiPoint> representatives = detail::ssi_driver_curve_seeds(
+      patch.value(), patch.value(), {one, two}, {}, 1e-6);
+  CHECK(representatives.size() == 2);
 }

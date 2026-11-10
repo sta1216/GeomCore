@@ -51,6 +51,22 @@ struct SsiCurve {
   bool closed = false;
 };
 
+// Period-aware distance between two parameter pairs on one patch: a periodic
+// axis is compared modulo 2*pi, so a seam pair such as -pi+eps and pi-eps is
+// 2*eps apart rather than almost a full period. Non-periodic axes are compared
+// as plain differences. The result is in parameter units, not radians alone:
+// it is the Euclidean length of the folded (du, dv) vector.
+inline double ssi_param_distance(const SsiPatch& patch, std::array<double, 2> p,
+                                 std::array<double, 2> q) noexcept {
+  std::array<double, 2> delta{p[0] - q[0], p[1] - q[1]};
+  for (std::size_t axis = 0; axis < 2; ++axis) {
+    if (surface_periodic(patch.surface, static_cast<int>(axis))) {
+      delta[axis] = std::remainder(delta[axis], detail::kSsiTwoPi);
+    }
+  }
+  return std::hypot(delta[0], delta[1]);
+}
+
 namespace detail {
 
 // A 3x3 system whose pivot falls below this fraction of its column's original
@@ -555,6 +571,15 @@ inline SsiTraceEnd ssi_trace_close(const SsiPatch& a, const SsiPatch& b, SsiPoin
                                    double step_limit, double tolerance, int max_steps,
                                    int& segments_used, std::vector<SsiPoint>& points) {
   const double target = 8.0 * tolerance;
+  // A closing vertex must agree with the start in parameters as well as in 3D:
+  // on a periodic patch a point can be within `target` of the start while its
+  // stored parameter is a full period away. The window is the smaller of a
+  // multiple of the 3D tolerance and a relative parameter span, so it scales
+  // with both the model and the patch domain.
+  const double span_a = std::hypot(a.u[1] - a.u[0], a.v[1] - a.v[0]);
+  const double span_b = std::hypot(b.u[1] - b.u[0], b.v[1] - b.v[0]);
+  const double param_window =
+      std::max(32.0 * tolerance, 1e-9 * std::max(span_a, span_b));
   double gap = norm2(base.p - start.p);
   if (!(gap > target)) return SsiTraceEnd::closed;
   // Aim for a vertex `target` short of the start rather than at the start
@@ -562,13 +587,14 @@ inline SsiTraceEnd ssi_trace_close(const SsiPatch& a, const SsiPatch& b, SsiPoin
   // step into the closing chord, which is O(step). Stopping one target short
   // keeps the closing weld (the last emitted segment) within 8*tolerance.
   double trial = std::min(step_limit, gap - 0.5 * target);
+  double direction = sign;
   for (int attempt = 0; attempt < kSsiTraceMaxRetries; ++attempt) {
     if (segments_used >= max_steps) return SsiTraceEnd::step_budget;
     if (!(trial > 0.0)) return SsiTraceEnd::closure_failed;
-    std::array<double, 2> predicted_ua{base.ua[0] + sign * trial * base_frame.velocity_a[0],
-                                       base.ua[1] + sign * trial * base_frame.velocity_a[1]};
-    std::array<double, 2> predicted_va{base.va[0] + sign * trial * base_frame.velocity_b[0],
-                                       base.va[1] + sign * trial * base_frame.velocity_b[1]};
+    std::array<double, 2> predicted_ua{base.ua[0] + direction * trial * base_frame.velocity_a[0],
+                                       base.ua[1] + direction * trial * base_frame.velocity_a[1]};
+    std::array<double, 2> predicted_va{base.va[0] + direction * trial * base_frame.velocity_b[0],
+                                       base.va[1] + direction * trial * base_frame.velocity_b[1]};
     if (!ssi_solver_wrap(a.surface, predicted_ua) || !ssi_solver_wrap(b.surface, predicted_va)) {
       trial *= 0.5;
       continue;
@@ -590,9 +616,17 @@ inline SsiTraceEnd ssi_trace_close(const SsiPatch& a, const SsiPatch& b, SsiPoin
     }
     const double next_gap = norm2(next.p - start.p);
     if (next_gap <= target) {
-      points.push_back(next);
-      ++segments_used;
-      return SsiTraceEnd::closed;
+      if (ssi_param_distance(a, next.ua, start.ua) <= param_window &&
+          ssi_param_distance(b, next.va, start.va) <= param_window) {
+        points.push_back(next);
+        ++segments_used;
+        return SsiTraceEnd::closed;
+      }
+      // The 3D gap closed but the parameters did not: the candidate names a
+      // different parameter branch of the same point. Back off instead of
+      // accepting a closure the caller could not weld unambiguously.
+      trial *= 0.5;
+      continue;
     }
     if (next_gap < 0.9 * gap) {
       SsiTraceFrame next_frame;
@@ -605,6 +639,10 @@ inline SsiTraceEnd ssi_trace_close(const SsiPatch& a, const SsiPatch& b, SsiPoin
       trial = std::min(step_limit, gap - 0.5 * target);
       continue;
     }
+    // The trial overshot the start or stalled short of it: the tangent chord
+    // does not line up with the remaining gap any more. Walk the other way for
+    // the next trial, halving the step so a stalled approach still converges.
+    direction = -direction;
     trial *= 0.5;
   }
   return SsiTraceEnd::closure_failed;
@@ -712,6 +750,75 @@ inline SsiTraceHalf ssi_trace_half(const SsiPatch& a, const SsiPatch& b, const S
 }
 
 }  // namespace detail
+
+// Distance from a point to one closed polyline segment, clamped to the
+// segment. Used only to decide whether two traced loops are the same curve.
+inline double ssi_curve_point_segment_distance(const Point3d& point, const Point3d& first,
+                                               const Point3d& second) noexcept {
+  double length2 = 0.0;
+  double projection = 0.0;
+  for (int axis = 0; axis < 3; ++axis) {
+    const double edge = second[axis] - first[axis];
+    length2 += edge * edge;
+    projection += (point[axis] - first[axis]) * edge;
+  }
+  double t = 0.0;
+  if (length2 > 0.0) t = std::clamp(projection / length2, 0.0, 1.0);
+  double distance2 = 0.0;
+  for (int axis = 0; axis < 3; ++axis) {
+    const double delta =
+        point[axis] - (first[axis] + t * (second[axis] - first[axis]));
+    distance2 += delta * delta;
+  }
+  return std::sqrt(distance2);
+}
+
+// Largest distance from any vertex of `one` to the polyline `two`. Coincident
+// closed loops differ only by the sagitta of the tessellation that seeded them,
+// which is a small fraction of the loop size; distinct loops differ by their
+// separation.
+inline double ssi_curve_one_sided_distance(const SsiCurve& one, const SsiCurve& two) noexcept {
+  double worst = 0.0;
+  for (const SsiSegment& segment : one.segments) {
+    double best = std::numeric_limits<double>::infinity();
+    for (const SsiSegment& other : two.segments) {
+      best = std::min(best, ssi_curve_point_segment_distance(segment.a, other.a, other.b));
+    }
+    worst = std::max(worst, best);
+  }
+  return worst;
+}
+
+// Two closed traces describe the same loop when their vertex sets are
+// mutually within a small relative distance. Seed scatter from the curved
+// triangle tessellation can start several traces of one loop; this collapses
+// them after tracing, where the geometry is available, rather than widening the
+// seed-clustering tolerance and merging genuinely distinct branches.
+inline bool ssi_curves_coincide(const SsiCurve& one, const SsiCurve& two) noexcept {
+  if (!one.closed || !two.closed || one.segments.empty() || two.segments.empty()) return false;
+  const auto box_diagonal = [](const SsiCurve& curve) {
+    const Point3d& first = curve.segments.front().a;
+    std::array<double, 3> low{first[0], first[1], first[2]};
+    std::array<double, 3> high = low;
+    for (const SsiSegment& segment : curve.segments) {
+      for (int axis = 0; axis < 3; ++axis) {
+        low[axis] = std::min({low[axis], segment.a[axis], segment.b[axis]});
+        high[axis] = std::max({high[axis], segment.a[axis], segment.b[axis]});
+      }
+    }
+    double diagonal2 = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+      const double extent = high[axis] - low[axis];
+      diagonal2 += extent * extent;
+    }
+    return std::sqrt(diagonal2);
+  };
+  const double diagonal = std::max(box_diagonal(one), box_diagonal(two));
+  if (!std::isfinite(diagonal) || !(diagonal > 0.0)) return false;
+  const double tolerance = 0.02 * diagonal;
+  return ssi_curve_one_sided_distance(one, two) <= tolerance &&
+         ssi_curve_one_sided_distance(two, one) <= tolerance;
+}
 
 // Traces the intersection curves of two validated SSI patches from refined
 // seeds. Each curve is walked in both null-space directions; a walk that
@@ -846,6 +953,34 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
       // curves; only an all-empty result is reported below.
       continue;
     }
+    if (!closed && points.size() >= 4) {
+      // A loop that is clipped by a patch boundary walks into the boundary on
+      // both sides and stops. Its two ends then sit on the same boundary a
+      // short distance apart; report the clipped loop as closed, with the
+      // boundary chord as its closing weld, instead of presenting it as an
+      // open curve with a spurious gap.
+      const Point3d& first_point = points.front().p;
+      std::array<double, 3> low{first_point[0], first_point[1], first_point[2]};
+      std::array<double, 3> high = low;
+      for (const SsiPoint& point : points) {
+        for (int axis = 0; axis < 3; ++axis) {
+          low[static_cast<std::size_t>(axis)] =
+              std::min(low[static_cast<std::size_t>(axis)], point.p[axis]);
+          high[static_cast<std::size_t>(axis)] =
+              std::max(high[static_cast<std::size_t>(axis)], point.p[axis]);
+        }
+      }
+      double diagonal2 = 0.0;
+      for (int axis = 0; axis < 3; ++axis) {
+        const double extent = high[static_cast<std::size_t>(axis)] - low[static_cast<std::size_t>(axis)];
+        diagonal2 += extent * extent;
+      }
+      const double curve_diagonal = std::sqrt(diagonal2);
+      if (std::isfinite(curve_diagonal) && curve_diagonal > 0.0 &&
+          norm2(points.back().p - first_point) <= 0.25 * curve_diagonal) {
+        closed = true;
+      }
+    }
     const bool weld = closed && norm2(points.back().p - points.front().p) > 0.0;
     if (weld) {
       if (segments_used >= max_steps) {
@@ -892,7 +1027,24 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
     }
     return left.segments.size() < right.segments.size();
   });
-  return curves;
+  // The tessellated triangle plane departs from the curved surface by its
+  // sagitta, so two segments that share one triangle crossing can refine their
+  // seeds to points a sagitta apart. The seed union deliberately uses a tight
+  // parameter tolerance and does not merge those, which can leave several
+  // full-loop traces of the same geometric curve. Collapse them after tracing.
+  std::vector<SsiCurve> unique_curves;
+  unique_curves.reserve(curves.size());
+  for (SsiCurve& curve : curves) {
+    bool duplicate = false;
+    for (const SsiCurve& kept : unique_curves) {
+      if (ssi_curves_coincide(curve, kept)) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) unique_curves.push_back(std::move(curve));
+  }
+  return unique_curves;
 }
 
 // ---------------------------------------------------------------------------
@@ -1784,11 +1936,9 @@ inline std::vector<SsiPoint> ssi_driver_curve_seeds(
           if (found == buckets.end()) continue;
           for (const std::size_t other : found->second) {
             if (other <= index) continue;
-            const double distance_a =
-                ssi_trace_param_distance(a.surface, seeds[index].ua, seeds[other].ua);
+            const double distance_a = ssi_param_distance(a, seeds[index].ua, seeds[other].ua);
             if (!(distance_a <= seed_tolerance)) continue;
-            const double distance_b =
-                ssi_trace_param_distance(b.surface, seeds[index].va, seeds[other].va);
+            const double distance_b = ssi_param_distance(b, seeds[index].va, seeds[other].va);
             if (!(distance_b <= seed_tolerance)) continue;
             const std::size_t root_first = ssi_driver_seed_root(parent, index);
             const std::size_t root_second = ssi_driver_seed_root(parent, other);
