@@ -451,6 +451,63 @@ void check_segment_certified(const SsiPatch& a, const SsiPatch& b, const SsiSegm
   CHECK(segment.residual == std::max(ssi_residual(a, b, first), ssi_residual(a, b, second)));
 }
 
+// Vertices of a traced polyline. For a closed curve the welded closing vertex
+// is not repeated, so the list holds one entry per distinct vertex.
+std::vector<Point3d> curve_vertices(const SsiCurve& curve) {
+  std::vector<Point3d> vertices;
+  if (curve.segments.empty()) return vertices;
+  vertices.push_back(curve.segments.front().a);
+  for (const SsiSegment& segment : curve.segments) vertices.push_back(segment.b);
+  if (curve.closed && vertices.size() > 1) {
+    bool same = true;
+    for (int axis = 0; axis < 3; ++axis) {
+      same = same && vertices.front()[axis] == vertices.back()[axis];
+    }
+    if (same) vertices.pop_back();
+  }
+  return vertices;
+}
+
+double curve_length(const SsiCurve& curve) {
+  double length = 0.0;
+  for (const SsiSegment& segment : curve.segments) length += norm2(segment.b - segment.a);
+  return length;
+}
+
+// Sum of the exterior angles along the polyline. A single closed lap turns by
+// 2*pi; a trace that winds past its start shows up as a multiple of that. Chords
+// shorter than a tolerance-scale epsilon carry no usable direction (the closing
+// weld is a refinement gap, not a step) and are skipped, so the turn is measured
+// between the last usable direction and the first.
+double curve_turning(const SsiCurve& curve) {
+  const std::vector<Point3d> vertices = curve_vertices(curve);
+  const std::size_t count = vertices.size();
+  if (count < 3) return 0.0;
+  const std::size_t chords = curve.closed ? count : count - 1;
+  std::vector<Vec3d> directions;
+  directions.reserve(chords);
+  for (std::size_t i = 0; i < chords; ++i) {
+    const Vec3d chord = vertices[(i + 1) % count] - vertices[i];
+    const double length = norm2(chord);
+    if (length > 1e-12) directions.push_back(chord * (1.0 / length));
+  }
+  const std::size_t turns = curve.closed ? directions.size() : directions.size() - 1;
+  double total = 0.0;
+  for (std::size_t i = 0; i < turns; ++i) {
+    total += std::acos(
+        std::clamp(dot(directions[i], directions[(i + 1) % directions.size()]), -1.0, 1.0));
+  }
+  return total;
+}
+
+// Length of the emitted closing segment: the last segment runs from the final
+// refined vertex back to the start. This is what stays O(step) if the closing
+// vertex is merely snapped to the start instead of being refined toward it.
+double closing_chord(const SsiCurve& curve) {
+  if (curve.segments.empty()) return 0.0;
+  return norm2(curve.segments.back().b - curve.segments.back().a);
+}
+
 }  // namespace
 
 TEST_CASE("ssi: trace closes the sphere-plane circle") {
@@ -502,6 +559,13 @@ TEST_CASE("ssi: trace closes the sphere-plane circle") {
     // A duplicated closing vertex would show up as a zero-length segment.
     CHECK(norm2(segment.b - segment.a) > 0.0);
   }
+  // The closing chord must be a refinement-scale gap, not one full step: the
+  // last traced vertex is refined to within 8*tolerance of the start and the
+  // closing segment is at most that long.
+  CHECK(closing_chord(curve) <= 8.0 * 1e-9);
+  CHECK(curve.segments.back().b[0] == curve.segments.front().a[0]);
+  CHECK(curve.segments.back().b[1] == curve.segments.front().a[1]);
+  CHECK(curve.segments.back().b[2] == curve.segments.front().a[2]);
 }
 
 TEST_CASE("ssi: trace stops at a bounded patch boundary") {
@@ -758,5 +822,285 @@ TEST_CASE("ssi: trace output is independent of seed order") {
       CHECK(one.vb == two.vb);
       CHECK(one.residual == two.residual);
     }
+  }
+}
+TEST_CASE("ssi: trace closes at any height with a refinement-scale chord") {
+  for (const double height : {0.0, 0.25, -0.6, 0.9}) {
+    CAPTURE(height);
+    const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+    const Result<SsiPatch> a =
+        make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * kTracePi}, {-1.5, 1.5});
+    const Result<SsiPatch> b =
+        make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, height}}, {-2, 2}, {-2, 2});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const double radius = std::sqrt(1.0 - height * height);
+    const Result<SsiPoint> seed = refine_ssi_point(
+        a.value(), b.value(),
+        {0.1, std::asin(height), -radius * std::sin(0.1), radius * std::cos(0.1)}, 1e-12);
+    REQUIRE(seed.has_value());
+    const Result<std::vector<SsiCurve>> traced =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9);
+    REQUIRE(traced.has_value());
+    REQUIRE(traced.value().size() == 1);
+    const SsiCurve& curve = traced.value().front();
+    CHECK(curve.closed);
+    CHECK(curve.segments.size() >= 8);
+    // The closing chord is a refinement gap, not a full step: without the
+    // aim-at-start refinement the last vertex is snapped onto the start and the
+    // chord is O(step).
+    CHECK(closing_chord(curve) <= 8.0 * 1e-9);
+    for (const SsiSegment& segment : curve.segments) {
+      check_segment_certified(a.value(), b.value(), segment, 1e-9);
+    }
+    CHECK(std::fabs(curve_length(curve) / (2.0 * kTracePi * radius) - 1.0) < 0.02);
+    CHECK(std::fabs(curve_turning(curve) - 2.0 * kTracePi) <= 0.05 * 2.0 * kTracePi);
+  }
+}
+
+TEST_CASE("ssi: trace is scale invariant") {
+  for (const double radius : {1e-3, 1e3}) {
+    CAPTURE(radius);
+    const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, radius};
+    const Result<SsiPatch> a =
+        make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * kTracePi}, {-1.5, 1.5});
+    const Result<SsiPatch> b = make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}},
+                                              {-2 * radius, 2 * radius}, {-2 * radius, 2 * radius});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const double tolerance = 1e-12 * radius;
+    const Result<SsiPoint> seed =
+        refine_ssi_point(a.value(), b.value(),
+                         {0.1, 0.0, -radius * std::sin(0.1), radius * std::cos(0.1)}, tolerance);
+    REQUIRE(seed.has_value());
+    const Result<std::vector<SsiCurve>> traced =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, tolerance);
+    REQUIRE(traced.has_value());
+    REQUIRE(traced.value().size() == 1);
+    const SsiCurve& curve = traced.value().front();
+    CHECK(curve.closed);
+    CHECK(curve.segments.size() < 5000);
+    CHECK(closing_chord(curve) <= 8.0 * tolerance);
+    // One lap only. A parameter-based closure window mixes radians with lengths
+    // and winds many laps at a small scale (or misses the start at a large one).
+    CHECK(std::fabs(curve_length(curve) / (2.0 * kTracePi * radius) - 1.0) < 0.02);
+    CHECK(std::fabs(curve_turning(curve) - 2.0 * kTracePi) <= 0.05 * 2.0 * kTracePi);
+    for (const SsiSegment& segment : curve.segments) {
+      check_segment_certified(a.value(), b.value(), segment, tolerance);
+    }
+  }
+}
+
+TEST_CASE("ssi: trace ends on the patch boundary") {
+  // A bounded sphere patch: the circle z = 0 leaves the patch at u = +/-0.5, so
+  // both open ends must sit on that boundary instead of one step short of it.
+  {
+    const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+    const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {-0.5, 0.5}, {-0.5, 0.5});
+    const Result<SsiPatch> b =
+        make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const Result<SsiPoint> seed =
+        refine_ssi_point(a.value(), b.value(), {0.1, 0.0, -std::sin(0.1), std::cos(0.1)}, 1e-12);
+    REQUIRE(seed.has_value());
+    const Result<std::vector<SsiCurve>> traced =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9);
+    REQUIRE(traced.has_value());
+    REQUIRE(traced.value().size() == 1);
+    const SsiCurve& curve = traced.value().front();
+    CHECK_FALSE(curve.closed);
+    CHECK(curve.segments.size() >= 2);
+    for (const SsiSegment& segment : curve.segments) {
+      check_segment_certified(a.value(), b.value(), segment, 1e-9);
+    }
+    const SsiSegment& first = curve.segments.front();
+    const SsiSegment& last = curve.segments.back();
+    CHECK(std::fabs(std::fabs(first.ua[0]) - 0.5) <= 1e-6);
+    CHECK(std::fabs(std::fabs(last.ub[0]) - 0.5) <= 1e-6);
+    CHECK(std::fabs(ssi_residual(a.value(), b.value(), traced_endpoint(last, true))) <= 1e-9);
+  }
+  // The analogous cylinder case: the lines run along v and leave the finite
+  // patch at v = +/-1.
+  {
+    const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+    const Result<SsiPatch> a =
+        make_ssi_patch(SurfaceGeometry{cylinder}, {0, 2 * kTracePi}, {-1, 1});
+    const Result<SsiPatch> b =
+        make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, 0.5}}, {-2, 2}, {-2, 2});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const Result<SsiPoint> seed = refine_ssi_point(
+        a.value(), b.value(), {kTracePi / 3.0, 0.0, 0.0, 0.8660254037844386}, 1e-12);
+    REQUIRE(seed.has_value());
+    const Result<std::vector<SsiCurve>> traced =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9);
+    REQUIRE(traced.has_value());
+    REQUIRE(traced.value().size() == 1);
+    const SsiCurve& curve = traced.value().front();
+    CHECK_FALSE(curve.closed);
+    const SsiSegment& first = curve.segments.front();
+    const SsiSegment& last = curve.segments.back();
+    CHECK(std::fabs(std::fabs(first.ua[1]) - 1.0) <= 1e-6);
+    CHECK(std::fabs(std::fabs(last.ub[1]) - 1.0) <= 1e-6);
+    for (const SsiSegment& segment : curve.segments) {
+      check_segment_certified(a.value(), b.value(), segment, 1e-9);
+    }
+  }
+}
+
+TEST_CASE("ssi: step budget counts emitted segments exactly") {
+  // An open curve: N segments traced with a generous budget must succeed with
+  // exactly N and fail with N-1. The budget is checked when the next segment
+  // would be emitted, not at the top of the loop.
+  {
+    const Result<SsiPatch> a =
+        make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+    const Result<SsiPatch> b =
+        make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, 0}}, {-2, 2}, {-2, 2});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const Result<SsiPoint> seed =
+        refine_ssi_point(a.value(), b.value(), {0.1, 0.1, 0.1, 0.1}, 1e-12);
+    REQUIRE(seed.has_value());
+    const Result<std::vector<SsiCurve>> generous =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9, 4096);
+    REQUIRE(generous.has_value());
+    REQUIRE(generous.value().size() == 1);
+    const std::size_t count = generous.value().front().segments.size();
+    REQUIRE(count >= 2);
+    const Result<std::vector<SsiCurve>> exact =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9, static_cast<int>(count));
+    REQUIRE(exact.has_value());
+    REQUIRE(exact.value().size() == 1);
+    CHECK(exact.value().front().segments.size() == count);
+    const Result<std::vector<SsiCurve>> short_budget =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9, static_cast<int>(count) - 1);
+    REQUIRE_FALSE(short_budget.has_value());
+    CHECK(short_budget.error().code == Errc::numeric_failure);
+    CHECK(std::string_view(short_budget.error().message) ==
+          "trace_ssi_curves: step budget exhausted");
+  }
+  // A closed curve: the closing weld is a segment too, so the exact budget
+  // counts it and one less is an error rather than a silently open curve.
+  {
+    const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+    const Result<SsiPatch> a =
+        make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * kTracePi}, {-1.5, 1.5});
+    const Result<SsiPatch> b =
+        make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const Result<SsiPoint> seed =
+        refine_ssi_point(a.value(), b.value(), {0.1, 0.2, 0.3, 0.4}, 1e-12);
+    REQUIRE(seed.has_value());
+    const Result<std::vector<SsiCurve>> generous =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9, 4096);
+    REQUIRE(generous.has_value());
+    REQUIRE(generous.value().size() == 1);
+    const std::size_t count = generous.value().front().segments.size();
+    REQUIRE(count >= 8);
+    const Result<std::vector<SsiCurve>> exact =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9, static_cast<int>(count));
+    REQUIRE(exact.has_value());
+    REQUIRE(exact.value().size() == 1);
+    CHECK(exact.value().front().closed);
+    CHECK(exact.value().front().segments.size() == count);
+    const Result<std::vector<SsiCurve>> short_budget =
+        trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9, static_cast<int>(count) - 1);
+    REQUIRE_FALSE(short_budget.has_value());
+    CHECK(short_budget.error().code == Errc::numeric_failure);
+    CHECK(std::string_view(short_budget.error().message) ==
+          "trace_ssi_curves: step budget exhausted");
+  }
+}
+
+TEST_CASE("ssi: a short intersection still traces open") {
+  // The intersection segment is only 0.1 long inside A's finite patch. A trace
+  // that drops sub-step curves returns an empty success; both directions must
+  // be walked and both ends refined onto the boundary.
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-0.05, 0.05}, {-0.05, 0.05});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiPoint> seed = refine_ssi_point(a.value(), b.value(), {0.0, 0.0, 0.0, 0.0}, 1e-12);
+  REQUIRE(seed.has_value());
+  const Result<std::vector<SsiCurve>> traced =
+      trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9, 4096);
+  REQUIRE(traced.has_value());
+  REQUIRE(traced.value().size() == 1);
+  const SsiCurve& curve = traced.value().front();
+  CHECK_FALSE(curve.closed);
+  CHECK(curve.segments.size() >= 1);
+  CHECK(std::fabs(curve_length(curve) - 0.1) <= 1e-3);
+  // The intersection runs along A's u axis (A's plane frame maps v to x and u to
+  // -y), so both ends are on the u = +/-0.05 boundary.
+  const SsiSegment& first = curve.segments.front();
+  const SsiSegment& last = curve.segments.back();
+  CHECK(std::fabs(std::fabs(first.ua[0]) - 0.05) <= 1e-6);
+  CHECK(std::fabs(std::fabs(last.ub[0]) - 0.05) <= 1e-6);
+  for (const SsiSegment& segment : curve.segments) {
+    check_segment_certified(a.value(), b.value(), segment, 1e-9);
+  }
+}
+
+TEST_CASE("ssi: a tangency seed has no traceable extent") {
+  // A sphere and a plane that touch at the pole: the seed refines to the single
+  // contact point, the tangent frame is degenerate, and there is nothing to
+  // trace. An empty success would hide that.
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * kTracePi}, {-1.5, 1.5});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 1}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  // The exact contact point: refining from a seed here is degenerate (the
+  // Newton system loses rank at the pole), so the point is supplied directly;
+  // trace_ssi_curves re-refines it, finds the gap already closed, and then has
+  // no tangent to walk along.
+  SsiPoint contact;
+  contact.ua = {0.1, 0.5 * kTracePi};
+  contact.va = {0.0, 0.0};
+  contact.p = Point3d{0, 0, 1};
+  contact.residual = 0.0;
+  const Result<std::vector<SsiCurve>> traced =
+      trace_ssi_curves(a.value(), b.value(), {contact}, 1e-9);
+  REQUIRE_FALSE(traced.has_value());
+  CHECK(traced.error().code == Errc::numeric_failure);
+  CHECK(std::string_view(traced.error().message) ==
+        "trace_ssi_curves: seed has no traceable extent");
+}
+
+TEST_CASE("ssi: a near-tangent loop does not over-wind") {
+  // A tiny circle close to the pole (r = 0.141): a step that is a fixed length
+  // regardless of the local curvature would turn by a large angle per step and
+  // wind past the start. The curvature guard halves such steps.
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * kTracePi}, {-1.5, 1.5});
+  const Result<SsiPatch> b =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0.99}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const double radius = std::sqrt(1.0 - 0.99 * 0.99);
+  const Result<SsiPoint> seed = refine_ssi_point(
+      a.value(), b.value(), {0.1, std::asin(0.99), -radius * std::sin(0.1), radius * std::cos(0.1)},
+      1e-12);
+  REQUIRE(seed.has_value());
+  const Result<std::vector<SsiCurve>> traced =
+      trace_ssi_curves(a.value(), b.value(), {seed.value()}, 1e-9);
+  REQUIRE(traced.has_value());
+  REQUIRE(traced.value().size() == 1);
+  const SsiCurve& curve = traced.value().front();
+  CHECK(curve.closed);
+  CHECK(curve_length(curve) <= 1.1 * 2.0 * kTracePi * radius);
+  CHECK(std::fabs(curve_length(curve) / (2.0 * kTracePi * radius) - 1.0) < 0.02);
+  CHECK(std::fabs(curve_turning(curve) - 2.0 * kTracePi) <= 0.05 * 2.0 * kTracePi);
+  CHECK(closing_chord(curve) <= 8.0 * 1e-9);
+  for (const SsiSegment& segment : curve.segments) {
+    check_segment_certified(a.value(), b.value(), segment, 1e-9);
   }
 }

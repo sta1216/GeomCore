@@ -350,7 +350,6 @@ inline Result<SsiPoint> refine_ssi_point(const SsiPatch& a, const SsiPatch& b,
   result.residual = ssi_residual(patch_a, patch_b, result);
   return result;
 }
-
 namespace detail {
 
 // A closing candidate is accepted only when its tangent still points the same
@@ -358,6 +357,19 @@ namespace detail {
 // the far side of a loop and close the curve early, silently dropping the arc
 // that lies between the two visits.
 inline constexpr double kSsiTraceClosureTangent = 0.9;
+
+// A step whose tangent turns by more than this angle is too coarse for the
+// local curvature: the step is halved and retried. This keeps small or strongly
+// curved loops from winding past themselves.
+inline constexpr double kSsiTraceCurvatureTurn = 0.5;
+
+// No parameter may move by more than this fraction of its patch span in one
+// step. The step is a 3D length, so the cap converts the patch geometry into a
+// per-step surface length and keeps the trace independent of the model scale.
+inline constexpr double kSsiTraceStepFraction = 0.05;
+
+// Upper bound on halvings/retries in the curvature and closing loops.
+inline constexpr int kSsiTraceMaxRetries = 60;
 
 // Parameter difference on one axis, measured across the periodic seam when the
 // surface wraps on that axis.
@@ -375,6 +387,13 @@ inline double ssi_trace_param_distance(const SurfaceGeometry& surface,
   const double du = ssi_trace_param_delta(surface, 0, first[0], second[0]);
   const double dv = ssi_trace_param_delta(surface, 1, first[1], second[1]);
   return std::sqrt(du * du + dv * dv);
+}
+
+// Midpoint of two parameters on one axis, measured across the periodic seam
+// when the surface wraps on that axis.
+inline double ssi_trace_param_midpoint(const SurfaceGeometry& surface, int axis, double first,
+                                       double second) noexcept {
+  return first + 0.5 * ssi_trace_param_delta(surface, axis, first, second);
 }
 
 // Least-squares parameter velocity of unit surface speed along `tangent`:
@@ -421,40 +440,196 @@ inline bool ssi_trace_frame(const SsiPatch& a, const SsiPatch& b, const SsiPoint
          ssi_trace_parameter_velocity(on_b.value(), frame.tangent, frame.velocity_b);
 }
 
-// Why one directional walk stopped. left_patch and refinement_failed are normal
-// open-curve endings; step_budget means the walk neither closed nor left the
-// patch before the shared budget ran out.
-enum class SsiTraceEnd { closed, left_patch, refinement_failed, tangent_failed, step_budget };
+// True when both parameter pairs are inside their patch domains.
+inline bool ssi_trace_inside(const SsiPatch& a, const SsiPatch& b, const std::array<double, 2>& ua,
+                             const std::array<double, 2>& va) noexcept {
+  return patch_contains(a, ua[0], ua[1]) && patch_contains(b, va[0], va[1]);
+}
+
+// Largest 3D step whose parameter motion on either surface stays under
+// kSsiTraceStepFraction of every patch span it actually moves along. Only axes
+// with non-zero velocity constrain the step, so a line along the long axis of an
+// elongated patch is not limited by the patch's narrow direction.
+inline double ssi_trace_step_cap(const SsiPatch& a, const SsiPatch& b,
+                                 const SsiTraceFrame& frame) noexcept {
+  const SsiPatch* patches[2] = {&a, &b};
+  const std::array<double, 2>* velocities[2] = {&frame.velocity_a, &frame.velocity_b};
+  double cap = std::numeric_limits<double>::infinity();
+  for (int surface = 0; surface < 2; ++surface) {
+    const std::array<double, 2> spans{patches[surface]->u[1] - patches[surface]->u[0],
+                                      patches[surface]->v[1] - patches[surface]->v[0]};
+    for (int axis = 0; axis < 2; ++axis) {
+      const double speed = std::fabs((*velocities[surface])[axis]);
+      if (speed > 0.0) cap = std::min(cap, kSsiTraceStepFraction * spans[axis] / speed);
+    }
+  }
+  return cap;
+}
+
+// Refines the patch-boundary endpoint between an accepted inside vertex and a
+// rejected prediction that left one of the patches. The parameter interval is
+// bisected (circularly on periodic axes) and every midpoint inside both patches
+// is refined; the last inside point becomes the endpoint. The loop stops when
+// the interval is 1e-12 of a patch span or the endpoint stops moving, so the
+// endpoint sits on the boundary instead of up to a full step short of it.
+inline SsiPoint ssi_trace_boundary_point(const SsiPatch& a, const SsiPatch& b,
+                                         const SsiPoint& inside, std::array<double, 2> outside_ua,
+                                         std::array<double, 2> outside_va, double tolerance) {
+  std::array<double, 2> low_ua = inside.ua;
+  std::array<double, 2> low_va = inside.va;
+  SsiPoint endpoint = inside;
+  const std::array<double, 2> spans_a{a.u[1] - a.u[0], a.v[1] - a.v[0]};
+  const std::array<double, 2> spans_b{b.u[1] - b.u[0], b.v[1] - b.v[0]};
+  for (int iteration = 0; iteration < 128; ++iteration) {
+    std::array<double, 2> mid_ua{ssi_trace_param_midpoint(a.surface, 0, low_ua[0], outside_ua[0]),
+                                 ssi_trace_param_midpoint(a.surface, 1, low_ua[1], outside_ua[1])};
+    std::array<double, 2> mid_va{ssi_trace_param_midpoint(b.surface, 0, low_va[0], outside_va[0]),
+                                 ssi_trace_param_midpoint(b.surface, 1, low_va[1], outside_va[1])};
+    if (!ssi_solver_wrap(a.surface, mid_ua) || !ssi_solver_wrap(b.surface, mid_va)) break;
+    bool accepted = false;
+    bool converged = false;
+    if (ssi_trace_inside(a, b, mid_ua, mid_va)) {
+      const Result<SsiPoint> refined =
+          refine_ssi_point(a, b, {mid_ua[0], mid_ua[1], mid_va[0], mid_va[1]}, tolerance);
+      if (refined.has_value() && ssi_trace_inside(a, b, refined.value().ua, refined.value().va)) {
+        // The second stopping rule: an accepted midpoint that moves the endpoint
+        // by less than the tolerance is already on the boundary within tolerance.
+        converged = norm2(refined.value().p - endpoint.p) <= tolerance;
+        endpoint = refined.value();
+        low_ua = endpoint.ua;
+        low_va = endpoint.va;
+        accepted = true;
+      }
+    }
+    if (converged) break;
+    if (!accepted) {
+      outside_ua = mid_ua;
+      outside_va = mid_va;
+    }
+    double width = 0.0;
+    for (int axis = 0; axis < 2; ++axis) {
+      width = std::max(
+          width, std::fabs(ssi_trace_param_delta(a.surface, axis, low_ua[axis], outside_ua[axis])) /
+                     spans_a[axis]);
+      width = std::max(
+          width, std::fabs(ssi_trace_param_delta(b.surface, axis, low_va[axis], outside_va[axis])) /
+                     spans_b[axis]);
+    }
+    if (width <= 1e-12) break;
+  }
+  return endpoint;
+}
+
+// Why one directional walk stopped. left_patch, refinement_failed and
+// tangent_failed are normal open-curve endings; step_budget means the walk
+// could not emit its next segment inside the shared budget; closure_failed
+// means the near-start refinement could not place a vertex within 8*tolerance
+// of the start.
+enum class SsiTraceEnd {
+  closed,
+  left_patch,
+  refinement_failed,
+  tangent_failed,
+  step_budget,
+  closure_failed
+};
 
 struct SsiTraceHalf {
   std::vector<SsiPoint> points;
   SsiTraceEnd end = SsiTraceEnd::left_patch;
 };
 
+// Walks the last part of a closing trace into the start vertex. The curve is
+// known to pass through the start, so each trial is a refined step of the
+// current 3D gap toward it; trials that do not make clear progress are halved
+// and retried from the same vertex. The walk stops as soon as the last accepted
+// vertex is within 8*tolerance of the start (the closing weld is then short
+// enough), or after pushing one more vertex that close. Every vertex it emits
+// is refined, so the closing chord is never O(step).
+inline SsiTraceEnd ssi_trace_close(const SsiPatch& a, const SsiPatch& b, SsiPoint base,
+                                   SsiTraceFrame base_frame, const SsiPoint& start, double sign,
+                                   double step_limit, double tolerance, int max_steps,
+                                   int& segments_used, std::vector<SsiPoint>& points) {
+  const double target = 8.0 * tolerance;
+  double gap = norm2(base.p - start.p);
+  if (!(gap > target)) return SsiTraceEnd::closed;
+  // Aim for a vertex `target` short of the start rather than at the start
+  // itself: a candidate that lands exactly on the start would turn the final
+  // step into the closing chord, which is O(step). Stopping one target short
+  // keeps the closing weld (the last emitted segment) within 8*tolerance.
+  double trial = std::min(step_limit, gap - 0.5 * target);
+  for (int attempt = 0; attempt < kSsiTraceMaxRetries; ++attempt) {
+    if (segments_used >= max_steps) return SsiTraceEnd::step_budget;
+    if (!(trial > 0.0)) return SsiTraceEnd::closure_failed;
+    std::array<double, 2> predicted_ua{base.ua[0] + sign * trial * base_frame.velocity_a[0],
+                                       base.ua[1] + sign * trial * base_frame.velocity_a[1]};
+    std::array<double, 2> predicted_va{base.va[0] + sign * trial * base_frame.velocity_b[0],
+                                       base.va[1] + sign * trial * base_frame.velocity_b[1]};
+    if (!ssi_solver_wrap(a.surface, predicted_ua) || !ssi_solver_wrap(b.surface, predicted_va)) {
+      trial *= 0.5;
+      continue;
+    }
+    if (!ssi_trace_inside(a, b, predicted_ua, predicted_va)) {
+      trial *= 0.5;
+      continue;
+    }
+    const Result<SsiPoint> refined = refine_ssi_point(
+        a, b, {predicted_ua[0], predicted_ua[1], predicted_va[0], predicted_va[1]}, tolerance);
+    if (!refined.has_value()) {
+      trial *= 0.5;
+      continue;
+    }
+    const SsiPoint next = refined.value();
+    if (!ssi_trace_inside(a, b, next.ua, next.va) || !(next.residual <= tolerance)) {
+      trial *= 0.5;
+      continue;
+    }
+    const double next_gap = norm2(next.p - start.p);
+    if (next_gap <= target) {
+      points.push_back(next);
+      ++segments_used;
+      return SsiTraceEnd::closed;
+    }
+    if (next_gap < 0.9 * gap) {
+      SsiTraceFrame next_frame;
+      if (!ssi_trace_frame(a, b, next, next_frame)) return SsiTraceEnd::tangent_failed;
+      points.push_back(next);
+      ++segments_used;
+      base = next;
+      base_frame = next_frame;
+      gap = next_gap;
+      trial = std::min(step_limit, gap - 0.5 * target);
+      continue;
+    }
+    trial *= 0.5;
+  }
+  return SsiTraceEnd::closure_failed;
+}
+
 // Walks one direction from `start`. Every accepted vertex is the result of
 // refine_ssi_point, and every candidate is checked against both patch domains
 // and against the tolerance: the gap residual alone does not certify that the
-// parameters stayed inside a patch. A candidate that leaves either patch ends
-// the walk at the last accepted vertex. The step budget is shared by both
-// directions of one curve.
+// parameters stayed inside a patch. A step whose prediction leaves either patch
+// is refined onto the boundary and ends the walk there. A tangent that turns by
+// more than kSsiTraceCurvatureTurn halving-retries the step. The step budget is
+// shared by both directions of one curve and counts every emitted segment.
 inline SsiTraceHalf ssi_trace_half(const SsiPatch& a, const SsiPatch& b, const SsiPoint& start,
                                    const SsiTraceFrame& start_frame, double sign, double step_start,
                                    double step_max, double tolerance, int max_steps,
-                                   int& steps_used) {
+                                   int& segments_used, bool allow_closure) {
   SsiTraceHalf half;
   half.points.push_back(start);
   SsiPoint current = start;
+  SsiTraceFrame frame = start_frame;
   double step = step_start;
+  int retries = 0;
   for (;;) {
-    if (steps_used >= max_steps) {
-      half.end = SsiTraceEnd::step_budget;
-      return half;
-    }
-    SsiTraceFrame frame;
-    if (!ssi_trace_frame(a, b, current, frame)) {
+    const double cap = ssi_trace_step_cap(a, b, frame);
+    if (!std::isfinite(cap) || !(cap > 0.0)) {
       half.end = SsiTraceEnd::tangent_failed;
       return half;
     }
+    step = std::min(step, cap);
     std::array<double, 2> predicted_ua{current.ua[0] + sign * step * frame.velocity_a[0],
                                        current.ua[1] + sign * step * frame.velocity_a[1]};
     std::array<double, 2> predicted_va{current.va[0] + sign * step * frame.velocity_b[0],
@@ -465,8 +640,19 @@ inline SsiTraceHalf ssi_trace_half(const SsiPatch& a, const SsiPatch& b, const S
       half.end = SsiTraceEnd::refinement_failed;
       return half;
     }
-    if (!patch_contains(a, predicted_ua[0], predicted_ua[1]) ||
-        !patch_contains(b, predicted_va[0], predicted_va[1])) {
+    if (!ssi_trace_inside(a, b, predicted_ua, predicted_va)) {
+      // The step leaves a patch: refine the exit point itself so the curve ends
+      // on the boundary rather than a whole step short of it.
+      const SsiPoint endpoint =
+          ssi_trace_boundary_point(a, b, current, predicted_ua, predicted_va, tolerance);
+      if (norm2(endpoint.p - current.p) > tolerance) {
+        if (segments_used >= max_steps) {
+          half.end = SsiTraceEnd::step_budget;
+          return half;
+        }
+        half.points.push_back(endpoint);
+        ++segments_used;
+      }
       half.end = SsiTraceEnd::left_patch;
       return half;
     }
@@ -477,34 +663,47 @@ inline SsiTraceHalf ssi_trace_half(const SsiPatch& a, const SsiPatch& b, const S
       return half;
     }
     const SsiPoint next = refined.value();
-    if (!patch_contains(a, next.ua[0], next.ua[1]) || !patch_contains(b, next.va[0], next.va[1]) ||
-        !(next.residual <= tolerance)) {
+    // Defensive re-check, not the load-bearing gate: refine_ssi_point already
+    // guarantees both patches and a residual within tolerance. It is kept here
+    // because this walk depends on those invariants and the cost is one fold.
+    if (!ssi_trace_inside(a, b, next.ua, next.va) || !(next.residual <= tolerance)) {
       half.end = SsiTraceEnd::refinement_failed;
       return half;
     }
-    // A return to the start is recognised from the parameters themselves, not
-    // from a raw 3D distance: two nearby parameters can sit on opposite sides of
-    // a loop. Three accepted steps must precede the candidate so a one- or
-    // two-step walk cannot weld itself shut.
-    const double closure_limit = std::max(2.0 * step, 8.0 * tolerance);
-    const double closure_a = ssi_trace_param_distance(a.surface, next.ua, start.ua);
-    const double closure_b = ssi_trace_param_distance(b.surface, next.va, start.va);
-    const double closure_3d = norm2(next.p - start.p);
-    if (half.points.size() >= 4 && closure_a <= closure_limit && closure_b <= closure_limit &&
-        closure_3d <= closure_limit) {
-      SsiTraceFrame candidate;
-      if (ssi_trace_frame(a, b, next, candidate) &&
-          dot(candidate.tangent, start_frame.tangent) >= kSsiTraceClosureTangent) {
-        // The candidate is a re-visit of the start; stop before adding it so the
-        // caller can close the curve with the start vertex itself.
-        half.end = SsiTraceEnd::closed;
+    SsiTraceFrame next_frame;
+    if (!ssi_trace_frame(a, b, next, next_frame)) {
+      half.end = SsiTraceEnd::tangent_failed;
+      return half;
+    }
+    if (dot(next_frame.tangent, frame.tangent) < std::cos(kSsiTraceCurvatureTurn)) {
+      step *= 0.5;
+      if (++retries > kSsiTraceMaxRetries) {
+        half.end = SsiTraceEnd::tangent_failed;
         return half;
       }
+      continue;
+    }
+    // Closure is decided in 3D, because a parameter window mixes radians with
+    // lengths and breaks as soon as the model scale changes. The tangent gate
+    // rejects the far side of a loop, where a long step can pass near the start
+    // while still travelling the other way.
+    if (allow_closure && half.points.size() >= 4 &&
+        norm2(next.p - start.p) <= std::max(2.0 * step, 8.0 * tolerance) &&
+        dot(next_frame.tangent, start_frame.tangent) >= kSsiTraceClosureTangent) {
+      half.end = ssi_trace_close(a, b, current, frame, start, sign, step, tolerance, max_steps,
+                                 segments_used, half.points);
+      return half;
+    }
+    if (segments_used >= max_steps) {
+      half.end = SsiTraceEnd::step_budget;
+      return half;
     }
     half.points.push_back(next);
+    ++segments_used;
     current = next;
+    frame = next_frame;
+    retries = 0;
     step = std::min(step * 1.5, step_max);
-    ++steps_used;
   }
 }
 
@@ -512,12 +711,14 @@ inline SsiTraceHalf ssi_trace_half(const SsiPatch& a, const SsiPatch& b, const S
 
 // Traces the intersection curves of two validated SSI patches from refined
 // seeds. Each curve is walked in both null-space directions; a walk that
-// returns to its start closes the curve, and the closing vertex is the start
-// itself rather than a duplicate. The result is ordered by each curve's first
-// vertex so it does not depend on seed order, and duplicated seeds collapse to
-// one curve. A walk that crosses a patch boundary ends the curve there; a walk
-// that exhausts the shared step budget without closing or leaving a patch is a
-// numeric_failure rather than a silently truncated curve.
+// returns to its start closes the curve through a refined vertex within
+// 8*tolerance of the start, so the closing chord is never O(step). The result is
+// ordered by each curve's first vertex so it does not depend on seed order, and
+// duplicated seeds collapse to one curve. A walk that crosses a patch boundary
+// ends on the boundary itself; a walk that cannot emit its next segment inside
+// the shared budget is a numeric_failure rather than a silently truncated
+// curve, and a seed that traces to nothing is reported instead of returning an
+// empty success.
 inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const SsiPatch& b,
                                                       const std::vector<SsiPoint>& seeds,
                                                       double tolerance, int max_steps = 4096) {
@@ -548,7 +749,7 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
   if (!std::isfinite(diagonal) || !(diagonal > 0.0)) {
     return Error{Errc::numeric_failure, "ssi: trace patch bounds are degenerate"};
   }
-  const double step_start = std::min(diagonal / 64.0, 0.25);
+  const double step_start = diagonal / 64.0;
   const double step_max = diagonal / 8.0;
   if (!std::isfinite(step_start) || !(step_start > 0.0) || !std::isfinite(step_max)) {
     return Error{Errc::numeric_failure, "ssi: trace step size is not finite"};
@@ -600,12 +801,21 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
   for (const SsiPoint& origin : unique_origins) {
     detail::SsiTraceFrame start_frame;
     if (!detail::ssi_trace_frame(patch_a, patch_b, origin, start_frame)) continue;
-    int steps_used = 0;
+    // The first step is also bounded by the local patch metric (see
+    // ssi_trace_step_cap), so a small feature inside a large patch is not
+    // stepped over on the first move.
+    const double step =
+        std::min(step_start, detail::ssi_trace_step_cap(patch_a, patch_b, start_frame));
+    if (!std::isfinite(step) || !(step > 0.0)) continue;
+    int segments_used = 0;
     detail::SsiTraceHalf forward =
-        detail::ssi_trace_half(patch_a, patch_b, origin, start_frame, 1.0, step_start, step_max,
-                               tolerance, max_steps, steps_used);
+        detail::ssi_trace_half(patch_a, patch_b, origin, start_frame, 1.0, step, step_max,
+                               tolerance, max_steps, segments_used, true);
     if (forward.end == detail::SsiTraceEnd::step_budget) {
       return Error{Errc::numeric_failure, "trace_ssi_curves: step budget exhausted"};
+    }
+    if (forward.end == detail::SsiTraceEnd::closure_failed) {
+      return Error{Errc::numeric_failure, "trace_ssi_curves: closure refinement did not converge"};
     }
     std::vector<SsiPoint> points;
     bool closed = false;
@@ -614,8 +824,8 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
       closed = true;
     } else {
       detail::SsiTraceHalf backward =
-          detail::ssi_trace_half(patch_a, patch_b, origin, start_frame, -1.0, step_start, step_max,
-                                 tolerance, max_steps, steps_used);
+          detail::ssi_trace_half(patch_a, patch_b, origin, start_frame, -1.0, step, step_max,
+                                 tolerance, max_steps, segments_used, false);
       if (backward.end == detail::SsiTraceEnd::step_budget) {
         return Error{Errc::numeric_failure, "trace_ssi_curves: step budget exhausted"};
       }
@@ -627,10 +837,20 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
         points.push_back(forward.points[index]);
       }
     }
-    if (points.size() < 2) continue;
+    if (points.size() < 2) {
+      return Error{Errc::numeric_failure, "trace_ssi_curves: seed has no traceable extent"};
+    }
+    const bool weld = closed && norm2(points.back().p - points.front().p) > 0.0;
+    if (weld) {
+      if (segments_used >= max_steps) {
+        return Error{Errc::numeric_failure, "trace_ssi_curves: step budget exhausted"};
+      }
+      ++segments_used;
+    }
     SsiCurve curve;
     curve.closed = closed;
-    const std::size_t segment_count = closed ? points.size() : points.size() - 1;
+    const std::size_t segment_count =
+        closed ? (weld ? points.size() : points.size() - 1) : points.size() - 1;
     curve.segments.reserve(segment_count);
     for (std::size_t index = 0; index < segment_count; ++index) {
       const SsiPoint& first = points[index];
@@ -647,6 +867,13 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
       curve.segments.push_back(segment);
     }
     curves.push_back(curve);
+  }
+
+  // A refined seed whose tangent frame is degenerate has no traceable extent
+  // (for example a sphere and a plane that touch at a pole). Returning success
+  // with no curves would hide that from the caller, so it is reported instead.
+  if (curves.empty() && !seeds.empty()) {
+    return Error{Errc::numeric_failure, "trace_ssi_curves: seed has no traceable extent"};
   }
 
   std::stable_sort(curves.begin(), curves.end(), [](const SsiCurve& left, const SsiCurve& right) {
