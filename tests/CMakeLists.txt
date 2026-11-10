@@ -69,6 +69,7 @@ set(GEOM_TEST_SOURCES
   unit/boolean2_test.cpp
   unit/cdt2_test.cpp
   unit/qa_concurrency_test.cpp
+  unit/ssi_surface_test.cpp
 )
 
 list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)
