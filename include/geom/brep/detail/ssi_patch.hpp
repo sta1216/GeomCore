@@ -328,6 +328,7 @@ inline Result<void> ssi_patch_tessellate_cell(SsiPatchMeshBuilder& builder, cons
 
 // Adaptively tessellates a patch until every leaf cell's nine-sample flatness is
 // at most chord_tolerance, or until max_depth cell levels have been reached.
+// Cost grows as 4^max_depth in the worst case; the caller owns that budget.
 // The root cell is level 1, so max_depth == 1 emits a single cell and must be
 // at least 1. Flatness is sampled at nine points per cell and measured against
 // the cell's bilinear surface; it is a sampled estimate, not a mathematical
