@@ -234,6 +234,8 @@ TEST_CASE("ssi: patch spans and closed boundaries") {
   REQUIRE(full.has_value());
   CHECK(patch_contains(full.value(), two_pi, 0.5));
   CHECK(patch_contains(full.value(), -0.5 * two_pi, 0.5));
+  CHECK_FALSE(patch_contains(full.value(), std::nan(""), 0.5));
+  CHECK_FALSE(patch_contains(full.value(), 0.5, std::nan("")));
 
   const Result<SsiPatch> closed = make_ssi_patch(cylinder, {-0.2, 0.2}, {0.0, 1.0});
   REQUIRE(closed.has_value());
@@ -279,4 +281,50 @@ TEST_CASE("ssi: NURBS patch outside the surface domain is rejected") {
   const Result<SsiPatch> outside_v = make_ssi_patch(geometry, {0.0, 1.0}, {0.5, 1.5});
   REQUIRE_FALSE(outside_v.has_value());
   CHECK(outside_v.error().code == Errc::unsupported);
+}
+
+TEST_CASE("ssi: surface_point_finite rejects non-finite components") {
+  SurfacePoint point;
+  point.p = Point3d{0.0, std::nan(""), 0.0};
+  CHECK_FALSE(surface_point_finite(point));
+  point.p = Point3d{0.0, 0.0, 0.0};
+  point.du = Vec3d{std::numeric_limits<double>::infinity(), 0.0, 0.0};
+  CHECK_FALSE(surface_point_finite(point));
+  point.du = Vec3d{};
+  point.dv = Vec3d{0.0, -std::numeric_limits<double>::infinity(), 0.0};
+  CHECK_FALSE(surface_point_finite(point));
+}
+
+TEST_CASE("ssi: NURBS normal rejects an overflowing cross product") {
+  const NurbsSurface huge(
+      1, 1, {0.0, 0.0, 1.0, 1.0}, {0.0, 0.0, 1.0, 1.0},
+      {Point3d{-1e300, -1e300, 0.0}, Point3d{1e300, -1e300, 0.0},
+       Point3d{-1e300, 1e300, 0.0}, Point3d{1e300, 1e300, 0.0}},
+      {1.0, 1.0, 1.0, 1.0});
+  REQUIRE(huge.is_valid());
+  const Result<Vec3d> normal = surface_normal(SurfaceGeometry{huge}, 0.5, 0.5);
+  REQUIRE_FALSE(normal.has_value());
+  CHECK(normal.error().code == Errc::non_finite);
+}
+
+TEST_CASE("ssi: NURBS normal rejects an invalid surface") {
+  const NurbsSurface broken(
+      1, 1, {0.0, 0.0, 1.0, 1.0}, {0.0, 0.0, 1.0, 1.0},
+      {Point3d{0, 0, 0}, Point3d{0, 1, 0}, Point3d{1, 0, 0}}, {1.0, 1.0, 1.0});
+  REQUIRE_FALSE(broken.is_valid());
+  const Result<Vec3d> normal = surface_normal(SurfaceGeometry{broken}, 0.25, 0.75);
+  REQUIRE_FALSE(normal.has_value());
+  CHECK(normal.error().code == Errc::degenerate);
+}
+
+TEST_CASE("ssi: patch validation propagates plane frame errors") {
+  const SurfaceGeometry nan_plane = Plane3{Vec3d{std::nan(""), 0.0, 1.0}, 0.0};
+  const Result<SsiPatch> nan_patch = make_ssi_patch(nan_plane, {0.0, 1.0}, {0.0, 1.0});
+  REQUIRE_FALSE(nan_patch.has_value());
+  CHECK(nan_patch.error().code == Errc::non_finite);
+
+  const SurfaceGeometry zero_plane = Plane3{Vec3d{0.0, 0.0, 0.0}, 1.0};
+  const Result<SsiPatch> zero_patch = make_ssi_patch(zero_plane, {0.0, 1.0}, {0.0, 1.0});
+  REQUIRE_FALSE(zero_patch.has_value());
+  CHECK(zero_patch.error().code == Errc::degenerate);
 }
