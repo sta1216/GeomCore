@@ -934,12 +934,18 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
 //    other carrier must stay on one side. Two bands are checked: the tolerance
 //    band `tolerance`, and a geometric band max(1e-12 * (1 + max|p|),
 //    0.05 * tolerance). A pair is rejected when either band has samples beyond
-//    both +band and -band. A crossing or cutting pair is then caught however
-//    shallow the cut: the tolerance band alone would treat a cut whose cap is
-//    0.1 * tolerance above the other carrier as neutral, while the geometric
-//    band sees that cap, and the round-off floor keeps double-precision noise
-//    at an exact contact neutral. A true contact, however shallow, has samples
-//    on one side only.
+//    both +band and -band.
+//
+//    The geometric band is also the detection floor of this predicate, and the
+//    floor is deliberate: a cut shallower than
+//    max(1e-12 * (1 + max|p|), 0.05 * tolerance) leaves every sample of the cut
+//    carrier inside the band, so such a cut is reported as tangent_contact even
+//    though the carriers technically cross. The floor is a tolerance-scale
+//    cutoff (5% of the caller's tolerance, never below double round-off at the
+//    sample scale), not an accident: cuts at or above the floor are rejected,
+//    exact contact is accepted, and the trade-off is the same one the caller
+//    makes when choosing `tolerance`. In particular the predicate does NOT
+//    claim to catch arbitrarily shallow cuts.
 //
 // NURBS patches are unsupported by both predicates: their exact signed
 // implicit distance is not available without a Newton projection, so neither
@@ -1089,19 +1095,18 @@ inline bool ssi_diagnostic_same_carrier(const SurfaceGeometry& a, const SurfaceG
     if (cone_b == nullptr) return false;
     // A double cone is fixed by its apex, axis line, and half angle. The apex
     // is invariant under an axis flip to the other nappe. The half angle is an
-    // angle, so its comparison is scaled by the carrier's geometric size: a
-    // 1e-10 rad difference is irrelevant on a millimetre-scale cone and
-    // significant on a kilometre-scale one.
+    // angle, so its comparison is scaled by the carrier's local characteristic
+    // radius (the base radius), not by its absolute position: a 1e-10 rad
+    // difference is irrelevant on a millimetre-scale cone and significant on a
+    // kilometre-scale one, while translating the same cone must not change the
+    // verdict.
     if (!ssi_diagnostic_unit_parallel(cone_a->axis, cone_b->axis)) return false;
     const Point3d apex_a =
         cone_a->origin + cone_a->axis * (cone_a->radius / std::tan(cone_a->half_angle));
     const Point3d apex_b =
         cone_b->origin + cone_b->axis * (cone_b->radius / std::tan(cone_b->half_angle));
     if (norm2(apex_a - apex_b) > tolerance) return false;
-    const double scale = std::max(std::max(norm2(ssi_diagnostic_vec(apex_a)),
-                                           norm2(ssi_diagnostic_vec(apex_b))),
-                                  std::max(cone_a->radius, cone_b->radius));
-    const double angular_scale = std::max(scale, 1e-300);
+    const double angular_scale = std::max(std::max(cone_a->radius, cone_b->radius), 1e-300);
     return std::fabs(cone_a->half_angle - cone_b->half_angle) * angular_scale <= tolerance;
   }
   if (const Torus3* torus_a = std::get_if<Torus3>(&a)) {
@@ -1514,8 +1519,10 @@ inline bool ssi_diagnostic_refine_contact(const SsiPatch& a, const SsiPatch& b,
 // Two bands are checked: the tolerance band and the geometric band
 // max(1e-12 * (1 + max|p|), 0.05 * tolerance). Either band showing samples
 // beyond both +band and -band rejects the pair. A crossing or cutting carrier
-// produces both signs; a touching carrier produces one. The grid is fixed and
-// stack-allocated, so the test stays noexcept and allocation-free.
+// produces both signs; a touching carrier produces one. A cut shallower than
+// the geometric band stays inside the detection floor and is not visible here
+// (see the banner comment). The grid is fixed and stack-allocated, so the test
+// stays noexcept and allocation-free.
 inline bool ssi_diagnostic_sign_test(const SsiPatch& patch, const SurfaceGeometry& other,
                                      double tolerance) noexcept {
   const double denominator = static_cast<double>(kSsiDiagnosticGlobalTestGrid - 1);
@@ -1592,8 +1599,10 @@ inline bool surfaces_coincident(const SsiPatch& a, const SsiPatch& b,
 // True when the two carriers touch within `tolerance` at a refined contact with
 // parallel normals and do not coincide. The refined contact must be inside both
 // patches, and the global one-sided test described in the banner comment
-// rejects carriers that cross, cut, or interpenetrate. NURBS patches answer
-// false because their tangency cannot be certified without an exact projection.
+// rejects carriers that cross, cut, or interpenetrate. Cuts shallower than the
+// documented detection floor max(1e-12 * (1 + max|p|), 0.05 * tolerance) are
+// reported as tangent_contact by contract. NURBS patches answer false because
+// their tangency cannot be certified without an exact projection.
 inline bool patches_tangent(const SsiPatch& a, const SsiPatch& b, double tolerance) noexcept {
   if (!std::isfinite(tolerance) || !(tolerance > 0.0)) return false;
   if (std::holds_alternative<NurbsSurface>(a.surface) ||

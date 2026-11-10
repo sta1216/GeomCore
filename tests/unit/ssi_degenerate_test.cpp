@@ -650,6 +650,39 @@ TEST_CASE("ssi: cone coincidence scales the half-angle comparison by the carrier
   REQUIRE(large_a.has_value());
   REQUIRE(large_b.has_value());
   CHECK(surfaces_coincident(large_a.value(), large_b.value(), 1e-6));
+
+  // The half-angle scale is the local characteristic radius, not the absolute
+  // apex position: translating the same pair must not change the verdict. The
+  // translated checks use tolerance 1e-9 because coordinates near 1e6 quantize
+  // to ~1.2e-10 in double (ulp(1e6) = 2.3e-10), so no sampled coincidence
+  // below that scale is representable; the angular comparison itself is
+  // unaffected. With the previous apex-position scaling, 1e-10 rad * 1e6 =
+  // 1e-4 would fail these checks.
+  for (const double translation : {1e3, 1e6}) {
+    CAPTURE(translation);
+    const Result<SsiPatch> moved_a = make_ssi_patch(
+        SurfaceGeometry{Cone3{Point3d{translation, 0, 0}, Vec3d{0, 0, 1},
+                              Vec3d{1, 0, 0}, tiny, 0.25 * kPi}},
+        {0.0, kTwoPi}, {0.0, tiny});
+    const Result<SsiPatch> moved_b = make_ssi_patch(
+        SurfaceGeometry{Cone3{Point3d{translation, 0, 0}, Vec3d{0, 0, 1},
+                              Vec3d{1, 0, 0}, tiny, 0.25 * kPi + 1e-10}},
+        {0.0, kTwoPi}, {0.0, tiny});
+    REQUIRE(moved_a.has_value());
+    REQUIRE(moved_b.has_value());
+    CHECK(surfaces_coincident(moved_a.value(), moved_b.value(), 1e-9));
+  }
+  const Result<SsiPatch> moved_different = make_ssi_patch(
+      SurfaceGeometry{Cone3{Point3d{1e6, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, tiny,
+                            0.25 * kPi + 1e-6}},
+      {0.0, kTwoPi}, {0.0, tiny});
+  REQUIRE(moved_different.has_value());
+  const Result<SsiPatch> moved_reference = make_ssi_patch(
+      SurfaceGeometry{Cone3{Point3d{1e6, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, tiny,
+                            0.25 * kPi}},
+      {0.0, kTwoPi}, {0.0, tiny});
+  REQUIRE(moved_reference.has_value());
+  CHECK_FALSE(surfaces_coincident(moved_reference.value(), moved_different.value(), 1e-9));
 }
 
 TEST_CASE("ssi: the global sign test covers a finite cylinder patch") {
@@ -684,4 +717,51 @@ TEST_CASE("ssi: a shallow crossing inside the coincidence band is still not tang
   REQUIRE(b.has_value());
   CHECK(surfaces_coincident(a.value(), b.value(), kTolerance));
   CHECK_FALSE(patches_tangent(a.value(), b.value(), kTolerance));
+}
+
+TEST_CASE("ssi: a boundary-crossing plane pair is not tangent") {
+  // The two patches share the x = 0 boundary and cross along it: plane B is
+  // z = tan(1e-7) * x, plane A is z = 0. They are not coincident (the separation
+  // grows to 2e-7 over the domain), and the contact at the shared boundary has
+  // normals 1e-7 rad apart. Without the strict normal guard the alignment pass
+  // accepts that mismatch, the gap at the boundary is zero, and the one-sided
+  // test sees only non-negative distances on both patches, so this fixture is
+  // what pins the guard.
+  const double angle = 1e-7;
+  const Result<SsiPatch> a = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 0.0}}, {-2.0, 2.0}, {0.0, 2.0});
+  const Result<SsiPatch> b = make_ssi_patch(
+      SurfaceGeometry{Plane3{{-std::sin(angle), 0.0, std::cos(angle)}, 0.0}},
+      {0.0, 2.0}, {-2.0, 2.0});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  CHECK_FALSE(surfaces_coincident(a.value(), b.value(), kTolerance));
+  CHECK_FALSE(patches_tangent(a.value(), b.value(), kTolerance));
+  CHECK_FALSE(patches_tangent(b.value(), a.value(), kTolerance));
+}
+
+TEST_CASE("ssi: a cut below the documented detection floor is tangent contact") {
+  // The geometric band max(1e-12 * (1 + max|p|), 0.05 * tolerance) is the
+  // detection floor: a cut shallower than that leaves every sample of the cut
+  // carrier inside the band, so it is reported as tangent_contact by contract.
+  // The nominal threshold is 0.05 * tolerance; exactly 0.05 is not tested
+  // because the final comparison is ulp-fragile.
+  const Result<SsiPatch> sphere = full_sphere_patch(kUnitSphere);
+  REQUIRE(sphere.has_value());
+  const Result<SsiPatch> inside_floor =
+      square_plane_patch({0, 0, 1}, 1.0 - 0.04 * kTolerance, 2.0);
+  REQUIRE(inside_floor.has_value());
+  CHECK(patches_tangent(sphere.value(), inside_floor.value(), kTolerance));
+
+  for (const double fraction : {0.06, 0.1, 0.25, 0.5}) {
+    CAPTURE(fraction);
+    const Result<SsiPatch> cutting =
+        square_plane_patch({0, 0, 1}, 1.0 - fraction * kTolerance, 2.0);
+    REQUIRE(cutting.has_value());
+    CHECK_FALSE(patches_tangent(sphere.value(), cutting.value(), kTolerance));
+  }
+
+  const Result<SsiPatch> pole = square_plane_patch({0, 0, 1}, 1.0, 2.0);
+  REQUIRE(pole.has_value());
+  CHECK(patches_tangent(sphere.value(), pole.value(), kTolerance));
 }
