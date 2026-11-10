@@ -614,7 +614,7 @@ TEST_CASE("ssi: a sphere cut within the tolerance band is not tangent") {
 TEST_CASE("ssi: cone coincidence scales the half-angle comparison by the carrier size") {
   // The half angle is an angle: a 1e-10 rad difference is negligible on a
   // millimetre-scale cone and invisible on a kilometre-scale one, so the
-  // comparison is scaled by max(|apex|, radius).
+  // comparison is scaled by the carrier radius (translation invariant).
   const double tiny = 1e-3;
   const Result<SsiPatch> tiny_a = make_ssi_patch(
       SurfaceGeometry{

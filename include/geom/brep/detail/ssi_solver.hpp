@@ -942,7 +942,7 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
 //    carrier inside the band, so such a cut is reported as tangent_contact even
 //    though the carriers technically cross. The floor is a tolerance-scale
 //    cutoff (5% of the caller's tolerance, never below double round-off at the
-//    sample scale), not an accident: cuts at or above the floor are rejected,
+//    sample scale), not an accident: cuts above the tested floor are rejected,
 //    exact contact is accepted, and the trade-off is the same one the caller
 //    makes when choosing `tolerance`. In particular the predicate does NOT
 //    claim to catch arbitrarily shallow cuts.
