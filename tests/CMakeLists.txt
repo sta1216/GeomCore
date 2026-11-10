@@ -72,6 +72,7 @@ set(GEOM_TEST_SOURCES
   unit/ssi_surface_test.cpp
   unit/ssi_patch_test.cpp
   unit/ssi_tri_tri_test.cpp
+  unit/ssi_solver_test.cpp
 )
 
 list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)
