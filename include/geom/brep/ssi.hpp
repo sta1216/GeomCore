@@ -63,9 +63,9 @@ struct SsiResult {
 // Budget for one SSI request. tolerance is the geometric acceptance band,
 // max_depth bounds the adaptive patch subdivision, and max_segments bounds the
 // traced output. An invalid tolerance or a non-positive budget is rejected by
-// ssi() rather than silently clamped. max_depth must be at least 4: the seed
-// clustering assumes at least 16 cells per patch side, and coarser meshes
-// produce duplicate curves whose count depends on the argument order.
+// ssi() rather than silently clamped. max_depth must be at least 6: the seed
+// clustering assumes at least 64 cells per patch side, and coarser meshes
+// produce duplicate curves or order-dependent closure failures.
 struct SsiOptions {
   double tolerance = 1e-9;
   int max_depth = 12;

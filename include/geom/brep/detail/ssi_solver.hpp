@@ -576,7 +576,6 @@ inline Result<SsiPoint> ssi_trace_boundary_refine(const SsiPatch& a, const SsiPa
 inline SsiPoint ssi_trace_boundary_point(const SsiPatch& a, const SsiPatch& b,
                                          const SsiPoint& inside, std::array<double, 2> outside_ua,
                                          std::array<double, 2> outside_va, double tolerance) {
-  bool converged_flag = false;
   // The curve can reach the limit while the parameter-space midpoint refine
   // slides along the curve, so pin the violated coordinate and solve for the
   // boundary intersection directly before falling back to bisection.
@@ -627,7 +626,7 @@ inline SsiPoint ssi_trace_boundary_point(const SsiPatch& a, const SsiPatch& b,
         accepted = true;
       }
     }
-    if (converged) { converged_flag = true; break; }
+    if (converged) break;
     if (!accepted) {
       outside_ua = mid_ua;
       outside_va = mid_va;
@@ -681,7 +680,7 @@ inline SsiTraceEnd ssi_trace_close(const SsiPatch& a, const SsiPatch& b, SsiPoin
   const double target = 8.0 * tolerance;
   // A closing vertex must agree with the start in parameters as well as in 3D:
   // on a periodic patch a point can be within `target` of the start while its
-  // stored parameter is a full period away. The window is the smaller of a
+  // stored parameter is a full period away. The window is the larger of a
   // multiple of the 3D tolerance and a relative parameter span, so it scales
   // with both the model and the patch domain.
   const double span_a = std::hypot(a.u[1] - a.u[0], a.v[1] - a.v[0]);
@@ -860,9 +859,9 @@ inline SsiTraceHalf ssi_trace_half(const SsiPatch& a, const SsiPatch& b, const S
       half.end = SsiTraceEnd::refinement_failed;
       return half;
     }
-    // Parameter travel of this accepted step, measured on the better-conditioned
-    // of the two surfaces: a walk that keeps going around a loop it cannot close
-    // must be reported, not returned as a very long open arc.
+    // Parameter travel of this accepted step, taken as the largest per-axis change
+    // over every periodic axis of both patches: a walk that keeps going around a
+    // loop it cannot close must be reported, not returned as a very long open arc.
     double step_travel = 0.0;
     for (int axis = 0; axis < 2; ++axis) {
       if (surface_periodic(a.surface, axis)) {

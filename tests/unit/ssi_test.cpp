@@ -363,9 +363,9 @@ TEST_CASE("ssi: max_depth below the clustering floor is rejected") {
 }
 
 TEST_CASE("ssi: a sphere cut by the equator plane closes once") {
-  // At depth 5 and coarser the polar triangles make the refined seeds split a
-  // single equator circle into several coincident closed curves; the depth
-  // floor is set so this stops happening.
+  // At depth 4 the polar triangles make the refined seeds split a single
+  // equator circle into seven coincident closed curves; this is a sanity
+  // regression for the depth-6 floor (the RED case is depth 4 on the old HEAD).
   const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
   const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793},
                                             {-1.5707963267948966, 1.5707963267948966});
@@ -380,9 +380,10 @@ TEST_CASE("ssi: a sphere cut by the equator plane closes once") {
 }
 
 TEST_CASE("ssi: near-crest torus cuts keep two branches apart") {
-  // The two intersection circles at z=0.45..0.499 are only 0.06 apart near the
-  // crest, while a duplicate seed pair on one circle can be up to 0.04 apart.
-  // The union radius must cover the duplicates without bridging the branches.
+  // The two intersection circles at z=0.45..0.499 are only 0.063 apart near the
+  // crest, while a bridged duplicate seed pair on one circle is up to 0.0485
+  // apart (92.5% of the 0.0525 union radius). The radius must cover the
+  // duplicates without bridging the branches.
   const Torus3 torus{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 2.0, 0.5};
   const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{torus}, {0, 2 * 3.141592653589793},
                                             {0, 2 * 3.141592653589793});
@@ -397,13 +398,31 @@ TEST_CASE("ssi: near-crest torus cuts keep two branches apart") {
         const Result<SsiResult> result = swapped ? ssi(b.value(), a.value(), SsiOptions{1e-9, depth})
                                                  : ssi(a.value(), b.value(), SsiOptions{1e-9, depth});
         REQUIRE(result.has_value());
-        CHECK(result.value().curves.size() == 2);
+        const auto& curves = result.value().curves;
+        REQUIRE(curves.size() == 2);
+        CHECK(curves[0].closed);
+        CHECK(curves[1].closed);
+        double radius[2] = {0.0, 0.0};
+        for (std::size_t i = 0; i < curves.size(); ++i) {
+          double sum = 0.0;
+          for (const auto& segment : curves[i].segments) {
+            sum += std::hypot(segment.a[0], segment.a[1]);
+            sum += std::hypot(segment.b[0], segment.b[1]);
+          }
+          radius[i] = sum / (2.0 * static_cast<double>(curves[i].segments.size()));
+        }
+        const double offset = std::sqrt(0.25 - z * z);
+        const double lo = radius[0] < radius[1] ? radius[0] : radius[1];
+        const double hi = radius[0] < radius[1] ? radius[1] : radius[0];
+        CHECK(std::fabs(lo - (2.0 - offset)) < 1e-3);
+        CHECK(std::fabs(hi - (2.0 + offset)) < 1e-3);
       }
     }
   }
-  // z=0.4995 puts the branches 0.0447 apart, below the duplicate spread, so the
-  // union necessarily bridges them; that near-crest case is a documented M3b-1
-  // limit rather than a regression. z=0.499 has a 1.26x margin and is pinned.
+  // z=0.4995 puts the branches 0.0447 apart, below the 0.0525 union radius, so
+  // the union necessarily bridges them; the measured onset is z=0.49932
+  // (separation < radius). That near-crest band is a documented M3b-1 limit
+  // rather than a regression; z=0.499 has a 1.205x margin and is pinned.
 }
 
 TEST_CASE("ssi: a wide plane patch does not merge the torus branches") {
