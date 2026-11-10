@@ -15,6 +15,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -88,18 +90,28 @@ inline SsiIssue ssi_driver_issue(SsiDiagnostic code, const char* message) noexce
 // Traces the intersection of two patches. Degenerate, coincident, and tangent
 // input is classified before the tessellator runs; otherwise both patches are
 // tessellated adaptively, every AABB-overlapping triangle pair is intersected,
-// and the segment endpoints become Newton seeds. Segments that share a refined
+// and the segment endpoints become Newton seeds. Seeds that share a refined
 // endpoint belong to the same intersection curve, so one seed per connected
 // segment component is traced: one curve yields one traced curve instead of one
-// per mesh segment. The work counters are deliberately left at their zero-work
-// defaults: this driver only produces the curves and the diagnostics.
+// per mesh segment. The counters record the broad phase (candidate pairs), the
+// traced output (accepted segments and the worst residual), and the refined
+// seeds that did not start a returned curve (duplicates merged while building
+// components plus seeds with no traceable extent). Curves are ordered by their
+// first point and diagnostics by code and parameters, so two calls on identical
+// input produce bit-identical output.
 inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOptions& options) {
+  if (!std::isfinite(options.tolerance) || !(options.tolerance > 0.0)) {
+    return Error{Errc::numeric_failure, "ssi: tolerance must be positive and finite"};
+  }
   // The seed clustering assumes at least 64 cells per patch side: coarser
   // meshes make neighbouring triangle pair seeds land far enough apart that one
   // loop splits into duplicate, argument-order-dependent curves. The floor is
-  // part of this task's contract; Task 9 extends the general option checks.
+  // part of this task's contract.
   if (options.max_depth < 6) {
     return Error{Errc::unsupported, "ssi: max_depth must be at least 6"};
+  }
+  if (options.max_segments < 1) {
+    return Error{Errc::numeric_failure, "ssi: max_segments must be positive"};
   }
   SsiResult result;
   const double tolerance = options.tolerance;
@@ -131,6 +143,21 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
   if (patches_tangent(a, b, tolerance)) {
     result.issues.push_back(detail::ssi_driver_issue(
         SsiDiagnostic::tangent_contact, "ssi: patches touch tangentially"));
+    return result;
+  }
+
+  // A band below the arithmetic resolution of the patches cannot be certified:
+  // the evaluator only resolves points to a few ulp of the model scale, so a
+  // request that tight would accept only bit-identical evaluations and report a
+  // residual that is exactly zero by construction. Refusing to trace such a
+  // band is diagnosed rather than returned as a curve whose acceptance means
+  // nothing.
+  const double resolution =
+      64.0 * std::numeric_limits<double>::epsilon() * std::max(diagonal_a, diagonal_b);
+  if (tolerance < resolution) {
+    result.issues.push_back(detail::ssi_driver_issue(
+        SsiDiagnostic::no_convergence,
+        "ssi: tolerance is below the arithmetic resolution of the patches"));
     return result;
   }
 
@@ -182,6 +209,7 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
     const std::array<std::uint32_t, 3>& triangle_a = patch_mesh_a.triangles[index_a];
     for (std::size_t index_b = 0; index_b < patch_mesh_b.triangles.size(); ++index_b) {
       if (!detail::ssi_driver_bounds_overlap(boxes_a[index_a], boxes_b[index_b])) continue;
+      ++result.candidate_pairs;
       const std::array<std::uint32_t, 3>& triangle_b = patch_mesh_b.triangles[index_b];
       const TriTriResult hit = tri_tri_intersect(
           patch_mesh_a.points[triangle_a[0]], patch_mesh_a.points[triangle_a[1]],
@@ -214,9 +242,62 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
       std::max(64.0 * tolerance, 1e-9 * std::max(diagonal_a, diagonal_b));
   const std::vector<SsiPoint> representatives =
       detail::ssi_driver_curve_seeds(a, b, seeds, segments, seed_tolerance);
-  Result<std::vector<SsiCurve>> curves = trace_ssi_curves(a, b, representatives, tolerance);
-  if (!curves.has_value()) return curves.error();
-  result.curves = std::move(curves.value());
+  Result<std::vector<SsiCurve>> traced = trace_ssi_curves(a, b, representatives, tolerance);
+  if (!traced.has_value()) {
+    // An all-degenerate seed set is a diagnostic at the driver layer, not a
+    // failed request: the caller still receives a result that explains why no
+    // curve was produced. Every other trace error is a contract failure and is
+    // propagated unchanged.
+    if (std::strcmp(traced.error().message,
+                    "trace_ssi_curves: seed has no traceable extent") != 0) {
+      return traced.error();
+    }
+  } else {
+    result.curves = std::move(traced.value());
+  }
+  if (result.curves.empty() && !segments.empty()) {
+    result.issues.push_back(detail::ssi_driver_issue(
+        SsiDiagnostic::no_convergence, "ssi: no seed converged to an intersection curve"));
+  }
+
+  std::uint64_t accepted_segments = 0;
+  double max_residual = 0.0;
+  for (const SsiCurve& curve : result.curves) {
+    accepted_segments += static_cast<std::uint64_t>(curve.segments.size());
+    for (const SsiSegment& segment : curve.segments) {
+      max_residual = std::max(max_residual, segment.residual);
+    }
+  }
+  if (accepted_segments > options.max_segments) {
+    return Error{Errc::numeric_failure, "ssi: segment budget exhausted"};
+  }
+  result.accepted_segments = accepted_segments;
+  result.max_residual = max_residual;
+  const std::uint64_t refined_seeds = static_cast<std::uint64_t>(seeds.size());
+  const std::uint64_t traced_curves = static_cast<std::uint64_t>(result.curves.size());
+  result.rejected_segments = refined_seeds > traced_curves ? refined_seeds - traced_curves : 0;
+
+  // Curve order is a pure function of geometry: first point first, then the
+  // parameterization and the segment count to break ties. Diagnostics are
+  // ordered by code and parameters so equal inputs report issues identically.
+  std::stable_sort(result.curves.begin(), result.curves.end(),
+                   [](const SsiCurve& left, const SsiCurve& right) {
+                     const SsiSegment& l = left.segments.front();
+                     const SsiSegment& r = right.segments.front();
+                     for (int axis = 0; axis < 3; ++axis) {
+                       if (l.a[axis] != r.a[axis]) return l.a[axis] < r.a[axis];
+                     }
+                     if (l.ua != r.ua) return l.ua < r.ua;
+                     if (l.va != r.va) return l.va < r.va;
+                     return left.segments.size() < right.segments.size();
+                   });
+  std::stable_sort(result.issues.begin(), result.issues.end(),
+                   [](const SsiIssue& left, const SsiIssue& right) {
+                     if (left.code != right.code) {
+                       return static_cast<int>(left.code) < static_cast<int>(right.code);
+                     }
+                     return left.params < right.params;
+                   });
   return result;
 }
 

@@ -524,3 +524,77 @@ TEST_CASE("ssi: crossing branches keep separate seed components") {
       patch.value(), patch.value(), {first, second, third, fourth}, segments, 1e-6);
   CHECK(representatives.size() == 2);
 }
+
+TEST_CASE("ssi: validates options and patches") {
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{Plane3{}}, {-1, 1}, {-1, 1});
+  REQUIRE(a.has_value());
+  CHECK_FALSE(ssi(a.value(), a.value(), SsiOptions{0.0}).has_value());
+  CHECK_FALSE(ssi(a.value(), a.value(), SsiOptions{-1.0}).has_value());
+  CHECK_FALSE(ssi(a.value(), a.value(), SsiOptions{std::nan("")}).has_value());
+  SsiOptions bad_depth{1e-9};
+  bad_depth.max_depth = 0;
+  CHECK_FALSE(ssi(a.value(), a.value(), bad_depth).has_value());
+}
+
+TEST_CASE("ssi: identical inputs produce identical output") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+  const Result<SsiPatch> b = make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0.1}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> r1 = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  const Result<SsiResult> r2 = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  REQUIRE(r1.has_value());
+  REQUIRE(r2.has_value());
+  REQUIRE(r1.value().curves.size() == r2.value().curves.size());
+  for (std::size_t i = 0; i < r1.value().curves.size(); ++i) {
+    const auto& s1 = r1.value().curves[i].segments;
+    const auto& s2 = r2.value().curves[i].segments;
+    REQUIRE(s1.size() == s2.size());
+    for (std::size_t k = 0; k < s1.size(); ++k) {
+      for (int c = 0; c < 3; ++c) CHECK(s1[k].a[c] == s2[k].a[c]);
+      CHECK(s1[k].residual == s2[k].residual);
+    }
+  }
+}
+
+TEST_CASE("ssi: max_segments caps the work instead of growing without bound") {
+  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  const Result<SsiPatch> b = make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  SsiOptions options{1e-9};
+  options.max_segments = 1;
+  const Result<SsiResult> result = ssi(a.value(), b.value(), options);
+  CHECK_FALSE(result.has_value());
+}
+
+TEST_CASE("ssi: a collapsed patch is diagnosed as degenerate") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> tiny = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 1e-300}, {0, 1e-300});
+  const Result<SsiPatch> plane = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 1.0}}, {-2, 2}, {-2, 2});
+  REQUIRE(tiny.has_value());
+  REQUIRE(plane.has_value());
+  const Result<SsiResult> result = ssi(tiny.value(), plane.value(), SsiOptions{1e-9});
+  REQUIRE(result.has_value());
+  CHECK(result.value().curves.empty());
+  REQUIRE_FALSE(result.value().issues.empty());
+  CHECK(result.value().issues[0].code == SsiDiagnostic::degenerate_patch);
+}
+
+TEST_CASE("ssi: an unreachable tolerance is reported as no_convergence") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846}, {-1.5, 1.5});
+  const Result<SsiPatch> b = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 0.1}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-300});
+  REQUIRE(result.has_value());
+  CHECK(result.value().curves.empty());
+  REQUIRE_FALSE(result.value().issues.empty());
+  CHECK(result.value().issues[0].code == SsiDiagnostic::no_convergence);
+}
