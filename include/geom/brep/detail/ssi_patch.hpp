@@ -4,17 +4,16 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <limits>
-#include <map>
-#include <utility>
-#include <variant>
-#include <vector>
-
 #include <geom/brep/detail/ssi_surface.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/core/error.hpp>
 #include <geom/core/result.hpp>
 #include <geom/primitives/box.hpp>
+#include <limits>
+#include <map>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace geom {
 inline namespace v1 {
@@ -32,11 +31,17 @@ struct SsiPatch {
 // parameters and a unit normal oriented like the surface's cross(du, dv), so
 // callers can recover where a point came from without another evaluation.
 // Triangle indices are CCW in the patch's (u, v) plane.
+//
+// max_chord_error is the largest sampled leaf flatness that was accepted; it is
+// an estimate, not a bound. tolerance_met is false when at least one leaf still
+// exceeded the requested chord tolerance at max_depth.
 struct SsiPatchMesh {
   std::vector<Point3d> points;
   std::vector<Vec3d> normals;
   std::vector<std::array<double, 2>> uv;
   std::vector<std::array<std::uint32_t, 3>> triangles;
+  double max_chord_error = 0.0;
+  bool tolerance_met = true;
 };
 
 namespace detail {
@@ -126,61 +131,75 @@ inline bool patch_contains(const SsiPatch& patch, double u, double v) noexcept {
 
 namespace detail {
 
-// patch_bounds samples the same adaptive grid as tessellation but has no depth
-// argument; this cap bounds its work for callers who only need a box.
-inline constexpr int kSsiPatchBoundsMaxDepth = 12;
+// patch_bounds uses a fixed sampling grid rather than adaptive subdivision, so
+// its cost does not depend on chord_tolerance. This many cells are sampled per
+// parameter axis, giving a (N + 1) x (N + 1) grid of corner samples.
+inline constexpr int kSsiPatchBoundsCells = 16;
 
-inline double ssi_patch_max_abs_component(const Vec3d& vector) noexcept {
-  return std::max({std::fabs(vector[0]), std::fabs(vector[1]), std::fabs(vector[2])});
-}
-
-// Distance from the cell center to the plane spanned by its four corners.
-// Scaling each diagonal by its largest component before the cross product
-// keeps the intermediate finite for cells whose edges are tiny or huge; a
-// degenerate (zero-area) cell has no plane to deviate from and reports zero.
-inline double ssi_patch_plane_deviation(const SurfacePoint& p00, const SurfacePoint& p10,
-                                        const SurfacePoint& p11, const SurfacePoint& p01,
-                                        const SurfacePoint& center) noexcept {
-  Vec3d first = p11.p - p00.p;
-  Vec3d second = p10.p - p01.p;
-  const double first_scale = ssi_patch_max_abs_component(first);
-  const double second_scale = ssi_patch_max_abs_component(second);
-  if (!(first_scale > 0.0) || !(second_scale > 0.0)) return 0.0;
+// Bilinear interpolation of the cell's four corner positions at (s, t), with
+// s and t in [0, 1]. This is the surface two corner-only triangles would
+// interpolate, so sample deviations from it measure the error of a cell.
+inline Point3d ssi_patch_bilinear(const Point3d& p00, const Point3d& p10, const Point3d& p11,
+                                  const Point3d& p01, double s, double t) noexcept {
+  const double w00 = (1.0 - s) * (1.0 - t);
+  const double w10 = s * (1.0 - t);
+  const double w11 = s * t;
+  const double w01 = (1.0 - s) * t;
+  Point3d point;
   for (int axis = 0; axis < 3; ++axis) {
-    first[axis] /= first_scale;
-    second[axis] /= second_scale;
+    point[axis] = w00 * p00[axis] + w10 * p10[axis] + w11 * p11[axis] + w01 * p01[axis];
   }
-  Vec3d normal = cross(first, second);
-  const double normal_scale = ssi_patch_max_abs_component(normal);
-  if (!(normal_scale > 0.0)) return 0.0;
-  const Vec3d scaled{normal[0] / normal_scale, normal[1] / normal_scale, normal[2] / normal_scale};
-  const double length = std::hypot(scaled[0], scaled[1], scaled[2]);
-  normal = Vec3d{scaled[0] / length, scaled[1] / length, scaled[2] / length};
-  return std::fabs(dot(center.p - p00.p, normal));
+  return point;
 }
 
-// Distance from a sampled edge midpoint to the straight chord between that
-// edge's corners. This is the sagitta the chord approximation ignores.
-inline double ssi_patch_chord_deviation(const Point3d& sample, const Point3d& corner_a,
-                                        const Point3d& corner_b) noexcept {
-  const double x = sample[0] - 0.5 * corner_a[0] - 0.5 * corner_b[0];
-  const double y = sample[1] - 0.5 * corner_a[1] - 0.5 * corner_b[1];
-  const double z = sample[2] - 0.5 * corner_a[2] - 0.5 * corner_b[2];
-  return std::hypot(x, y, z);
+// Distance from one parameter sample to the cell's bilinear surface. Measuring
+// against the bilinear, rather than the corner plane, makes this sensitive to
+// saddles whose error is zero on the edges and at the center.
+inline double ssi_patch_sample_deviation(const Point3d& p00, const Point3d& p10, const Point3d& p11,
+                                         const Point3d& p01, const Point3d& sample, double s,
+                                         double t) noexcept {
+  return norm2(sample - ssi_patch_bilinear(p00, p10, p11, p01, s, t));
 }
 
-// A cell is flat enough when its center stays close to the corner plane and
-// each edge midpoint stays close to its corner chord.
+// The nine samples a cell evaluates: center, four edge midpoints, and four
+// quarter points at (0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75).
+struct SsiPatchCellSamples {
+  SurfacePoint center;
+  SurfacePoint edge_bottom;
+  SurfacePoint edge_right;
+  SurfacePoint edge_top;
+  SurfacePoint edge_left;
+  SurfacePoint quarter_00;
+  SurfacePoint quarter_10;
+  SurfacePoint quarter_11;
+  SurfacePoint quarter_01;
+};
+
+// Sampled flatness of a cell: the largest distance from any of its nine samples
+// to the bilinear surface through its four corners. The quarter points are what
+// catch a bicubic saddle, whose error vanishes at all corners, edge midpoints,
+// and the center. This is an estimate, not a mathematical bound.
 inline double ssi_patch_cell_flatness(const SurfacePoint& p00, const SurfacePoint& p10,
                                       const SurfacePoint& p11, const SurfacePoint& p01,
-                                      const SurfacePoint& bottom, const SurfacePoint& right,
-                                      const SurfacePoint& top, const SurfacePoint& left,
-                                      const SurfacePoint& center) noexcept {
-  double flatness = ssi_patch_plane_deviation(p00, p10, p11, p01, center);
-  flatness = std::max(flatness, ssi_patch_chord_deviation(bottom.p, p00.p, p10.p));
-  flatness = std::max(flatness, ssi_patch_chord_deviation(right.p, p10.p, p11.p));
-  flatness = std::max(flatness, ssi_patch_chord_deviation(top.p, p01.p, p11.p));
-  flatness = std::max(flatness, ssi_patch_chord_deviation(left.p, p00.p, p01.p));
+                                      const SsiPatchCellSamples& samples) noexcept {
+  double flatness =
+      ssi_patch_sample_deviation(p00.p, p10.p, p11.p, p01.p, samples.center.p, 0.5, 0.5);
+  flatness = std::max(flatness, ssi_patch_sample_deviation(p00.p, p10.p, p11.p, p01.p,
+                                                           samples.edge_bottom.p, 0.5, 0.0));
+  flatness = std::max(flatness, ssi_patch_sample_deviation(p00.p, p10.p, p11.p, p01.p,
+                                                           samples.edge_right.p, 1.0, 0.5));
+  flatness = std::max(flatness, ssi_patch_sample_deviation(p00.p, p10.p, p11.p, p01.p,
+                                                           samples.edge_top.p, 0.5, 1.0));
+  flatness = std::max(flatness, ssi_patch_sample_deviation(p00.p, p10.p, p11.p, p01.p,
+                                                           samples.edge_left.p, 0.0, 0.5));
+  flatness = std::max(flatness, ssi_patch_sample_deviation(p00.p, p10.p, p11.p, p01.p,
+                                                           samples.quarter_00.p, 0.25, 0.25));
+  flatness = std::max(flatness, ssi_patch_sample_deviation(p00.p, p10.p, p11.p, p01.p,
+                                                           samples.quarter_10.p, 0.75, 0.25));
+  flatness = std::max(flatness, ssi_patch_sample_deviation(p00.p, p10.p, p11.p, p01.p,
+                                                           samples.quarter_11.p, 0.75, 0.75));
+  flatness = std::max(flatness, ssi_patch_sample_deviation(p00.p, p10.p, p11.p, p01.p,
+                                                           samples.quarter_01.p, 0.25, 0.75));
   return flatness;
 }
 
@@ -192,11 +211,12 @@ struct SsiPatchMeshBuilder {
   std::map<std::pair<double, double>, std::uint32_t> vertices;
   double chord_tolerance = 0.0;
   int max_depth = 0;
+  double max_chord_error = 0.0;
+  bool tolerance_met = true;
 };
 
 inline Result<std::uint32_t> ssi_patch_emit_vertex(SsiPatchMeshBuilder& builder,
-                                                   const SurfacePoint& sample, double u,
-                                                   double v) {
+                                                   const SurfacePoint& sample, double u, double v) {
   const std::pair<double, double> key{u, v};
   const auto existing = builder.vertices.find(key);
   if (existing != builder.vertices.end()) return existing->second;
@@ -215,56 +235,76 @@ inline Result<std::uint32_t> ssi_patch_emit_vertex(SsiPatchMeshBuilder& builder,
 }
 
 // Recursive quadtree. The four corner samples and their parameters are passed
-// in, so a cell only evaluates its center and four edge midpoints. Leaves emit
-// four triangles around the center, wound CCW in (u, v).
-inline Result<void> ssi_patch_tessellate_cell(SsiPatchMeshBuilder& builder,
-                                              const SurfacePoint& p00, const SurfacePoint& p10,
-                                              const SurfacePoint& p11, const SurfacePoint& p01,
-                                              double u0, double u1, double v0, double v1,
-                                              int depth) {
+// in, so a cell evaluates only its nine interior samples. Leaves emit four
+// triangles around the center, wound CCW in (u, v). The root cell is level 1.
+//
+// Adaptive leaves at different depths are not edge-conforming: a coarse leaf's
+// edge is not split where a finer neighbour introduces a midpoint, so hanging
+// nodes, and cracks of the order of the coarse leaf's sampled error, are
+// possible. At a pole several parameter samples may evaluate to the same
+// position; those vertices are kept, with distinct parameters.
+inline Result<void> ssi_patch_tessellate_cell(SsiPatchMeshBuilder& builder, const SurfacePoint& p00,
+                                              const SurfacePoint& p10, const SurfacePoint& p11,
+                                              const SurfacePoint& p01, double u0, double u1,
+                                              double v0, double v1, int depth) {
   const double um = u0 + 0.5 * (u1 - u0);
   const double vm = v0 + 0.5 * (v1 - v0);
   if (!(um > u0 && um < u1 && vm > v0 && vm < v1)) {
     return Error{Errc::degenerate, "ssi: patch cell cannot be subdivided further"};
   }
-  const Result<SurfacePoint> center = surface_eval(builder.patch->surface, um, vm);
-  if (!center.has_value()) return center.error();
-  const Result<SurfacePoint> bottom = surface_eval(builder.patch->surface, um, v0);
-  if (!bottom.has_value()) return bottom.error();
-  const Result<SurfacePoint> right = surface_eval(builder.patch->surface, u1, vm);
-  if (!right.has_value()) return right.error();
-  const Result<SurfacePoint> top = surface_eval(builder.patch->surface, um, v1);
-  if (!top.has_value()) return top.error();
-  const Result<SurfacePoint> left = surface_eval(builder.patch->surface, u0, vm);
-  if (!left.has_value()) return left.error();
-  if (!surface_point_finite(center.value()) || !surface_point_finite(bottom.value()) ||
-      !surface_point_finite(right.value()) || !surface_point_finite(top.value()) ||
-      !surface_point_finite(left.value())) {
-    return Error{Errc::non_finite, "ssi: patch sample is not finite"};
+  const double uq0 = u0 + 0.25 * (u1 - u0);
+  const double uq1 = u0 + 0.75 * (u1 - u0);
+  const double vq0 = v0 + 0.25 * (v1 - v0);
+  const double vq1 = v0 + 0.75 * (v1 - v0);
+  const std::array<std::pair<double, double>, 9> parameters{{{um, vm},
+                                                             {um, v0},
+                                                             {u1, vm},
+                                                             {um, v1},
+                                                             {u0, vm},
+                                                             {uq0, vq0},
+                                                             {uq1, vq0},
+                                                             {uq1, vq1},
+                                                             {uq0, vq1}}};
+  std::array<SurfacePoint, 9> samples{};
+  for (std::size_t i = 0; i < samples.size(); ++i) {
+    const Result<SurfacePoint> sample =
+        surface_eval(builder.patch->surface, parameters[i].first, parameters[i].second);
+    if (!sample.has_value()) return sample.error();
+    if (!surface_point_finite(sample.value())) {
+      return Error{Errc::non_finite, "ssi: patch sample is not finite"};
+    }
+    samples[i] = sample.value();
   }
+  SsiPatchCellSamples cell;
+  cell.center = samples[0];
+  cell.edge_bottom = samples[1];
+  cell.edge_right = samples[2];
+  cell.edge_top = samples[3];
+  cell.edge_left = samples[4];
+  cell.quarter_00 = samples[5];
+  cell.quarter_10 = samples[6];
+  cell.quarter_11 = samples[7];
+  cell.quarter_01 = samples[8];
 
-  const double flatness =
-      ssi_patch_cell_flatness(p00, p10, p11, p01, bottom.value(), right.value(), top.value(),
-                              left.value(), center.value());
+  const double flatness = ssi_patch_cell_flatness(p00, p10, p11, p01, cell);
   if (flatness > builder.chord_tolerance && depth < builder.max_depth) {
-    const Result<void> lower_left =
-        ssi_patch_tessellate_cell(builder, p00, bottom.value(), center.value(), left.value(), u0,
-                                  um, v0, vm, depth + 1);
+    const Result<void> lower_left = ssi_patch_tessellate_cell(
+        builder, p00, cell.edge_bottom, cell.center, cell.edge_left, u0, um, v0, vm, depth + 1);
     if (!lower_left.has_value()) return lower_left.error();
-    const Result<void> lower_right =
-        ssi_patch_tessellate_cell(builder, bottom.value(), p10, right.value(), center.value(), um,
-                                  u1, v0, vm, depth + 1);
+    const Result<void> lower_right = ssi_patch_tessellate_cell(
+        builder, cell.edge_bottom, p10, cell.edge_right, cell.center, um, u1, v0, vm, depth + 1);
     if (!lower_right.has_value()) return lower_right.error();
-    const Result<void> upper_left =
-        ssi_patch_tessellate_cell(builder, left.value(), center.value(), top.value(), p01, u0, um,
-                                  vm, v1, depth + 1);
+    const Result<void> upper_left = ssi_patch_tessellate_cell(
+        builder, cell.edge_left, cell.center, cell.edge_top, p01, u0, um, vm, v1, depth + 1);
     if (!upper_left.has_value()) return upper_left.error();
-    const Result<void> upper_right =
-        ssi_patch_tessellate_cell(builder, center.value(), right.value(), p11, top.value(), um, u1,
-                                  vm, v1, depth + 1);
+    const Result<void> upper_right = ssi_patch_tessellate_cell(
+        builder, cell.center, cell.edge_right, p11, cell.edge_top, um, u1, vm, v1, depth + 1);
     if (!upper_right.has_value()) return upper_right.error();
     return Result<void>{};
   }
+
+  builder.max_chord_error = std::max(builder.max_chord_error, flatness);
+  if (flatness > builder.chord_tolerance) builder.tolerance_met = false;
 
   const Result<std::uint32_t> i00 = ssi_patch_emit_vertex(builder, p00, u0, v0);
   if (!i00.has_value()) return i00.error();
@@ -274,7 +314,7 @@ inline Result<void> ssi_patch_tessellate_cell(SsiPatchMeshBuilder& builder,
   if (!i11.has_value()) return i11.error();
   const Result<std::uint32_t> i01 = ssi_patch_emit_vertex(builder, p01, u0, v1);
   if (!i01.has_value()) return i01.error();
-  const Result<std::uint32_t> ic = ssi_patch_emit_vertex(builder, center.value(), um, vm);
+  const Result<std::uint32_t> ic = ssi_patch_emit_vertex(builder, cell.center, um, vm);
   if (!ic.has_value()) return ic.error();
 
   builder.mesh.triangles.push_back({i00.value(), i10.value(), ic.value()});
@@ -286,18 +326,24 @@ inline Result<void> ssi_patch_tessellate_cell(SsiPatchMeshBuilder& builder,
 
 }  // namespace detail
 
-// Adaptively tessellates a patch until every leaf cell is within
-// chord_tolerance of its corner bilinear, or until max_depth subdivisions have
-// been made. The tolerance is the only flatness authority: an invalid value is
-// rejected instead of defaulting. The patch is revalidated with
-// make_ssi_patch, so a hand-built patch cannot bypass the surface and domain
-// checks. Output depends only on the patch and tolerance: child order, vertex
-// emission order, and triangle order are fixed.
+// Adaptively tessellates a patch until every leaf cell's nine-sample flatness is
+// at most chord_tolerance, or until max_depth cell levels have been reached.
+// The root cell is level 1, so max_depth == 1 emits a single cell and must be
+// at least 1. Flatness is sampled at nine points per cell and measured against
+// the cell's bilinear surface; it is a sampled estimate, not a mathematical
+// certificate. When the depth cap is reached with a leaf still above tolerance,
+// that leaf is emitted, tolerance_met is set false, and max_chord_error records
+// the worst accepted sampled flatness. Leaves of different depths are not
+// edge-conforming, so cracks of the order of the coarse leaf error are possible.
+// The tolerance is the only flatness authority: an invalid value is rejected
+// instead of defaulting. The patch is revalidated with make_ssi_patch, so a
+// hand-built patch cannot bypass the surface and domain checks. Output depends
+// only on the patch and tolerance: child order, vertex emission order, and
+// triangle order are fixed.
 inline Result<SsiPatchMesh> tessellate_ssi_patch(const SsiPatch& patch, double chord_tolerance,
                                                  int max_depth) {
   if (!std::isfinite(chord_tolerance) || !(chord_tolerance > 0.0)) {
-    return Error{Errc::tolerance_violation,
-                 "ssi: chord tolerance must be finite and positive"};
+    return Error{Errc::tolerance_violation, "ssi: chord tolerance must be finite and positive"};
   }
   if (max_depth < 1) {
     return Error{Errc::index_out_of_range, "ssi: patch max depth must be positive"};
@@ -306,17 +352,21 @@ inline Result<SsiPatchMesh> tessellate_ssi_patch(const SsiPatch& patch, double c
   if (!valid.has_value()) return valid.error();
 
   detail::SsiPatchMeshBuilder builder;
-  builder.patch = &patch;
+  builder.patch = &valid.value();
   builder.chord_tolerance = chord_tolerance;
   builder.max_depth = max_depth;
 
-  const Result<SurfacePoint> p00 = surface_eval(patch.surface, patch.u[0], patch.v[0]);
+  const Result<SurfacePoint> p00 =
+      surface_eval(valid.value().surface, valid.value().u[0], valid.value().v[0]);
   if (!p00.has_value()) return p00.error();
-  const Result<SurfacePoint> p10 = surface_eval(patch.surface, patch.u[1], patch.v[0]);
+  const Result<SurfacePoint> p10 =
+      surface_eval(valid.value().surface, valid.value().u[1], valid.value().v[0]);
   if (!p10.has_value()) return p10.error();
-  const Result<SurfacePoint> p11 = surface_eval(patch.surface, patch.u[1], patch.v[1]);
+  const Result<SurfacePoint> p11 =
+      surface_eval(valid.value().surface, valid.value().u[1], valid.value().v[1]);
   if (!p11.has_value()) return p11.error();
-  const Result<SurfacePoint> p01 = surface_eval(patch.surface, patch.u[0], patch.v[1]);
+  const Result<SurfacePoint> p01 =
+      surface_eval(valid.value().surface, valid.value().u[0], valid.value().v[1]);
   if (!p01.has_value()) return p01.error();
   if (!surface_point_finite(p00.value()) || !surface_point_finite(p10.value()) ||
       !surface_point_finite(p11.value()) || !surface_point_finite(p01.value())) {
@@ -324,25 +374,86 @@ inline Result<SsiPatchMesh> tessellate_ssi_patch(const SsiPatch& patch, double c
   }
 
   const Result<void> status = detail::ssi_patch_tessellate_cell(
-      builder, p00.value(), p10.value(), p11.value(), p01.value(), patch.u[0], patch.u[1],
-      patch.v[0], patch.v[1], 0);
+      builder, p00.value(), p10.value(), p11.value(), p01.value(), valid.value().u[0],
+      valid.value().u[1], valid.value().v[0], valid.value().v[1], 1);
   if (!status.has_value()) return status.error();
+  builder.mesh.max_chord_error = builder.max_chord_error;
+  builder.mesh.tolerance_met = builder.tolerance_met;
   return std::move(builder.mesh);
 }
 
-// Axis-aligned bounds of the same adaptive grid used by tessellate_ssi_patch,
-// grown outward by chord_tolerance to cover the chord error. Invalid input
-// produces an empty box: there is no enclosing box to report.
+// Conservative axis-aligned bounds for a patch, built from a fixed 17 x 17 grid
+// of corner samples plus a 3 x 3 subgrid inside every cell. Each subgrid sample
+// is compared with its cell's bilinear surface; the largest such sag defines a
+// padding of twice that sag plus 1e-12 times the box diagonal, which is added on
+// every axis. This is a sampled conservative box, not an exact bound, and its
+// size does not depend on chord_tolerance: the tolerance is validated for
+// consistency with tessellate_ssi_patch but is otherwise unused. Invalid input,
+// including an invalid tolerance, produces an empty box.
 inline Box3d patch_bounds(const SsiPatch& patch, double chord_tolerance) {
-  const Result<SsiPatchMesh> mesh =
-      tessellate_ssi_patch(patch, chord_tolerance, detail::kSsiPatchBoundsMaxDepth);
-  if (!mesh.has_value()) return Box3d::empty();
+  if (!std::isfinite(chord_tolerance) || !(chord_tolerance > 0.0)) return Box3d::empty();
+  const Result<SsiPatch> valid = make_ssi_patch(patch.surface, patch.u, patch.v);
+  if (!valid.has_value()) return Box3d::empty();
+  const SsiPatch& target = valid.value();
+  const int cells = detail::kSsiPatchBoundsCells;
+  const int grid_width = cells + 1;
+  std::vector<Point3d> grid(static_cast<std::size_t>(grid_width) * grid_width);
   Box3d bounds = Box3d::empty();
-  for (const Point3d& point : mesh.value().points) bounds.expand(point);
+  for (int iu = 0; iu < grid_width; ++iu) {
+    for (int iv = 0; iv < grid_width; ++iv) {
+      const double u = target.u[0] + (target.u[1] - target.u[0]) *
+                                         (static_cast<double>(iu) / static_cast<double>(cells));
+      const double v = target.v[0] + (target.v[1] - target.v[0]) *
+                                         (static_cast<double>(iv) / static_cast<double>(cells));
+      const Result<SurfacePoint> sample = surface_eval(target.surface, u, v);
+      if (!sample.has_value()) return Box3d::empty();
+      if (!surface_point_finite(sample.value())) return Box3d::empty();
+      grid[static_cast<std::size_t>(iu) * grid_width + iv] = sample.value().p;
+      bounds.expand(sample.value().p);
+    }
+  }
   if (bounds.is_empty()) return bounds;
+
+  double max_sag = 0.0;
+  for (int iu = 0; iu < cells; ++iu) {
+    for (int iv = 0; iv < cells; ++iv) {
+      const double u0 = target.u[0] + (target.u[1] - target.u[0]) *
+                                          (static_cast<double>(iu) / static_cast<double>(cells));
+      const double u1 = target.u[0] + (target.u[1] - target.u[0]) * (static_cast<double>(iu + 1) /
+                                                                     static_cast<double>(cells));
+      const double v0 = target.v[0] + (target.v[1] - target.v[0]) *
+                                          (static_cast<double>(iv) / static_cast<double>(cells));
+      const double v1 = target.v[0] + (target.v[1] - target.v[0]) * (static_cast<double>(iv + 1) /
+                                                                     static_cast<double>(cells));
+      const Point3d& p00 = grid[static_cast<std::size_t>(iu) * grid_width + iv];
+      const Point3d& p10 = grid[static_cast<std::size_t>(iu + 1) * grid_width + iv];
+      const Point3d& p11 = grid[static_cast<std::size_t>(iu + 1) * grid_width + iv + 1];
+      const Point3d& p01 = grid[static_cast<std::size_t>(iu) * grid_width + iv + 1];
+      for (int su = 0; su < 3; ++su) {
+        for (int sv = 0; sv < 3; ++sv) {
+          const double s = 0.5 * static_cast<double>(su);
+          const double t = 0.5 * static_cast<double>(sv);
+          const double u = u0 + s * (u1 - u0);
+          const double v = v0 + t * (v1 - v0);
+          const Result<SurfacePoint> sample = surface_eval(target.surface, u, v);
+          if (!sample.has_value()) return Box3d::empty();
+          if (!surface_point_finite(sample.value())) return Box3d::empty();
+          max_sag = std::max(max_sag, detail::ssi_patch_sample_deviation(p00, p10, p11, p01,
+                                                                         sample.value().p, s, t));
+          bounds.expand(sample.value().p);
+        }
+      }
+    }
+  }
+
+  if (!std::isfinite(max_sag)) return Box3d::empty();
+  const double diagonal = norm2(bounds.hi - bounds.lo);
+  if (!std::isfinite(diagonal)) return Box3d::empty();
+  const double padding = 2.0 * max_sag + 1e-12 * diagonal;
+  if (!std::isfinite(padding)) return Box3d::empty();
   for (int axis = 0; axis < 3; ++axis) {
-    bounds.lo[axis] -= chord_tolerance;
-    bounds.hi[axis] += chord_tolerance;
+    bounds.lo[axis] -= padding;
+    bounds.hi[axis] += padding;
   }
   return bounds;
 }
