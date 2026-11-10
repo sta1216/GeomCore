@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <string_view>
 #include <type_traits>
@@ -40,6 +41,13 @@ Result<SsiPatch> full_cone_patch(const Cone3& cone) {
 
 Result<SsiPatch> full_torus_patch(const Torus3& torus) {
   return make_ssi_patch(SurfaceGeometry{torus}, {0.0, kTwoPi}, {0.0, kTwoPi});
+}
+
+Vec3d rotate_about(const Vec3d& value, const Vec3d& axis, double angle) {
+  const double cosine = std::cos(angle);
+  const double sine = std::sin(angle);
+  return value * cosine + cross(axis, value) * sine +
+         axis * (dot(axis, value) * (1.0 - cosine));
 }
 
 }  // namespace
@@ -333,4 +341,229 @@ TEST_CASE("ssi: coincidence of NURBS surfaces is documented as unsupported") {
   // distinguish coincidence from tangency, so both predicates report false.
   CHECK_FALSE(surfaces_coincident(a.value(), a.value(), kTolerance));
   CHECK_FALSE(patches_tangent(a.value(), a.value(), kTolerance));
+}
+
+TEST_CASE("ssi: near-parallel crossing planes are not tangent") {
+  // Both planes pass through the origin, so the gap at the contact is exactly
+  // zero. The 1e-7 rad crossing is far above the 1e-9 normal-parallel test and
+  // far below the old 1e-6 heuristic; only the one-sided test rejects it.
+  for (const double angle : {1e-7, 1e-6}) {
+    CAPTURE(angle);
+    const Result<SsiPatch> a = square_plane_patch({0, 0, 1}, 0.0, 2.0);
+    const Result<SsiPatch> b =
+        square_plane_patch({std::sin(angle), 0.0, std::cos(angle)}, 0.0, 2.0);
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    CHECK_FALSE(surfaces_coincident(a.value(), b.value(), kTolerance));
+    CHECK_FALSE(patches_tangent(a.value(), b.value(), kTolerance));
+  }
+}
+
+TEST_CASE("ssi: a plane cutting a sphere just below its pole is not tangent") {
+  // z = 1 - 0.5*tolerance cuts a circle of radius sqrt(tolerance) ~ 3.2e-5. The
+  // minimum gap is inside the band and the normals are parallel, so only the
+  // one-sided test can reject it.
+  const Result<SsiPatch> sphere = full_sphere_patch(kUnitSphere);
+  const Result<SsiPatch> plane =
+      square_plane_patch({0, 0, 1}, 1.0 - 0.5 * kTolerance, 2.0);
+  REQUIRE(sphere.has_value());
+  REQUIRE(plane.has_value());
+  CHECK_FALSE(patches_tangent(sphere.value(), plane.value(), kTolerance));
+}
+
+TEST_CASE("ssi: parallel planes half a tolerance apart are coincident, not tangent") {
+  const Result<SsiPatch> a = square_plane_patch({0, 0, 1}, 0.0, 2.0);
+  const Result<SsiPatch> b = square_plane_patch({0, 0, 1}, 0.5 * kTolerance, 2.0);
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  // The separation lies inside the coincidence band, so the carriers count as
+  // the same plane; tangency is reserved for contact between distinct carriers.
+  CHECK(surfaces_coincident(a.value(), b.value(), kTolerance));
+  CHECK_FALSE(patches_tangent(a.value(), b.value(), kTolerance));
+}
+
+TEST_CASE("ssi: a sphere tangent to a plane at its equator with a rotated frame is tangent") {
+  const double angle = 0.3;
+  // Rotating the frame about the contact normal x moves the poles and the seam,
+  // not the sphere or the contact point (1, 0, 0).
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0.0, std::cos(angle), std::sin(angle)},
+                       Vec3d{0.0, -std::sin(angle), std::cos(angle)}, 1.0};
+  REQUIRE(sphere.is_valid());
+  const Result<SsiPatch> sphere_patch = full_sphere_patch(sphere);
+  const Result<SsiPatch> plane = square_plane_patch({1, 0, 0}, 1.0, 2.0);
+  REQUIRE(sphere_patch.has_value());
+  REQUIRE(plane.has_value());
+  CHECK(patches_tangent(sphere_patch.value(), plane.value(), kTolerance));
+  CHECK_FALSE(surfaces_coincident(sphere_patch.value(), plane.value(), kTolerance));
+}
+
+TEST_CASE("ssi: a cylinder tangent to a plane along a line with a rotated frame is tangent") {
+  const double angle = 0.3;
+  const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1},
+                           Vec3d{std::cos(angle), std::sin(angle), 0.0}, 1.0};
+  REQUIRE(cylinder.is_valid());
+  const Result<SsiPatch> cylinder_patch = full_cylinder_patch(cylinder);
+  const Result<SsiPatch> plane = square_plane_patch({1, 0, 0}, 1.0, 2.0);
+  REQUIRE(cylinder_patch.has_value());
+  REQUIRE(plane.has_value());
+  CHECK(patches_tangent(cylinder_patch.value(), plane.value(), kTolerance));
+  CHECK_FALSE(surfaces_coincident(cylinder_patch.value(), plane.value(), kTolerance));
+}
+
+TEST_CASE("ssi: a torus tangent to a plane away from the plane sample grid is tangent") {
+  // The contact circle has radius R = 2, off the plane patch's 9x9 sample grid,
+  // so refinement has to walk the pair onto the contact.
+  const Torus3 torus{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 2.0, 0.5};
+  const Result<SsiPatch> torus_patch = full_torus_patch(torus);
+  const Result<SsiPatch> plane = square_plane_patch({0, 0, 1}, 0.5, 3.0);
+  REQUIRE(torus_patch.has_value());
+  REQUIRE(plane.has_value());
+  CHECK(patches_tangent(torus_patch.value(), plane.value(), kTolerance));
+  CHECK_FALSE(surfaces_coincident(torus_patch.value(), plane.value(), kTolerance));
+}
+
+TEST_CASE("ssi: tangent spheres with rotated frames are tangent") {
+  const double angle = 0.3;
+  const Vec3d axis{0.0, std::cos(angle), std::sin(angle)};
+  const Vec3d x_axis{0.0, -std::sin(angle), std::cos(angle)};
+
+  const Result<SsiPatch> external_a =
+      full_sphere_patch(Sphere3{Point3d{0, 0, 0}, axis, x_axis, 1.0});
+  const Result<SsiPatch> external_b =
+      full_sphere_patch(Sphere3{Point3d{2, 0, 0}, axis, x_axis, 1.0});
+  REQUIRE(external_a.has_value());
+  REQUIRE(external_b.has_value());
+  CHECK(patches_tangent(external_a.value(), external_b.value(), kTolerance));
+
+  const Result<SsiPatch> internal_a =
+      full_sphere_patch(Sphere3{Point3d{0, 0, 0}, axis, x_axis, 2.0});
+  const Result<SsiPatch> internal_b =
+      full_sphere_patch(Sphere3{Point3d{1, 0, 0}, axis, x_axis, 1.0});
+  REQUIRE(internal_a.has_value());
+  REQUIRE(internal_b.has_value());
+  CHECK(patches_tangent(internal_a.value(), internal_b.value(), kTolerance));
+}
+
+TEST_CASE("ssi: coincidence ignores the seam parameter of symmetric carriers") {
+  const double angle = 0.3;
+  const Vec3d tilted_x{std::cos(angle), std::sin(angle), 0.0};
+
+  // A sphere's axis only names its poles: rotating the axis and the seam
+  // together leaves the same sphere.
+  const Result<SsiPatch> sphere_a =
+      full_sphere_patch(Sphere3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0});
+  const Result<SsiPatch> sphere_b = full_sphere_patch(
+      Sphere3{Point3d{0, 0, 0}, Vec3d{0.0, std::cos(angle), std::sin(angle)},
+              Vec3d{0.0, -std::sin(angle), std::cos(angle)}, 1.0});
+  REQUIRE(sphere_a.has_value());
+  REQUIRE(sphere_b.has_value());
+  CHECK(surfaces_coincident(sphere_a.value(), sphere_b.value(), kTolerance));
+
+  const Result<SsiPatch> cylinder_a = full_cylinder_patch(
+      Cylinder3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0});
+  const Result<SsiPatch> cylinder_b = full_cylinder_patch(
+      Cylinder3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, tilted_x, 1.0});
+  REQUIRE(cylinder_a.has_value());
+  REQUIRE(cylinder_b.has_value());
+  CHECK(surfaces_coincident(cylinder_a.value(), cylinder_b.value(), kTolerance));
+  CHECK_FALSE(patches_tangent(cylinder_a.value(), cylinder_b.value(), kTolerance));
+
+  const Result<SsiPatch> cone_a = full_cone_patch(
+      Cone3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0, 0.25 * kPi});
+  const Result<SsiPatch> cone_b = full_cone_patch(
+      Cone3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, tilted_x, 1.0, 0.25 * kPi});
+  REQUIRE(cone_a.has_value());
+  REQUIRE(cone_b.has_value());
+  CHECK(surfaces_coincident(cone_a.value(), cone_b.value(), kTolerance));
+  CHECK_FALSE(patches_tangent(cone_a.value(), cone_b.value(), kTolerance));
+
+  const Result<SsiPatch> torus_a = full_torus_patch(
+      Torus3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 2.0, 0.5});
+  const Result<SsiPatch> torus_b = full_torus_patch(
+      Torus3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, tilted_x, 2.0, 0.5});
+  REQUIRE(torus_a.has_value());
+  REQUIRE(torus_b.has_value());
+  CHECK(surfaces_coincident(torus_a.value(), torus_b.value(), kTolerance));
+  CHECK_FALSE(patches_tangent(torus_a.value(), torus_b.value(), kTolerance));
+}
+
+TEST_CASE("ssi: coincidence samples between the 5x5 nodes and rejects a mid-cell escape") {
+  // B is A rotated by a tiny angle about a tangent direction at u = pi/4. The
+  // deviation 2*epsilon*|sin v * cos(u - u0)| keeps every 5x5 node inside the
+  // band while several 9x9 mid-cell samples leave it, so a node-only test would
+  // wrongly report coincidence.
+  const Torus3 torus{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 2.0, 0.5};
+  const double epsilon = 6e-10;
+  const double spin = 0.25 * kPi;
+  const Vec3d tilt{-std::sin(spin), std::cos(spin), 0.0};
+  const Torus3 tilted{Point3d{0, 0, 0}, rotate_about({0, 0, 1}, tilt, epsilon),
+                      rotate_about({1, 0, 0}, tilt, epsilon), 2.0, 0.5};
+  REQUIRE(tilted.is_valid());
+
+  const Result<SsiPatch> a =
+      make_ssi_patch(SurfaceGeometry{torus}, {0.0, kTwoPi}, {0.1, 2.0});
+  const Result<SsiPatch> b = full_torus_patch(tilted);
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+
+  const auto distance = [](const Torus3& carrier, const Point3d& point) {
+    const Vec3d delta = point - carrier.center;
+    const double axial = dot(delta, carrier.axis);
+    const double radial = norm2(delta - carrier.axis * axial);
+    return std::fabs(std::hypot(radial - carrier.major_radius, axial) - carrier.minor_radius);
+  };
+
+  double worst_node = 0.0;
+  for (int iu = 0; iu < 5; ++iu) {
+    for (int iv = 0; iv < 5; ++iv) {
+      const double u = (kTwoPi / 4.0) * iu;
+      const double v = 0.1 + (1.9 / 4.0) * iv;
+      const Result<SurfacePoint> evaluated = surface_eval(a.value().surface, u, v);
+      REQUIRE(evaluated.has_value());
+      worst_node = std::max(worst_node, distance(tilted, evaluated.value().p));
+    }
+  }
+  CHECK(worst_node <= kTolerance);
+
+  std::size_t outside = 0;
+  for (int iu = 0; iu < 9; ++iu) {
+    for (int iv = 0; iv < 9; ++iv) {
+      const double u = (kTwoPi / 8.0) * iu;
+      const double v = 0.1 + (1.9 / 8.0) * iv;
+      const Result<SurfacePoint> evaluated = surface_eval(a.value().surface, u, v);
+      REQUIRE(evaluated.has_value());
+      if (distance(tilted, evaluated.value().p) > kTolerance) {
+        ++outside;
+      }
+    }
+  }
+  CHECK(outside >= 1);
+  CHECK_FALSE(surfaces_coincident(a.value(), b.value(), kTolerance));
+}
+
+TEST_CASE("ssi: coincidence rejects a domain sample outside the band") {
+  // Two near-parallel planes whose 9x9 grid has exactly one sample outside the
+  // band: the (u=-2, v=2) corner, where v - u = 4. A coincidence test that
+  // tolerates a stray sample would report the pair as coincident.
+  const double slope = 0.13e-9;
+  const Vec3d normal{slope, slope, std::sqrt(1.0 - 2.0 * slope * slope)};
+  const Result<SsiPatch> a = square_plane_patch({0, 0, 1}, 0.0, 2.0);
+  const Result<SsiPatch> b = square_plane_patch(normal, -0.5 * kTolerance, 2.0);
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+
+  std::size_t outside = 0;
+  for (int iu = 0; iu < 9; ++iu) {
+    for (int iv = 0; iv < 9; ++iv) {
+      const double u = -2.0 + (4.0 / 8.0) * iu;
+      const double v = -2.0 + (4.0 / 8.0) * iv;
+      const Point3d point{v, -u, 0.0};
+      if (std::fabs(dot(normal, Vec3d{point[0], point[1], point[2]}) + 0.5 * kTolerance) >
+          kTolerance) {
+        ++outside;
+      }
+    }
+  }
+  CHECK(outside == 1);
+  CHECK_FALSE(surfaces_coincident(a.value(), b.value(), kTolerance));
 }

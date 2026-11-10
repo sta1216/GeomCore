@@ -900,30 +900,102 @@ inline Result<std::vector<SsiCurve>> trace_ssi_curves(const SsiPatch& a, const S
 //
 // surfaces_coincident and patches_tangent classify the two cases SSI cannot
 // trace: the patches lie on the same infinite carrier (infinitely many
-// intersection curves), or the carriers touch with parallel normals (an
-// isolated contact or a tangency curve, not a transverse intersection).
+// intersection curves), or the carriers meet with parallel normals and do not
+// cross (an isolated contact or a tangency curve rather than a transverse
+// intersection).
 //
-// Both predicates are noexcept and allocation-free. They answer false, rather
-// than reporting an error, for any input the sampling below cannot certify: a
-// non-finite coordinate, a non-finite or non-positive tolerance, an invalid or
-// inverted patch, or a NURBS patch. NURBS patches are not diagnosed (false for
-// both predicates): their exact implicit distance is not available without a
-// Newton projection, so neither coincidence nor tangency can be certified from
-// a sampled point set alone. A mixed surface-type pair is never coincident (two
-// different carrier families are never the same surface) but can be tangent.
+// surfaces_coincident compares the exact defining parameters of the two
+// carriers (unit frame directions within 1 - |dot| <= 1e-12, positions and
+// radii within the caller's tolerance, with the seam parameter x_axis ignored
+// for rotationally symmetric carriers) and then certifies the patch domain on
+// a 9x9 sample grid of patch a: the 5x5 node grid plus the 4x4 cell centres,
+// i.e. the fractions k/8, k = 0..8, of each parameter interval. Every sample
+// must lie within `tolerance` of carrier b's exact implicit distance. Because
+// the carriers are infinite, this is an exact parameter comparison plus a
+// domain check, not a surface-to-surface fitting heuristic.
+//
+// patches_tangent refines the minimum point-to-point distance between the two
+// patches: a 9x9 x 9x9 coarse grid finds a starting pair, then Gauss-Newton on
+// the four patch parameters (3x4 Jacobian, damped 4x4 normal equations, pivot
+// guard, step halving, periodic wrap, parameters kept in-patch, at most 50
+// iterations) converges to the candidate contact. A second alternating pass then
+// moves the pair onto the tangency set, because a line or circle contact leaves
+// the gap degenerate along the contact: a damped Gauss-Newton step on the normal
+// mismatch (finite-difference normal Jacobian) is followed by ordinary contact
+// Gauss-Newton that re-closes the gap, and the mismatch at least halves per
+// round. Tangency then requires:
+//  - the refined gap is within `tolerance`;
+//  - the unit normals at the refined contact are parallel to 1e-9;
+//  - the patches are not coincident (surfaces_coincident is false);
+//  - both refined contact parameters are inside their patches (patch_contains);
+//  - a one-sided contact test: 5x5 samples around each contact, spanning
+//    max(1e-3 of the patch span, 16 * tolerance), must not fall on both sides
+//    of the other carrier beyond a band of max(1e-12 relative to the sample
+//    magnitude, 0.3 * tolerance). The round-off floor keeps double-precision
+//    noise at an exact contact neutral; the 0.3 * tolerance floor keeps a
+//    sample that stays within a third of the accepted gap from being read as a
+//    crossing side, while a real crossing (a full tolerance of separation over
+//    the sampled neighbourhood) is still seen on both sides. A cutting,
+//    crossing, or interpenetrating pair gives samples on both sides and is
+//    rejected; a true contact gives samples on one side only.
+//
+// NURBS patches are unsupported by both predicates: their exact signed
+// implicit distance is not available without a Newton projection, so neither
+// coincidence nor tangency can be certified (both answer false). Mixed
+// analytic types are never coincident; they can still be tangent (a plane
+// touching a sphere), which only the tangency path allows. Both predicates are
+// noexcept and allocation-free, ignore non-finite coordinates, reject
+// non-finite or non-positive tolerances, and are deterministic (no global
+// state).
+// ---------------------------------------------------------------------------
 
 namespace detail {
 
-// Sampling resolution shared by both diagnostics. Five samples per axis cover
-// the four patch corners and the parameter midpoint.
-inline constexpr int kSsiDiagnosticGrid = 5;
-inline constexpr int kSsiDiagnosticSampleCount = kSsiDiagnosticGrid * kSsiDiagnosticGrid;
+// Coincidence domain sampling: the 5x5 node grid plus the 4x4 cell centres of
+// its cells; together these are the fractions k/8 (k = 0..8) of each parameter
+// interval, i.e. a 9x9 grid. The nodes are the contract minimum; the centres
+// keep a carrier from passing only because the nodes happen to land in band.
+inline constexpr int kSsiDiagnosticCoincidenceGrid = 9;
 
-// Matching slack for carrier frames, measured on 1 - |unit axis dot unit axis|.
+// Contact search: a 9x9 coarse grid per patch, then Gauss-Newton refinement.
+inline constexpr int kSsiDiagnosticContactGrid = 9;
+inline constexpr int kSsiDiagnosticRefineIterations = 50;
+inline constexpr double kSsiDiagnosticPivotSlack = 1e-14;
+inline constexpr double kSsiDiagnosticDamping = 1e-10;
+
+// Tangency alignment: the gap refinement stalls on a line or circle contact at
+// a parameter drift whose size is the normal tilt, so a second pass alternates
+// a damped Gauss-Newton step on the normal mismatch (finite-difference normal
+// Jacobian) with contact Gauss-Newton that re-closes the gap. Each round halves
+// the mismatch, so 24 rounds take a 1e-6 starting mismatch down to 1e-13.
+inline constexpr int kSsiDiagnosticAlignRounds = 24;
+inline constexpr int kSsiDiagnosticAlignGaussNewtonIterations = 4;
+inline constexpr double kSsiDiagnosticAlignStep = 1e-6;
+
+// One-sided contact test: a 5x5 neighbourhood around each refined contact.
+inline constexpr int kSsiDiagnosticContactTestGrid = 5;
+inline constexpr double kSsiDiagnosticContactTestSpanFraction = 1e-3;
+inline constexpr double kSsiDiagnosticContactTestSpanTolerance = 16.0;
+
+// Carrier frame slack (1 - |unit dot unit|) and refined-contact normal slack.
 inline constexpr double kSsiDiagnosticFrameSlack = 1e-12;
+inline constexpr double kSsiDiagnosticNormalSlack = 1e-9;
 
-// Angular slack for the tangency contact, measured on |n_a x n_b| of unit normals.
-inline constexpr double kSsiDiagnosticTangentSlack = 1e-6;
+// Relative round-off band for the one-sided contact test. Samples whose signed
+// distance is smaller than this are treated as neutral rather than as a side,
+// so double-precision noise at a true contact is not mistaken for a crossing
+// while a real crossing deeper than the round-off floor is still seen on both
+// sides (a crossing of half the tolerance is far above this band).
+inline constexpr double kSsiDiagnosticSignSlack = 1e-12;
+
+// Fraction of the tolerance used as the neutral band of the one-sided contact
+// test: a sample within 0.3 * tolerance of the other carrier is not evidence of
+// a crossing side. A crossing that separates the carriers by a full tolerance
+// over the sampled neighbourhood still gives samples on both sides.
+inline constexpr double kSsiDiagnosticSignFraction = 0.3;
+
+inline constexpr int kSsiDiagnosticGridCapacity =
+    kSsiDiagnosticCoincidenceGrid * kSsiDiagnosticCoincidenceGrid;
 
 inline constexpr double kSsiDiagnosticInfinity = std::numeric_limits<double>::infinity();
 
@@ -940,14 +1012,15 @@ inline Vec3d ssi_diagnostic_vec(const Point3d& point) noexcept {
   return Vec3d{point[0], point[1], point[2]};
 }
 
+// True when two unit directions are parallel or antiparallel within the frame
+// slack. Sign folding is intentional: a carrier does not care whether its axis
+// or normal points the other way.
 inline bool ssi_diagnostic_unit_parallel(const Vec3d& a, const Vec3d& b) noexcept {
   const double alignment = std::fabs(dot(a, b));
   return std::isfinite(alignment) && 1.0 - alignment <= kSsiDiagnosticFrameSlack;
 }
 
-// Unit carrier data for a Plane3: the unit normal and the offset along it. The
-// plane frame normalizes the caller's normal exactly once, so planes whose
-// normals differ only in length compare equal here.
+// Unit normal and signed offset of a plane, in the canonical form n . x = d.
 struct SsiDiagnosticPlane {
   Vec3d normal{};
   double offset = 0.0;
@@ -961,11 +1034,9 @@ inline bool ssi_diagnostic_plane(const Plane3& plane, SsiDiagnosticPlane& out) n
   return std::isfinite(out.offset);
 }
 
-// A patch is usable for diagnostics when its box is finite and ordered, does
-// not exceed one periodic turn on a periodic axis, and its surface validates.
 inline bool ssi_diagnostic_patch_valid(const SsiPatch& patch) noexcept {
-  if (!std::isfinite(patch.u[0]) || !std::isfinite(patch.u[1]) ||
-      !std::isfinite(patch.v[0]) || !std::isfinite(patch.v[1])) {
+  if (!(std::isfinite(patch.u[0]) && std::isfinite(patch.u[1]) &&
+        std::isfinite(patch.v[0]) && std::isfinite(patch.v[1]))) {
     return false;
   }
   if (!(patch.u[0] < patch.u[1]) || !(patch.v[0] < patch.v[1])) return false;
@@ -978,115 +1049,98 @@ inline bool ssi_diagnostic_patch_valid(const SsiPatch& patch) noexcept {
   return ssi_validate_surface(patch.surface).has_value();
 }
 
-inline bool ssi_diagnostic_frames_match(const Vec3d& axis_a, const Vec3d& x_a,
-                                        const Vec3d& axis_b, const Vec3d& x_b) noexcept {
-  return ssi_diagnostic_unit_parallel(axis_a, axis_b) &&
-         ssi_diagnostic_unit_parallel(x_a, x_b);
-}
-
-// Same infinite carrier for two patches of one surface type. The caller has
-// already checked that the variant indices are equal, so the second get_if
-// always succeeds here.
+// Same infinite carrier within `tolerance`. The variants have already been
+// checked to hold the same alternative, so get_if keeps the walk noexcept.
 inline bool ssi_diagnostic_same_carrier(const SurfaceGeometry& a, const SurfaceGeometry& b,
                                         double tolerance) noexcept {
   if (const Plane3* plane_a = std::get_if<Plane3>(&a)) {
     const Plane3* plane_b = std::get_if<Plane3>(&b);
     if (plane_b == nullptr) return false;
-    SsiDiagnosticPlane unit_a{};
-    SsiDiagnosticPlane unit_b{};
-    if (!ssi_diagnostic_plane(*plane_a, unit_a) || !ssi_diagnostic_plane(*plane_b, unit_b)) {
+    SsiDiagnosticPlane carrier_a{};
+    SsiDiagnosticPlane carrier_b{};
+    if (!ssi_diagnostic_plane(*plane_a, carrier_a) ||
+        !ssi_diagnostic_plane(*plane_b, carrier_b)) {
       return false;
     }
-    if (!ssi_diagnostic_unit_parallel(unit_a.normal, unit_b.normal)) return false;
-    // One carrier can be written with opposite normals; fold the sign into B
-    // before comparing the offsets.
-    const double sign = dot(unit_a.normal, unit_b.normal) < 0.0 ? -1.0 : 1.0;
-    return std::fabs(unit_a.offset - sign * unit_b.offset) <= tolerance;
+    if (!ssi_diagnostic_unit_parallel(carrier_a.normal, carrier_b.normal)) return false;
+    const double sign = dot(carrier_a.normal, carrier_b.normal) < 0.0 ? -1.0 : 1.0;
+    return std::fabs(carrier_a.offset - sign * carrier_b.offset) <= tolerance;
   }
   if (const Sphere3* sphere_a = std::get_if<Sphere3>(&a)) {
     const Sphere3* sphere_b = std::get_if<Sphere3>(&b);
     if (sphere_b == nullptr) return false;
+    // A sphere is fixed by its centre and radius; axis and x_axis are only a
+    // pole/seam parameterization and must not participate.
     return norm2(sphere_a->center - sphere_b->center) <= tolerance &&
-           std::fabs(sphere_a->radius - sphere_b->radius) <= tolerance &&
-           ssi_diagnostic_frames_match(sphere_a->axis, sphere_a->x_axis, sphere_b->axis,
-                                       sphere_b->x_axis);
+           std::fabs(sphere_a->radius - sphere_b->radius) <= tolerance;
   }
   if (const Cylinder3* cylinder_a = std::get_if<Cylinder3>(&a)) {
     const Cylinder3* cylinder_b = std::get_if<Cylinder3>(&b);
     if (cylinder_b == nullptr) return false;
-    if (std::fabs(cylinder_a->radius - cylinder_b->radius) > tolerance) return false;
-    if (!ssi_diagnostic_frames_match(cylinder_a->axis, cylinder_a->x_axis, cylinder_b->axis,
-                                     cylinder_b->x_axis)) {
-      return false;
-    }
-    // Sliding the origin along the axis does not move a cylinder; only the
-    // radial offset between the two axis lines matters.
+    // Parallel (possibly opposite) axis directions, equal radius, and the same
+    // axis line: the origin offset may slide along the axis but not across it.
+    if (!ssi_diagnostic_unit_parallel(cylinder_a->axis, cylinder_b->axis)) return false;
     const Vec3d delta = cylinder_b->origin - cylinder_a->origin;
     const Vec3d radial = delta - cylinder_a->axis * dot(delta, cylinder_a->axis);
-    return norm2(radial) <= tolerance;
+    return std::fabs(cylinder_a->radius - cylinder_b->radius) <= tolerance &&
+           norm2(radial) <= tolerance;
   }
   if (const Cone3* cone_a = std::get_if<Cone3>(&a)) {
     const Cone3* cone_b = std::get_if<Cone3>(&b);
     if (cone_b == nullptr) return false;
+    // A double cone is fixed by its apex, axis line, and half angle. The apex
+    // is invariant under an axis flip to the other nappe.
+    if (!ssi_diagnostic_unit_parallel(cone_a->axis, cone_b->axis)) return false;
     if (std::fabs(cone_a->half_angle - cone_b->half_angle) > tolerance) return false;
-    if (!ssi_diagnostic_frames_match(cone_a->axis, cone_a->x_axis, cone_b->axis,
-                                     cone_b->x_axis)) {
-      return false;
-    }
-    // (origin, radius) is a redundant parametrization of one nappe; the apex is
-    // the invariant. Folding it this way also handles a flipped axis, which
-    // moves the apex in the opposite direction along the axis.
-    const double apex_a = cone_a->radius / std::tan(cone_a->half_angle);
-    const double apex_b = cone_b->radius / std::tan(cone_b->half_angle);
-    const Point3d point_a = cone_a->origin + cone_a->axis * apex_a;
-    const Point3d point_b = cone_b->origin + cone_b->axis * apex_b;
-    return norm2(point_a - point_b) <= tolerance;
+    const Point3d apex_a =
+        cone_a->origin + cone_a->axis * (cone_a->radius / std::tan(cone_a->half_angle));
+    const Point3d apex_b =
+        cone_b->origin + cone_b->axis * (cone_b->radius / std::tan(cone_b->half_angle));
+    return norm2(apex_a - apex_b) <= tolerance;
   }
   if (const Torus3* torus_a = std::get_if<Torus3>(&a)) {
     const Torus3* torus_b = std::get_if<Torus3>(&b);
     if (torus_b == nullptr) return false;
     return norm2(torus_a->center - torus_b->center) <= tolerance &&
+           ssi_diagnostic_unit_parallel(torus_a->axis, torus_b->axis) &&
            std::fabs(torus_a->major_radius - torus_b->major_radius) <= tolerance &&
-           std::fabs(torus_a->minor_radius - torus_b->minor_radius) <= tolerance &&
-           ssi_diagnostic_frames_match(torus_a->axis, torus_a->x_axis, torus_b->axis,
-                                       torus_b->x_axis);
+           std::fabs(torus_a->minor_radius - torus_b->minor_radius) <= tolerance;
   }
-  return false;  // NurbsSurface: coincidence is not diagnosed.
+  return false;  // NURBS: unsupported.
 }
 
-// Exact implicit distance from point to the infinite carrier (zero on the
-// surface), used to sample the patch domain. Plane/sphere/cylinder/torus
-// distances are exact; the cone expression is exact for the double cone. A
-// NURBS carrier has no exact implicit form here, so it reports infinity and
-// every caller rejects it.
-inline double ssi_diagnostic_carrier_distance(const SurfaceGeometry& surface,
-                                              const Point3d& point) noexcept {
+// Signed implicit distance to an analytic carrier. The sign is negative on the
+// side that contains the carrier's interior (plane: opposite the normal;
+// sphere/cylinder/torus: inside; cone: inside the double cone), and its
+// magnitude is the exact distance to the carrier surface. NURBS returns
+// +infinity so the callers reject it before sampling.
+inline double ssi_diagnostic_signed_distance(const SurfaceGeometry& surface,
+                                             const Point3d& point) noexcept {
   return std::visit(
       [&point](const auto& carrier) noexcept -> double {
-        using Surface = std::decay_t<decltype(carrier)>;
-        if constexpr (std::is_same_v<Surface, Plane3>) {
+        using Carrier = std::decay_t<decltype(carrier)>;
+        if constexpr (std::is_same_v<Carrier, Plane3>) {
           SsiDiagnosticPlane plane{};
           if (!ssi_diagnostic_plane(carrier, plane)) return kSsiDiagnosticInfinity;
-          return std::fabs(dot(ssi_diagnostic_vec(point), plane.normal) - plane.offset);
-        } else if constexpr (std::is_same_v<Surface, Sphere3>) {
-          return std::fabs(norm2(point - carrier.center) - carrier.radius);
-        } else if constexpr (std::is_same_v<Surface, Cylinder3>) {
-          const Vec3d local = point - carrier.origin;
-          const double axial = dot(local, carrier.axis);
-          return std::fabs(norm2(local - carrier.axis * axial) - carrier.radius);
-        } else if constexpr (std::is_same_v<Surface, Cone3>) {
-          const Vec3d local = point - carrier.origin;
-          const double axial = dot(local, carrier.axis);
-          const double radial = norm2(local - carrier.axis * axial);
+          return dot(ssi_diagnostic_vec(point), plane.normal) - plane.offset;
+        } else if constexpr (std::is_same_v<Carrier, Sphere3>) {
+          return norm2(point - carrier.center) - carrier.radius;
+        } else if constexpr (std::is_same_v<Carrier, Cylinder3>) {
+          const Vec3d delta = point - carrier.origin;
+          const double axial = dot(delta, carrier.axis);
+          return norm2(delta - carrier.axis * axial) - carrier.radius;
+        } else if constexpr (std::is_same_v<Carrier, Cone3>) {
+          const Vec3d delta = point - carrier.origin;
+          const double axial = dot(delta, carrier.axis);
+          const double radial = norm2(delta - carrier.axis * axial);
           const double from_apex = axial - carrier.radius / std::tan(carrier.half_angle);
-          return std::fabs(radial * std::cos(carrier.half_angle) -
-                           std::fabs(from_apex) * std::sin(carrier.half_angle));
-        } else if constexpr (std::is_same_v<Surface, Torus3>) {
-          const Vec3d local = point - carrier.center;
-          const double axial = dot(local, carrier.axis);
-          const double radial = norm2(local - carrier.axis * axial);
-          return std::fabs(
-              std::hypot(radial - carrier.major_radius, axial) - carrier.minor_radius);
+          return radial * std::cos(carrier.half_angle) -
+                 std::fabs(from_apex) * std::sin(carrier.half_angle);
+        } else if constexpr (std::is_same_v<Carrier, Torus3>) {
+          const Vec3d delta = point - carrier.center;
+          const double axial = dot(delta, carrier.axis);
+          const double radial = norm2(delta - carrier.axis * axial);
+          return std::hypot(radial - carrier.major_radius, axial) - carrier.minor_radius;
         } else {
           return kSsiDiagnosticInfinity;
         }
@@ -1094,32 +1148,400 @@ inline double ssi_diagnostic_carrier_distance(const SurfaceGeometry& surface,
       surface);
 }
 
-// Sample the patch on a full 5x5 grid, including both ends of each parameter
-// interval. Non-finite evaluation or non-finite resulting points fail the
-// sample; callers treat that as "not diagnosed" rather than as an error.
-inline bool ssi_diagnostic_sample_grid(
-    const SsiPatch& patch,
-    std::array<SsiDiagnosticSample, kSsiDiagnosticSampleCount>& samples) noexcept {
-  for (int iu = 0; iu < kSsiDiagnosticGrid; ++iu) {
-    const double u =
-        iu + 1 == kSsiDiagnosticGrid
-            ? patch.u[1]
-            : patch.u[0] + (patch.u[1] - patch.u[0]) *
-                               (static_cast<double>(iu) /
-                                static_cast<double>(kSsiDiagnosticGrid - 1));
-    for (int iv = 0; iv < kSsiDiagnosticGrid; ++iv) {
-      const double v =
-          iv + 1 == kSsiDiagnosticGrid
-              ? patch.v[1]
-              : patch.v[0] + (patch.v[1] - patch.v[0]) *
-                                 (static_cast<double>(iv) /
-                                  static_cast<double>(kSsiDiagnosticGrid - 1));
+// Samples a patch on a `grid` x `grid` uniform grid including both parameter
+// boundaries. grid must not exceed kSsiDiagnosticCoincidenceGrid.
+inline bool ssi_diagnostic_sample_patch(
+    const SsiPatch& patch, int grid,
+    std::array<SsiDiagnosticSample, kSsiDiagnosticGridCapacity>& samples) noexcept {
+  const double denominator = static_cast<double>(grid - 1);
+  for (int iu = 0; iu < grid; ++iu) {
+    const double fraction_u = static_cast<double>(iu) / denominator;
+    const double u = iu == 0 ? patch.u[0]
+                             : (iu + 1 == grid ? patch.u[1]
+                                               : patch.u[0] + (patch.u[1] - patch.u[0]) * fraction_u);
+    for (int iv = 0; iv < grid; ++iv) {
+      const double fraction_v = static_cast<double>(iv) / denominator;
+      const double v = iv == 0 ? patch.v[0]
+                               : (iv + 1 == grid ? patch.v[1]
+                                                 : patch.v[0] + (patch.v[1] - patch.v[0]) * fraction_v);
       const Result<SurfacePoint> evaluated = surface_eval(patch.surface, u, v);
       if (!evaluated.has_value() || !surface_point_finite(evaluated.value())) return false;
-      SsiDiagnosticSample& sample =
-          samples[static_cast<std::size_t>(iu) * kSsiDiagnosticGrid + iv];
+      SsiDiagnosticSample& sample = samples[static_cast<std::size_t>(iu) * grid + iv];
       sample.point = evaluated.value().p;
       sample.uv = {u, v};
+    }
+  }
+  return true;
+}
+
+// Wraps a periodic parameter back into the patch interval and clamps a
+// non-periodic one, so the contact search never leaves the patch domain.
+inline double ssi_diagnostic_place(double value, double lo, double hi,
+                                   bool periodic) noexcept {
+  if (!std::isfinite(value)) return value;
+  if (periodic) {
+    double folded = value - lo;
+    folded -= kSsiTwoPi * std::floor(folded / kSsiTwoPi);
+    value = lo + folded;
+  }
+  return std::clamp(value, lo, hi);
+}
+
+// Dense 4x4 solve with partial pivoting and a relative pivot guard. The
+// normal equations are damped by the caller, so a singular pivot means the
+// contact is not resolvable at this precision; false lets tangency answer
+// false instead of stepping to garbage.
+inline bool ssi_diagnostic_solve4(std::array<std::array<double, 4>, 4> matrix,
+                                  std::array<double, 4> rhs,
+                                  std::array<double, 4>& solution) noexcept {
+  double scale = 0.0;
+  for (int index = 0; index < 4; ++index) {
+    scale = std::max(scale, std::fabs(matrix[index][index]));
+  }
+  if (!std::isfinite(scale) || !(scale > 0.0)) return false;
+  const double threshold = kSsiDiagnosticPivotSlack * scale;
+  for (int column = 0; column < 4; ++column) {
+    int pivot = column;
+    double best = std::fabs(matrix[column][column]);
+    for (int row = column + 1; row < 4; ++row) {
+      const double candidate = std::fabs(matrix[row][column]);
+      if (candidate > best) {
+        best = candidate;
+        pivot = row;
+      }
+    }
+    if (!(best > threshold)) return false;
+    if (pivot != column) {
+      std::swap(matrix[column], matrix[pivot]);
+      std::swap(rhs[column], rhs[pivot]);
+    }
+    const double diagonal = matrix[column][column];
+    for (int row = column + 1; row < 4; ++row) {
+      const double factor = matrix[row][column] / diagonal;
+      for (int index = column; index < 4; ++index) {
+        matrix[row][index] -= factor * matrix[column][index];
+      }
+      rhs[row] -= factor * rhs[column];
+    }
+  }
+  for (int row = 3; row >= 0; --row) {
+    double value = rhs[row];
+    for (int index = row + 1; index < 4; ++index) {
+      value -= matrix[row][index] * solution[index];
+    }
+    const double diagonal = matrix[row][row];
+    if (!(std::fabs(diagonal) > threshold)) return false;
+    solution[row] = value / diagonal;
+  }
+  for (int index = 0; index < 4; ++index) {
+    if (!std::isfinite(solution[index])) return false;
+  }
+  return true;
+}
+
+struct SsiDiagnosticContact {
+  std::array<double, 2> uv_a{};
+  std::array<double, 2> uv_b{};
+  Point3d point_a{};
+  Point3d point_b{};
+  double gap = kSsiDiagnosticInfinity;
+};
+
+// Evaluates both patches at `parameters` and stores the contact. Returns false
+// only for an unusable (missing or non-finite) evaluation.
+inline bool ssi_diagnostic_store_contact(const SsiPatch& a, const SsiPatch& b,
+                                         const std::array<double, 4>& parameters,
+                                         SsiDiagnosticContact& contact) noexcept {
+  const Result<SurfacePoint> eval_a = surface_eval(a.surface, parameters[0], parameters[1]);
+  const Result<SurfacePoint> eval_b = surface_eval(b.surface, parameters[2], parameters[3]);
+  if (!eval_a.has_value() || !eval_b.has_value()) return false;
+  if (!surface_point_finite(eval_a.value()) || !surface_point_finite(eval_b.value())) {
+    return false;
+  }
+  contact.uv_a = {parameters[0], parameters[1]};
+  contact.uv_b = {parameters[2], parameters[3]};
+  contact.point_a = eval_a.value().p;
+  contact.point_b = eval_b.value().p;
+  contact.gap = norm2(eval_a.value().p - eval_b.value().p);
+  return std::isfinite(contact.gap);
+}
+
+// Damped Gauss-Newton on the four patch parameters that minimizes |A - B|^2.
+// Line contacts and sphere poles leave a null direction in JtJ, so the step is
+// damped; a step is accepted only when it strictly shrinks the gap, and the
+// iteration stops as soon as no halved step does.
+inline bool ssi_diagnostic_gauss_newton(const SsiPatch& a, const SsiPatch& b,
+                                        std::array<double, 4>& parameters,
+                                        int iterations) noexcept {
+  const std::array<std::array<double, 2>, 4> ranges{a.u, a.v, b.u, b.v};
+  const std::array<bool, 4> periodic{surface_periodic(a.surface, 0),
+                                     surface_periodic(a.surface, 1),
+                                     surface_periodic(b.surface, 0),
+                                     surface_periodic(b.surface, 1)};
+  for (int iteration = 0; iteration < iterations; ++iteration) {
+    const Result<SurfacePoint> eval_a = surface_eval(a.surface, parameters[0], parameters[1]);
+    const Result<SurfacePoint> eval_b = surface_eval(b.surface, parameters[2], parameters[3]);
+    if (!eval_a.has_value() || !eval_b.has_value()) return false;
+    if (!surface_point_finite(eval_a.value()) || !surface_point_finite(eval_b.value())) {
+      return false;
+    }
+    const Vec3d residual = eval_a.value().p - eval_b.value().p;
+    const double gap = norm2(residual);
+    if (!std::isfinite(gap)) return false;
+    const std::array<Vec3d, 4> columns{eval_a.value().du, eval_a.value().dv,
+                                       eval_b.value().du * -1.0,
+                                       eval_b.value().dv * -1.0};
+    std::array<std::array<double, 4>, 4> normal{};
+    std::array<double, 4> gradient{};
+    for (int row = 0; row < 4; ++row) {
+      for (int column = 0; column < 4; ++column) {
+        normal[row][column] = dot(columns[row], columns[column]);
+      }
+      gradient[row] = dot(columns[row], residual);
+    }
+    const double scale = (normal[0][0] + normal[1][1] + normal[2][2] + normal[3][3]) / 4.0;
+    if (!std::isfinite(scale) || !(scale > 0.0)) return false;
+    const double damping = kSsiDiagnosticDamping * scale;
+    std::array<double, 4> rhs{};
+    for (int index = 0; index < 4; ++index) {
+      normal[index][index] += damping;
+      rhs[index] = -gradient[index];
+    }
+    std::array<double, 4> step{};
+    if (!ssi_diagnostic_solve4(normal, rhs, step)) return false;
+
+    bool accepted = false;
+    double factor = 1.0;
+    for (int halving = 0; halving < 24; ++halving) {
+      std::array<double, 4> candidate{};
+      for (int index = 0; index < 4; ++index) {
+        candidate[index] = ssi_diagnostic_place(parameters[index] + factor * step[index],
+                                                ranges[index][0], ranges[index][1],
+                                                periodic[index]);
+      }
+      const Result<SurfacePoint> candidate_a =
+          surface_eval(a.surface, candidate[0], candidate[1]);
+      const Result<SurfacePoint> candidate_b =
+          surface_eval(b.surface, candidate[2], candidate[3]);
+      if (candidate_a.has_value() && candidate_b.has_value() &&
+          surface_point_finite(candidate_a.value()) &&
+          surface_point_finite(candidate_b.value())) {
+        const double candidate_gap =
+            norm2(candidate_a.value().p - candidate_b.value().p);
+        if (std::isfinite(candidate_gap) && candidate_gap < gap) {
+          parameters = candidate;
+          accepted = true;
+          break;
+        }
+      }
+      factor *= 0.5;
+    }
+    if (!accepted) break;  // The contact is stationary at this precision.
+  }
+  return true;
+}
+
+// Unit normal at a patch parameter pair; false when the evaluation is unusable.
+inline bool ssi_diagnostic_normal_at(const SurfaceGeometry& surface,
+                                     const std::array<double, 2>& uv,
+                                     Vec3d& normal) noexcept {
+  const Result<Vec3d> result = surface_normal(surface, uv[0], uv[1]);
+  if (!result.has_value()) return false;
+  if (!ssi_diagnostic_vec_finite(result.value())) return false;
+  normal = result.value();
+  return true;
+}
+
+// Moves a contact that already touches within tolerance onto the tangency set.
+// The gap refinement of a line or circle contact stalls at a tangential drift
+// whose size is the normal tilt, so this pass alternates a damped Gauss-Newton
+// step on the normal mismatch m = cross(nA, nB) (finite-difference normal
+// Jacobian) with ordinary contact Gauss-Newton that re-closes the gap. The gap
+// step splits the correction between the patches, so the mismatch halves per
+// round instead of disappearing; 24 rounds take a 1e-6 mismatch below 1e-9.
+// Returns true only when the final unit normals are parallel; a pair with
+// constant normals (two crossing planes) has an all-zero mismatch Jacobian and
+// returns false immediately.
+inline bool ssi_diagnostic_align_contact(const SsiPatch& a, const SsiPatch& b,
+                                         SsiDiagnosticContact& contact) noexcept {
+  std::array<double, 4> parameters{contact.uv_a[0], contact.uv_a[1], contact.uv_b[0],
+                                   contact.uv_b[1]};
+  const std::array<std::array<double, 2>, 4> ranges{a.u, a.v, b.u, b.v};
+  const std::array<bool, 4> periodic{surface_periodic(a.surface, 0),
+                                     surface_periodic(a.surface, 1),
+                                     surface_periodic(b.surface, 0),
+                                     surface_periodic(b.surface, 1)};
+  std::array<double, 2> uv_a{parameters[0], parameters[1]};
+  std::array<double, 2> uv_b{parameters[2], parameters[3]};
+  Vec3d normal_a{};
+  Vec3d normal_b{};
+  if (!ssi_diagnostic_normal_at(a.surface, uv_a, normal_a) ||
+      !ssi_diagnostic_normal_at(b.surface, uv_b, normal_b)) {
+    return false;
+  }
+  for (int round = 0; round < kSsiDiagnosticAlignRounds; ++round) {
+    const Vec3d mismatch = cross(normal_a, normal_b);
+    if (!ssi_diagnostic_vec_finite(mismatch)) return false;
+    const double mismatch_norm = norm2(mismatch);
+    if (mismatch_norm <= kSsiDiagnosticNormalSlack) {
+      return ssi_diagnostic_store_contact(a, b, parameters, contact);
+    }
+    std::array<Vec3d, 4> columns{};
+    for (int index = 0; index < 4; ++index) {
+      std::array<double, 2> plus = index < 2 ? uv_a : uv_b;
+      std::array<double, 2> minus = plus;
+      const int axis = index % 2;
+      plus[axis] += kSsiDiagnosticAlignStep;
+      minus[axis] -= kSsiDiagnosticAlignStep;
+      const SurfaceGeometry& surface = index < 2 ? a.surface : b.surface;
+      Vec3d normal_plus{};
+      Vec3d normal_minus{};
+      if (!ssi_diagnostic_normal_at(surface, plus, normal_plus) ||
+          !ssi_diagnostic_normal_at(surface, minus, normal_minus)) {
+        return false;
+      }
+      const Vec3d derivative =
+          (normal_plus - normal_minus) * (0.5 / kSsiDiagnosticAlignStep);
+      columns[index] = index < 2 ? cross(derivative, normal_b) : cross(normal_a, derivative);
+    }
+    std::array<std::array<double, 4>, 4> normal{};
+    std::array<double, 4> rhs{};
+    for (int row = 0; row < 4; ++row) {
+      for (int column = 0; column < 4; ++column) {
+        normal[row][column] = dot(columns[row], columns[column]);
+      }
+      rhs[row] = -dot(columns[row], mismatch);
+    }
+    const double scale = (normal[0][0] + normal[1][1] + normal[2][2] + normal[3][3]) / 4.0;
+    if (!std::isfinite(scale) || !(scale > 0.0)) return false;
+    const double damping = kSsiDiagnosticDamping * scale;
+    for (int index = 0; index < 4; ++index) normal[index][index] += damping;
+    std::array<double, 4> step{};
+    if (!ssi_diagnostic_solve4(normal, rhs, step)) return false;
+
+    bool accepted = false;
+    double factor = 1.0;
+    for (int halving = 0; halving < 24; ++halving) {
+      std::array<double, 4> candidate{};
+      for (int index = 0; index < 4; ++index) {
+        candidate[index] = ssi_diagnostic_place(parameters[index] + factor * step[index],
+                                                ranges[index][0], ranges[index][1],
+                                                periodic[index]);
+      }
+      const std::array<double, 2> candidate_uv_a{candidate[0], candidate[1]};
+      const std::array<double, 2> candidate_uv_b{candidate[2], candidate[3]};
+      Vec3d candidate_normal_a{};
+      Vec3d candidate_normal_b{};
+      if (ssi_diagnostic_normal_at(a.surface, candidate_uv_a, candidate_normal_a) &&
+          ssi_diagnostic_normal_at(b.surface, candidate_uv_b, candidate_normal_b)) {
+        const Vec3d candidate_mismatch = cross(candidate_normal_a, candidate_normal_b);
+        if (ssi_diagnostic_vec_finite(candidate_mismatch) &&
+            norm2(candidate_mismatch) < mismatch_norm) {
+          parameters = candidate;
+          uv_a = candidate_uv_a;
+          uv_b = candidate_uv_b;
+          normal_a = candidate_normal_a;
+          normal_b = candidate_normal_b;
+          accepted = true;
+          break;
+        }
+      }
+      factor *= 0.5;
+    }
+    if (!accepted) return false;
+    if (!ssi_diagnostic_gauss_newton(a, b, parameters,
+                                     kSsiDiagnosticAlignGaussNewtonIterations)) {
+      return false;
+    }
+    uv_a = {parameters[0], parameters[1]};
+    uv_b = {parameters[2], parameters[3]};
+    if (!ssi_diagnostic_normal_at(a.surface, uv_a, normal_a) ||
+        !ssi_diagnostic_normal_at(b.surface, uv_b, normal_b)) {
+      return false;
+    }
+  }
+  const Vec3d remainder = cross(normal_a, normal_b);
+  if (!ssi_diagnostic_vec_finite(remainder)) return false;
+  if (!(norm2(remainder) <= kSsiDiagnosticNormalSlack)) return false;
+  return ssi_diagnostic_store_contact(a, b, parameters, contact);
+}
+
+// Coarse 9x9 x 9x9 search followed by damped Gauss-Newton on the four patch
+// parameters. Returns false only when an evaluation, the linear solve, or the
+// final gap is unusable (non-finite); a contact that simply does not exist is
+// reported through contact.gap.
+inline bool ssi_diagnostic_refine_contact(const SsiPatch& a, const SsiPatch& b,
+                                          SsiDiagnosticContact& contact) noexcept {
+  std::array<SsiDiagnosticSample, kSsiDiagnosticGridCapacity> samples_a{};
+  std::array<SsiDiagnosticSample, kSsiDiagnosticGridCapacity> samples_b{};
+  if (!ssi_diagnostic_sample_patch(a, kSsiDiagnosticContactGrid, samples_a) ||
+      !ssi_diagnostic_sample_patch(b, kSsiDiagnosticContactGrid, samples_b)) {
+    return false;
+  }
+  double best_gap = kSsiDiagnosticInfinity;
+  std::array<double, 2> best_uv_a{};
+  std::array<double, 2> best_uv_b{};
+  const std::size_t sample_count = static_cast<std::size_t>(kSsiDiagnosticContactGrid) *
+                                   static_cast<std::size_t>(kSsiDiagnosticContactGrid);
+  for (std::size_t ia = 0; ia < sample_count; ++ia) {
+    for (std::size_t ib = 0; ib < sample_count; ++ib) {
+      const double gap = norm2(samples_a[ia].point - samples_b[ib].point);
+      if (!std::isfinite(gap)) return false;
+      if (gap < best_gap) {
+        best_gap = gap;
+        best_uv_a = samples_a[ia].uv;
+        best_uv_b = samples_b[ib].uv;
+      }
+    }
+  }
+
+  std::array<double, 4> parameters{best_uv_a[0], best_uv_a[1], best_uv_b[0], best_uv_b[1]};
+  if (!ssi_diagnostic_gauss_newton(a, b, parameters, kSsiDiagnosticRefineIterations)) {
+    return false;
+  }
+  return ssi_diagnostic_store_contact(a, b, parameters, contact);
+}
+
+// One-sided contact test: the 5x5 neighbourhood of `contact` on `patch` must
+// not contain samples on both sides of `other`'s carrier beyond the neutral
+// band (max(1e-12 relative, 0.3 * tolerance)). A cutting or crossing carrier
+// produces both signs; a touching carrier produces one.
+inline bool ssi_diagnostic_contact_one_sided(const SsiPatch& patch,
+                                             const std::array<double, 2>& contact,
+                                             const SurfaceGeometry& other,
+                                             double tolerance) noexcept {
+  const double span_u = std::max(kSsiDiagnosticContactTestSpanFraction * (patch.u[1] - patch.u[0]),
+                                 kSsiDiagnosticContactTestSpanTolerance * tolerance);
+  const double span_v = std::max(kSsiDiagnosticContactTestSpanFraction * (patch.v[1] - patch.v[0]),
+                                 kSsiDiagnosticContactTestSpanTolerance * tolerance);
+  const double denominator = static_cast<double>(kSsiDiagnosticContactTestGrid - 1);
+  bool positive = false;
+  bool negative = false;
+  for (int iu = 0; iu < kSsiDiagnosticContactTestGrid; ++iu) {
+    const double offset_u =
+        (static_cast<double>(iu) / denominator - 0.5) * span_u;
+    const double u = ssi_diagnostic_place(contact[0] + offset_u, patch.u[0], patch.u[1],
+                                          surface_periodic(patch.surface, 0));
+    for (int iv = 0; iv < kSsiDiagnosticContactTestGrid; ++iv) {
+      const double offset_v =
+          (static_cast<double>(iv) / denominator - 0.5) * span_v;
+      const double v = ssi_diagnostic_place(contact[1] + offset_v, patch.v[0], patch.v[1],
+                                            surface_periodic(patch.surface, 1));
+      const Result<SurfacePoint> evaluated = surface_eval(patch.surface, u, v);
+      if (!evaluated.has_value() || !surface_point_finite(evaluated.value())) return false;
+      const Point3d& point = evaluated.value().p;
+      const double signed_distance = ssi_diagnostic_signed_distance(other, point);
+      if (!std::isfinite(signed_distance)) return false;
+      // Neutral band: round-off at the sample scale, and a third of the
+      // tolerance so that a sample remaining within the accepted gap does not
+      // count as a crossing side.
+      const double magnitude = std::max(std::max(std::fabs(point[0]), std::fabs(point[1])),
+                                        std::fabs(point[2]));
+      const double side_band = std::max(kSsiDiagnosticSignSlack * (1.0 + magnitude),
+                                        kSsiDiagnosticSignFraction * tolerance);
+      if (signed_distance > side_band) positive = true;
+      if (signed_distance < -side_band) negative = true;
+      if (positive && negative) return false;
     }
   }
   return true;
@@ -1128,15 +1550,11 @@ inline bool ssi_diagnostic_sample_grid(
 }  // namespace detail
 
 // True when both patches lie on the same infinite carrier within `tolerance`.
-//
-// The answer is certified over the sampled patch domain rather than at one
-// point: the defining carrier parameters must match (unit frames within
-// 1 - |dot| <= 1e-12, and offsets/centres/radii/apex within `tolerance`), and
-// all 25 samples of patch a must lie within `tolerance` of carrier b's exact
-// implicit distance. NURBS patches answer false because their implicit
-// distance is unavailable; a mixed plane/analytic pair never shares a carrier.
-// Non-finite coordinates and a non-positive or non-finite tolerance answer
-// false as well. The function is noexcept, allocation-free, and deterministic.
+// The carrier parameters are compared exactly (see the banner comment) and the
+// domain of patch a is certified on the 9x9 sample grid described above;
+// patch b's domain is covered by the same carrier, so it needs no separate
+// sampling. Non-finite coordinates, non-positive or non-finite tolerances,
+// mixed analytic types, and NURBS patches answer false.
 inline bool surfaces_coincident(const SsiPatch& a, const SsiPatch& b,
                                 double tolerance) noexcept {
   if (!std::isfinite(tolerance) || !(tolerance > 0.0)) return false;
@@ -1146,27 +1564,29 @@ inline bool surfaces_coincident(const SsiPatch& a, const SsiPatch& b,
     return false;
   }
   if (!detail::ssi_diagnostic_same_carrier(a.surface, b.surface, tolerance)) return false;
-  std::array<detail::SsiDiagnosticSample, detail::kSsiDiagnosticSampleCount> samples{};
-  if (!detail::ssi_diagnostic_sample_grid(a, samples)) return false;
-  for (const detail::SsiDiagnosticSample& sample : samples) {
-    const double distance = detail::ssi_diagnostic_carrier_distance(b.surface, sample.point);
-    if (!std::isfinite(distance) || distance > tolerance) return false;
+
+  std::array<detail::SsiDiagnosticSample, detail::kSsiDiagnosticGridCapacity> samples{};
+  if (!detail::ssi_diagnostic_sample_patch(a, detail::kSsiDiagnosticCoincidenceGrid, samples)) {
+    return false;
+  }
+  const std::size_t sample_count =
+      static_cast<std::size_t>(detail::kSsiDiagnosticCoincidenceGrid) *
+      static_cast<std::size_t>(detail::kSsiDiagnosticCoincidenceGrid);
+  for (std::size_t index = 0; index < sample_count; ++index) {
+    const double signed_distance =
+        detail::ssi_diagnostic_signed_distance(b.surface, samples[index].point);
+    if (!std::isfinite(signed_distance) || std::fabs(signed_distance) > tolerance) {
+      return false;
+    }
   }
   return true;
 }
 
-// True when the two carriers touch with parallel normals, without coinciding.
-//
-// The sampled contact gap is the minimum over all 25x25 grid pairs of
-// max(distance(p_a, carrier_b), distance(p_b, carrier_a)); it must be within
-// `tolerance`. At the winning pair the unit normals must satisfy
-// |n_a x n_b| <= 1e-6. Coincident carriers, crossing planes, and a sphere cut
-// by a plane in a circle therefore answer false: coincidence is excluded
-// explicitly, and a transverse intersection has non-parallel normals. NURBS
-// patches answer false because their implicit distance is unavailable, so
-// tangency cannot be certified (and coincidence cannot be excluded). The same
-// non-finite/rejected-input rules as surfaces_coincident apply. The function is
-// noexcept, allocation-free, and deterministic.
+// True when the two carriers touch within `tolerance` at a refined contact with
+// parallel normals and do not coincide. The refined contact must be inside both
+// patches, and the one-sided test described in the banner comment rejects
+// carriers that cross, cut, or interpenetrate. NURBS patches answer false
+// because their tangency cannot be certified without an exact projection.
 inline bool patches_tangent(const SsiPatch& a, const SsiPatch& b, double tolerance) noexcept {
   if (!std::isfinite(tolerance) || !(tolerance > 0.0)) return false;
   if (std::holds_alternative<NurbsSurface>(a.surface) ||
@@ -1178,41 +1598,28 @@ inline bool patches_tangent(const SsiPatch& a, const SsiPatch& b, double toleran
   }
   if (surfaces_coincident(a, b, tolerance)) return false;
 
-  std::array<detail::SsiDiagnosticSample, detail::kSsiDiagnosticSampleCount> samples_a{};
-  std::array<detail::SsiDiagnosticSample, detail::kSsiDiagnosticSampleCount> samples_b{};
-  if (!detail::ssi_diagnostic_sample_grid(a, samples_a) ||
-      !detail::ssi_diagnostic_sample_grid(b, samples_b)) {
+  detail::SsiDiagnosticContact contact;
+  if (!detail::ssi_diagnostic_refine_contact(a, b, contact)) return false;
+  if (!(contact.gap <= tolerance)) return false;
+  if (!detail::ssi_diagnostic_align_contact(a, b, contact)) return false;
+  if (!(contact.gap <= tolerance)) return false;
+  if (!patch_contains(a, contact.uv_a[0], contact.uv_a[1]) ||
+      !patch_contains(b, contact.uv_b[0], contact.uv_b[1])) {
     return false;
   }
-
-  double contact = detail::kSsiDiagnosticInfinity;
-  std::size_t contact_a = 0;
-  std::size_t contact_b = 0;
-  for (std::size_t ia = 0; ia < samples_a.size(); ++ia) {
-    for (std::size_t ib = 0; ib < samples_b.size(); ++ib) {
-      const double to_b =
-          detail::ssi_diagnostic_carrier_distance(b.surface, samples_a[ia].point);
-      const double to_a =
-          detail::ssi_diagnostic_carrier_distance(a.surface, samples_b[ib].point);
-      const double gap = std::max(to_a, to_b);
-      if (!std::isfinite(gap)) return false;
-      if (gap < contact) {
-        contact = gap;
-        contact_a = ia;
-        contact_b = ib;
-      }
-    }
-  }
-  if (!(contact <= tolerance)) return false;
-
-  const Result<Vec3d> normal_a =
-      surface_normal(a.surface, samples_a[contact_a].uv[0], samples_a[contact_a].uv[1]);
-  const Result<Vec3d> normal_b =
-      surface_normal(b.surface, samples_b[contact_b].uv[0], samples_b[contact_b].uv[1]);
+  const Result<Vec3d> normal_a = surface_normal(a.surface, contact.uv_a[0], contact.uv_a[1]);
+  const Result<Vec3d> normal_b = surface_normal(b.surface, contact.uv_b[0], contact.uv_b[1]);
   if (!normal_a.has_value() || !normal_b.has_value()) return false;
   const Vec3d normal_cross = cross(normal_a.value(), normal_b.value());
   if (!detail::ssi_diagnostic_vec_finite(normal_cross)) return false;
-  return norm2(normal_cross) <= detail::kSsiDiagnosticTangentSlack;
+  if (!(norm2(normal_cross) <= detail::kSsiDiagnosticNormalSlack)) return false;
+  if (!detail::ssi_diagnostic_contact_one_sided(a, contact.uv_a, b.surface, tolerance)) {
+    return false;
+  }
+  if (!detail::ssi_diagnostic_contact_one_sided(b, contact.uv_b, a.surface, tolerance)) {
+    return false;
+  }
+  return true;
 }
 
 }  // namespace v1
