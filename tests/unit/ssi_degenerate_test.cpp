@@ -765,3 +765,87 @@ TEST_CASE("ssi: a cut below the documented detection floor is tangent contact") 
   REQUIRE(pole.has_value());
   CHECK(patches_tangent(sphere.value(), pole.value(), kTolerance));
 }
+
+TEST_CASE("ssi: QA-9 degenerate corpus is either stitched or diagnosed") {
+  int cases = 0;
+  int curves = 0;
+  int diagnosed = 0;
+  const auto check_result = [&](const SsiResult& result) {
+    ++cases;
+    if (result.curves.empty()) {
+      REQUIRE_FALSE(result.issues.empty());
+      for (const SsiIssue& issue : result.issues) {
+        CHECK(issue.code != SsiDiagnostic::none);
+      }
+      ++diagnosed;
+      return;
+    }
+    ++curves;
+    for (const SsiCurve& curve : result.curves) {
+      for (const SsiSegment& s : curve.segments) CHECK(s.residual <= 1e-8);
+    }
+  };
+
+  // Family 1: sphere tangent to a plane at its south pole (50 radii).
+  for (int i = 0; i < 50; ++i) {
+    const double r = 0.5 + 0.01 * static_cast<double>(i);
+    const Result<SsiPatch> a = make_ssi_patch(
+        SurfaceGeometry{Sphere3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, r}},
+        {0, 2 * kPi}, {-0.5 * kPi, 0.5 * kPi});
+    const Result<SsiPatch> b = make_ssi_patch(
+        SurfaceGeometry{Plane3{{0, 0, 1}, -r}}, {-3, 3}, {-3, 3});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-8});
+    REQUIRE(result.has_value());
+    check_result(result.value());
+  }
+
+  // Family 2: coincident planes written with different normals/scales (50).
+  for (int i = 1; i <= 50; ++i) {
+    const double d = 0.1 * static_cast<double>(i);
+    const Result<SsiPatch> a = make_ssi_patch(
+        SurfaceGeometry{Plane3{{0, 0, 1}, d}}, {-2, 2}, {-2, 2});
+    const Result<SsiPatch> b = make_ssi_patch(
+        SurfaceGeometry{Plane3{{0, 0, -3}, -3 * d}}, {-2, 2}, {-2, 2});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-8});
+    REQUIRE(result.has_value());
+    check_result(result.value());
+  }
+
+  // Family 3: coaxial equal-radius cylinders, offset along the axis (50).
+  for (int i = 0; i < 50; ++i) {
+    const Cylinder3 a_surface{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+    const Cylinder3 b_surface{Point3d{0, 0, 0.01 * static_cast<double>(i)},
+                              Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+    const Result<SsiPatch> a = make_ssi_patch(
+        SurfaceGeometry{a_surface}, {0, 2 * kPi}, {0, 1});
+    const Result<SsiPatch> b = make_ssi_patch(
+        SurfaceGeometry{b_surface}, {0, 2 * kPi}, {0, 1});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-8});
+    REQUIRE(result.has_value());
+    check_result(result.value());
+  }
+
+  // Family 4: torus tangent to the plane z = minor_radius (50 major radii).
+  for (int i = 0; i < 50; ++i) {
+    const double major = 2.0 + 0.01 * static_cast<double>(i);
+    const Torus3 torus{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, major, 0.5};
+    const Result<SsiPatch> a = make_ssi_patch(
+        SurfaceGeometry{torus}, {0, 2 * kPi}, {0, 2 * kPi});
+    const Result<SsiPatch> b = make_ssi_patch(
+        SurfaceGeometry{Plane3{{0, 0, 1}, 0.5}}, {-4, 4}, {-4, 4});
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-8});
+    REQUIRE(result.has_value());
+    check_result(result.value());
+  }
+
+  CHECK(cases == 200);
+  CHECK(diagnosed == 200);
+}

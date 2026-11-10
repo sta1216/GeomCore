@@ -1124,7 +1124,7 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
 
 依赖关系：M1 依赖 M0 的谓词、曲线曲面与测试设施；M2 依赖 M1 的 arrangement/CDT/索引；M3 强依赖 M2 的拓扑、网格化与容差模型；M4 在 M3 之上；M5 依赖前五者的 API 稳定。
 
-### 16.3 M0/M1/M2/M3a 出口状态（2026-11-10）
+### 16.3 M0/M1/M2/M3a/M3b-1 出口状态（2026-11-11）
 
 **M0 地基：已满足。** 谓词以独立整数/Fraction oracle 对拍（1e6 随机 + 共线、1 ulp、
 抵消、1e±200、次正规语料），NURBS 求值与导数对解析解校验，三平台 CI 矩阵已配置；
@@ -1182,6 +1182,25 @@ FAIL，16,666 个盒体 / 99,996 面 / 199,992 三角形，
 5.93e-14 / 5.88e-14（门禁 1e-9，正确性通过、性能未通过）。机器：i7-8550U、15.9 GB、
 Windows 10 19045、MSVC 19.44、Release。因此 **M3a 功能范围已达成，QA-8 性能
 验收未达成**；不得据 §16.2 的 M3 行声称 M3 里程碑已完全达成。
+
+**M3b-1（SSI：代码与测试完成；QA-9 语料通过、基准未达标）**：`ssi()` 与
+`detail/ssi_surface.hpp`、`ssi_patch.hpp`、`ssi_tri_tri.hpp`、`ssi_solver.hpp` 已实现
+（实现取舍见 ADR-0024）：自适应细分 + AABB 宽相 + 三角-三角种子 + 四参数 Newton +
+3D 分量聚类 + 周期缝感知闭合。输入是未修剪的参数补丁；横截相交输出有序折线且每段
+`residual ≤ tolerance`；相切、重合、退化补丁与不收敛返回 `SsiIssue` 诊断码，不静默
+返回空集；追踪在参数域边界停止，精确边界求交与边拆分留给 M3b-2；`max_depth` 下限为
+6，容差下限为 `2·eps·max(1,max|corner|)`，`rejected_segments` 是
+`max(0, extracted - accepted)` 的饱和差。QA-9 语料 200/200 例（球-平面极点相切、
+不同写法/尺度的重合平面、同轴等半径圆柱、圆环-平面相切）全部被诊断（100
+`tangent_contact` + 100 `coincident`），无无效输出；
+Debug 与 Release 各 671 个用例、549,427 条断言全绿，`/W4 /WX /utf-8` 下零警告。
+**验收状态（2026-11-11 实测，见 `docs/benchmarks/m3b-ssi.md`）**：QA-9 基准 FAIL，
+单位球-平面 1000 次横截调用中位数 15.91 ms/对（min 9.39 ms、max 24.48 ms），目标
+100 µs/对，约 159 倍；正确性通过（1000 次调用各 1 条曲线，共 31,000 段，最大残差
+6.44e-10，门禁 1e-9）。M3b-2（曲面布尔、多段 pcurve、混合尺度重复曲线残差）与
+M3b-3（healing）未交付；QA-8 仍是 M3a 的性能 FAIL，不因本任务改变。因此
+**M3b-1 的 SSI 功能与 QA-9 语料达成，QA-9 性能验收未达成**；不得据 §16.2 的
+M3 行声称 M3 里程碑已完全达成。
 
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外
