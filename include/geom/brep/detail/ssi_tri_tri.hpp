@@ -209,8 +209,9 @@ inline TriTriResult ssi_tri_result_from_points(const std::array<Point3d, 8>& poi
 // The tolerance is the only geometric authority; there is no global epsilon.
 // It must be finite and strictly positive: zero, negative, NaN and infinity all
 // classify as touching. The six vertices must be finite, and the two triangles
-// should have coordinates of comparable scale (within roughly 1e150 of each
-// other); extreme mixed-scale input may underflow in the normalized frame.
+// should have coordinates of comparable scale (within roughly 1e80 of each
+// other); beyond that the smaller triangle's normal underflows in the
+// normalized frame and the call conservatively classifies as touching.
 // The call is normalized into a power-of-two frame before any geometric
 // predicate is evaluated, so ordinary finite coordinates cannot overflow or
 // underflow the cross/dot products. A tolerance that underflows to zero in

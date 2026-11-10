@@ -196,8 +196,10 @@ TEST_CASE("ssi: large coordinates still classify") {
   REQUIRE(crossing.kind == TriTriKind::segment);
   CHECK(crossing.a[0] == 0.0);
   CHECK(crossing.a[1] == 0.0);
+  CHECK(crossing.a[2] == 0.0);
   CHECK(crossing.b[0] == 0.0);
   CHECK(std::fabs(crossing.b[1] - s) <= 1e188);
+  CHECK(std::fabs(crossing.b[2]) <= 1e188);
 
   const TriTriResult separated =
       tri_tri_intersect(Point3d{0, 0, 0}, Point3d{s, 0, 0}, Point3d{0, s, 0}, Point3d{0, 0, s},
@@ -214,7 +216,9 @@ TEST_CASE("ssi: small coordinates still classify when the tolerance is scaled") 
   const TriTriResult crossing = intersect(1e-112);
   REQUIRE(crossing.kind == TriTriKind::segment);
   CHECK(std::fabs(crossing.a[1]) <= 1e-112);
+  CHECK(std::fabs(crossing.a[2]) <= 1e-112);
   CHECK(std::fabs(crossing.b[1] - s) <= 1e-112);
+  CHECK(std::fabs(crossing.b[2]) <= 1e-112);
 
   // At an absolute tolerance far above the geometry the triangle is
   // degenerate, so the result is conservatively touching.
