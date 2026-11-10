@@ -1,5 +1,8 @@
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include <doctest/doctest.h>
@@ -8,6 +11,61 @@
 using namespace geom::v1;
 
 namespace {
+// Counts the triangle-pair intersection segments exactly as ssi() extracts them,
+// so the statistics tests can compare accepted_segments + rejected_segments
+// against an independently measured extraction count.
+std::uint64_t extracted_segments(const SsiPatch& a, const SsiPatch& b, double tolerance,
+                                 int max_depth) {
+  const Box3d bounds_a = patch_bounds(a, tolerance);
+  const Box3d bounds_b = patch_bounds(b, tolerance);
+  Box3d bounds = bounds_a;
+  bounds.expand(bounds_b);
+  const double chord_tolerance = std::max(1e-3 * norm2(bounds.diagonal()), 64.0 * tolerance);
+  const Result<SsiPatchMesh> mesh_a = tessellate_ssi_patch(a, chord_tolerance, max_depth);
+  const Result<SsiPatchMesh> mesh_b = tessellate_ssi_patch(b, chord_tolerance, max_depth);
+  if (!mesh_a.has_value() || !mesh_b.has_value()) return 0;
+  const SsiPatchMesh& patch_mesh_a = mesh_a.value();
+  const SsiPatchMesh& patch_mesh_b = mesh_b.value();
+  std::vector<Box3d> boxes_a;
+  boxes_a.reserve(patch_mesh_a.triangles.size());
+  for (const std::array<std::uint32_t, 3>& triangle : patch_mesh_a.triangles) {
+    boxes_a.push_back(detail::ssi_driver_triangle_bounds(patch_mesh_a, triangle));
+  }
+  std::vector<Box3d> boxes_b;
+  boxes_b.reserve(patch_mesh_b.triangles.size());
+  for (const std::array<std::uint32_t, 3>& triangle : patch_mesh_b.triangles) {
+    boxes_b.push_back(detail::ssi_driver_triangle_bounds(patch_mesh_b, triangle));
+  }
+  std::uint64_t count = 0;
+  for (std::size_t index_a = 0; index_a < patch_mesh_a.triangles.size(); ++index_a) {
+    const std::array<std::uint32_t, 3>& triangle_a = patch_mesh_a.triangles[index_a];
+    for (std::size_t index_b = 0; index_b < patch_mesh_b.triangles.size(); ++index_b) {
+      if (!detail::ssi_driver_bounds_overlap(boxes_a[index_a], boxes_b[index_b])) continue;
+      const std::array<std::uint32_t, 3>& triangle_b = patch_mesh_b.triangles[index_b];
+      const TriTriResult hit = tri_tri_intersect(
+          patch_mesh_a.points[triangle_a[0]], patch_mesh_a.points[triangle_a[1]],
+          patch_mesh_a.points[triangle_a[2]], patch_mesh_b.points[triangle_b[0]],
+          patch_mesh_b.points[triangle_b[1]], patch_mesh_b.points[triangle_b[2]], tolerance);
+      if (hit.kind == TriTriKind::segment) ++count;
+    }
+  }
+  return count;
+}
+
+// Mirrors the two-ulp floor computed by ssi() from the patch bounds.
+double coordinate_floor(const SsiPatch& a, const SsiPatch& b) {
+  const Box3d bounds_a = patch_bounds(a, 1e-9);
+  const Box3d bounds_b = patch_bounds(b, 1e-9);
+  double max_abs = 0.0;
+  for (const Box3d* box : {&bounds_a, &bounds_b}) {
+    for (int axis = 0; axis < 3; ++axis) {
+      max_abs = std::max(max_abs, std::fabs(box->lo[axis]));
+      max_abs = std::max(max_abs, std::fabs(box->hi[axis]));
+    }
+  }
+  return 2.0 * std::numeric_limits<double>::epsilon() * std::max(1.0, max_abs);
+}
+
 NurbsSurface planar_nurbs() {
   return NurbsSurface(1, 1, {0.0, 0.0, 1.0, 1.0}, {0.0, 0.0, 1.0, 1.0},
                       {Point3d{0, 0, 0}, Point3d{0, 1, 0}, Point3d{1, 0, 0}, Point3d{1, 1, 0}},
@@ -528,18 +586,42 @@ TEST_CASE("ssi: crossing branches keep separate seed components") {
 TEST_CASE("ssi: validates options and patches") {
   const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{Plane3{}}, {-1, 1}, {-1, 1});
   REQUIRE(a.has_value());
-  CHECK_FALSE(ssi(a.value(), a.value(), SsiOptions{0.0}).has_value());
-  CHECK_FALSE(ssi(a.value(), a.value(), SsiOptions{-1.0}).has_value());
-  CHECK_FALSE(ssi(a.value(), a.value(), SsiOptions{std::nan("")}).has_value());
+  const auto expect_error = [&a](const SsiOptions& options, Errc code, const char* message) {
+    const Result<SsiResult> result = ssi(a.value(), a.value(), options);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == code);
+    CHECK(std::strcmp(result.error().message, message) == 0);
+  };
+  expect_error(SsiOptions{0.0}, Errc::numeric_failure,
+               "ssi: tolerance must be positive and finite");
+  expect_error(SsiOptions{-1.0}, Errc::numeric_failure,
+               "ssi: tolerance must be positive and finite");
+  expect_error(SsiOptions{std::nan("")}, Errc::numeric_failure,
+               "ssi: tolerance must be positive and finite");
+  expect_error(SsiOptions{std::numeric_limits<double>::infinity()}, Errc::numeric_failure,
+               "ssi: tolerance must be positive and finite");
   SsiOptions bad_depth{1e-9};
-  bad_depth.max_depth = 0;
-  CHECK_FALSE(ssi(a.value(), a.value(), bad_depth).has_value());
+  bad_depth.max_depth = 5;
+  expect_error(bad_depth, Errc::unsupported, "ssi: max_depth must be at least 6");
+  SsiOptions no_segments{1e-9};
+  no_segments.max_segments = 0;
+  expect_error(no_segments, Errc::numeric_failure,
+               "ssi: max_segments must be positive");
+  // Tolerance is validated before the other options, so a request that breaks
+  // all three reports the tolerance first.
+  SsiOptions broken{0.0};
+  broken.max_depth = 0;
+  broken.max_segments = 0;
+  expect_error(broken, Errc::numeric_failure,
+               "ssi: tolerance must be positive and finite");
 }
 
 TEST_CASE("ssi: identical inputs produce identical output") {
   const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
-  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
-  const Result<SsiPatch> b = make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0.1}}, {-2, 2}, {-2, 2});
+  const Result<SsiPatch> a = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 2 * 3.141592653589793}, {-1.5, 1.5});
+  const Result<SsiPatch> b = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 0.1}}, {-2, 2}, {-2, 2});
   REQUIRE(a.has_value());
   REQUIRE(b.has_value());
   const Result<SsiResult> r1 = ssi(a.value(), b.value(), SsiOptions{1e-9});
@@ -548,25 +630,62 @@ TEST_CASE("ssi: identical inputs produce identical output") {
   REQUIRE(r2.has_value());
   REQUIRE(r1.value().curves.size() == r2.value().curves.size());
   for (std::size_t i = 0; i < r1.value().curves.size(); ++i) {
+    CHECK(r1.value().curves[i].closed == r2.value().curves[i].closed);
     const auto& s1 = r1.value().curves[i].segments;
     const auto& s2 = r2.value().curves[i].segments;
     REQUIRE(s1.size() == s2.size());
     for (std::size_t k = 0; k < s1.size(); ++k) {
-      for (int c = 0; c < 3; ++c) CHECK(s1[k].a[c] == s2[k].a[c]);
+      for (int c = 0; c < 3; ++c) {
+        CHECK(s1[k].a[c] == s2[k].a[c]);
+        CHECK(s1[k].b[c] == s2[k].b[c]);
+      }
+      CHECK(s1[k].ua == s2[k].ua);
+      CHECK(s1[k].ub == s2[k].ub);
+      CHECK(s1[k].va == s2[k].va);
+      CHECK(s1[k].vb == s2[k].vb);
       CHECK(s1[k].residual == s2[k].residual);
     }
   }
+  REQUIRE(r1.value().issues.size() == r2.value().issues.size());
+  for (std::size_t i = 0; i < r1.value().issues.size(); ++i) {
+    CHECK(r1.value().issues[i].code == r2.value().issues[i].code);
+    for (int p = 0; p < 4; ++p) {
+      CHECK(r1.value().issues[i].params[p] == r2.value().issues[i].params[p]);
+    }
+  }
+  CHECK(r1.value().candidate_pairs == r2.value().candidate_pairs);
+  CHECK(r1.value().accepted_segments == r2.value().accepted_segments);
+  CHECK(r1.value().rejected_segments == r2.value().rejected_segments);
+  CHECK(r1.value().max_residual == r2.value().max_residual);
 }
 
-TEST_CASE("ssi: max_segments caps the work instead of growing without bound") {
-  const Result<SsiPatch> a = make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
-  const Result<SsiPatch> b = make_ssi_patch(SurfaceGeometry{Plane3{{1, 0, 0}, 0}}, {-2, 2}, {-2, 2});
+TEST_CASE("ssi: a segment budget is rejected instead of truncating") {
+  const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(
+      SurfaceGeometry{cylinder}, {0, 2 * 3.141592653589793}, {0, 1});
+  const Result<SsiPatch> b = make_ssi_patch(
+      SurfaceGeometry{Plane3{{1, 0, 0}, 0.5}}, {-2, 2}, {-2, 2});
   REQUIRE(a.has_value());
   REQUIRE(b.has_value());
-  SsiOptions options{1e-9};
-  options.max_segments = 1;
-  const Result<SsiResult> result = ssi(a.value(), b.value(), options);
-  CHECK_FALSE(result.has_value());
+  const Result<SsiResult> reference = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  REQUIRE(reference.has_value());
+  REQUIRE(reference.value().curves.size() == 2);
+  const std::uint64_t accepted = reference.value().accepted_segments;
+  REQUIRE(accepted > 1);
+
+  SsiOptions exact{1e-9};
+  exact.max_segments = accepted;
+  const Result<SsiResult> exact_result = ssi(a.value(), b.value(), exact);
+  REQUIRE(exact_result.has_value());
+  CHECK(exact_result.value().accepted_segments == accepted);
+  CHECK(exact_result.value().curves.size() == 2);
+
+  SsiOptions tight{1e-9};
+  tight.max_segments = accepted - 1;
+  const Result<SsiResult> rejected = ssi(a.value(), b.value(), tight);
+  REQUIRE_FALSE(rejected.has_value());
+  CHECK(rejected.error().code == Errc::numeric_failure);
+  CHECK(std::strcmp(rejected.error().message, "ssi: segment budget exhausted") == 0);
 }
 
 TEST_CASE("ssi: a collapsed patch is diagnosed as degenerate") {
@@ -580,8 +699,12 @@ TEST_CASE("ssi: a collapsed patch is diagnosed as degenerate") {
   const Result<SsiResult> result = ssi(tiny.value(), plane.value(), SsiOptions{1e-9});
   REQUIRE(result.has_value());
   CHECK(result.value().curves.empty());
-  REQUIRE_FALSE(result.value().issues.empty());
+  REQUIRE(result.value().issues.size() == 1);
   CHECK(result.value().issues[0].code == SsiDiagnostic::degenerate_patch);
+  CHECK(result.value().candidate_pairs == 0);
+  CHECK(result.value().accepted_segments == 0);
+  CHECK(result.value().rejected_segments == 0);
+  CHECK(result.value().max_residual == 0.0);
 }
 
 TEST_CASE("ssi: an unreachable tolerance is reported as no_convergence") {
@@ -595,6 +718,180 @@ TEST_CASE("ssi: an unreachable tolerance is reported as no_convergence") {
   const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-300});
   REQUIRE(result.has_value());
   CHECK(result.value().curves.empty());
-  REQUIRE_FALSE(result.value().issues.empty());
+  REQUIRE(result.value().issues.size() == 1);
   CHECK(result.value().issues[0].code == SsiDiagnostic::no_convergence);
+  CHECK(result.value().candidate_pairs == 0);
+  CHECK(result.value().accepted_segments == 0);
+  CHECK(result.value().rejected_segments == 0);
+  CHECK(result.value().max_residual == 0.0);
+}
+
+TEST_CASE("ssi: large coordinates trace at an achievable tolerance") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0e6};
+  const Result<SsiPatch> a = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846}, {-1.5, 1.5});
+  const Result<SsiPatch> b = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 5.0e5}}, {-2.0e6, 2.0e6}, {-2.0e6, 2.0e6});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-9});
+  REQUIRE(result.has_value());
+  CHECK(result.value().issues.empty());
+  REQUIRE(result.value().curves.size() == 1);
+  CHECK(result.value().curves[0].closed);
+  CHECK(result.value().max_residual <= 1e-9);
+}
+
+TEST_CASE("ssi: a tight but achievable tolerance still traces") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846}, {-1.5, 1.5});
+  const Result<SsiPatch> b = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 0.1}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const Result<SsiResult> result = ssi(a.value(), b.value(), SsiOptions{1e-14});
+  REQUIRE(result.has_value());
+  CHECK_FALSE(result.value().curves.empty());
+  CHECK(result.value().max_residual <= 1e-14);
+}
+
+TEST_CASE("ssi: the tolerance floor is two ulp of the coordinate magnitude") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> a = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846}, {-1.5, 1.5});
+  const Result<SsiPatch> b = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 0.1}}, {-2, 2}, {-2, 2});
+  REQUIRE(a.has_value());
+  REQUIRE(b.has_value());
+  const double floor = coordinate_floor(a.value(), b.value());
+  const double below = std::nextafter(floor, -std::numeric_limits<double>::infinity());
+  const Result<SsiResult> gated = ssi(a.value(), b.value(), SsiOptions{below});
+  REQUIRE(gated.has_value());
+  CHECK(gated.value().curves.empty());
+  REQUIRE(gated.value().issues.size() == 1);
+  CHECK(gated.value().issues[0].code == SsiDiagnostic::no_convergence);
+  const Result<SsiResult> at_floor = ssi(a.value(), b.value(), SsiOptions{floor});
+  REQUIRE(at_floor.has_value());
+  for (const SsiIssue& issue : at_floor.value().issues) {
+    CHECK(issue.code != SsiDiagnostic::no_convergence);
+  }
+}
+
+TEST_CASE("ssi: rejected segments count extracted segments that no curve uses") {
+  // Perpendicular planes: every extracted segment belongs to the returned line.
+  const Result<SsiPatch> plane_z = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 0}}, {-2, 2}, {-2, 2});
+  const Result<SsiPatch> plane_x = make_ssi_patch(
+      SurfaceGeometry{Plane3{{1, 0, 0}, 0}}, {-2, 2}, {-2, 2});
+  REQUIRE(plane_z.has_value());
+  REQUIRE(plane_x.has_value());
+  const Result<SsiResult> planes = ssi(plane_z.value(), plane_x.value(), SsiOptions{1e-9});
+  REQUIRE(planes.has_value());
+  REQUIRE(planes.value().curves.size() == 1);
+  const std::uint64_t plane_extracted =
+      extracted_segments(plane_z.value(), plane_x.value(), 1e-9, 12);
+  CHECK(plane_extracted == 2);
+  CHECK(planes.value().accepted_segments == 21);
+  // A coarse planar tessellation yields fewer extracted segments than trace
+  // steps, so the difference saturates at zero instead of going negative.
+  CHECK(planes.value().rejected_segments == 0);
+
+  // Sphere/plane: the traced curve uses 31 of the 96 extracted segments.
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> sphere_patch = make_ssi_patch(
+      SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846}, {-1.5, 1.5});
+  const Result<SsiPatch> plane_z01 = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 0.1}}, {-2, 2}, {-2, 2});
+  REQUIRE(sphere_patch.has_value());
+  REQUIRE(plane_z01.has_value());
+  const Result<SsiResult> sphere_result =
+      ssi(sphere_patch.value(), plane_z01.value(), SsiOptions{1e-9});
+  REQUIRE(sphere_result.has_value());
+  REQUIRE(sphere_result.value().curves.size() == 1);
+  const std::uint64_t sphere_extracted =
+      extracted_segments(sphere_patch.value(), plane_z01.value(), 1e-9, 12);
+  CHECK(sphere_extracted == 96);
+  CHECK(sphere_result.value().accepted_segments == 31);
+  CHECK(sphere_result.value().rejected_segments == 65);
+  CHECK(sphere_result.value().accepted_segments + sphere_result.value().rejected_segments ==
+        sphere_extracted);
+  double worst_residual = 0.0;
+  for (const SsiSegment& segment : sphere_result.value().curves[0].segments) {
+    worst_residual = std::max(worst_residual, segment.residual);
+  }
+  CHECK(sphere_result.value().max_residual == worst_residual);
+  CHECK(sphere_result.value().max_residual > 0.0);
+  CHECK(sphere_result.value().max_residual <= 1e-9);
+
+  // Cylinder/plane: two open lines; some extracted segments are discarded.
+  const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> cylinder_patch = make_ssi_patch(
+      SurfaceGeometry{cylinder}, {0, 2 * 3.141592653589793}, {0, 1});
+  REQUIRE(cylinder_patch.has_value());
+  const Result<SsiResult> cylinder_result =
+      ssi(cylinder_patch.value(), plane_x.value(), SsiOptions{1e-9});
+  REQUIRE(cylinder_result.has_value());
+  REQUIRE(cylinder_result.value().curves.size() == 2);
+  const std::uint64_t cylinder_extracted =
+      extracted_segments(cylinder_patch.value(), plane_x.value(), 1e-9, 12);
+  CHECK(cylinder_result.value().accepted_segments > 0);
+  CHECK(cylinder_result.value().accepted_segments + cylinder_result.value().rejected_segments ==
+        cylinder_extracted);
+  CHECK(cylinder_result.value().rejected_segments < cylinder_extracted);
+}
+
+TEST_CASE("ssi: curves are ordered by their first point") {
+  const Torus3 torus{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 2.0, 0.5};
+  const Result<SsiPatch> torus_patch = make_ssi_patch(
+      SurfaceGeometry{torus}, {0, 2 * 3.141592653589793}, {0, 2 * 3.141592653589793});
+  const Result<SsiPatch> torus_plane = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 0, 1}, 0.4}}, {-4, 4}, {-4, 4});
+  REQUIRE(torus_patch.has_value());
+  REQUIRE(torus_plane.has_value());
+  const Result<SsiResult> torus_result = ssi(torus_patch.value(), torus_plane.value(), SsiOptions{1e-9});
+  REQUIRE(torus_result.has_value());
+  REQUIRE(torus_result.value().curves.size() == 2);
+  const Point3d& first = torus_result.value().curves[0].segments.front().a;
+  const Point3d& second = torus_result.value().curves[1].segments.front().a;
+  CHECK(first[0] < second[0]);
+  CHECK(std::fabs(first[0] + 2.3) < 1e-6);
+  CHECK(std::fabs(second[0] + 1.7) < 1e-6);
+
+  const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> cylinder_patch = make_ssi_patch(
+      SurfaceGeometry{cylinder}, {0, 2 * 3.141592653589793}, {0, 1});
+  const Result<SsiPatch> axial_plane = make_ssi_patch(
+      SurfaceGeometry{Plane3{{0, 1, 0}, 0.0}}, {-2, 2}, {-2, 2});
+  REQUIRE(cylinder_patch.has_value());
+  REQUIRE(axial_plane.has_value());
+  const Result<SsiResult> cylinder_result =
+      ssi(cylinder_patch.value(), axial_plane.value(), SsiOptions{1e-9});
+  REQUIRE(cylinder_result.has_value());
+  REQUIRE(cylinder_result.value().curves.size() == 2);
+  const Point3d& lower = cylinder_result.value().curves[0].segments.front().a;
+  const Point3d& upper = cylinder_result.value().curves[1].segments.front().a;
+  CHECK(lower[0] < upper[0]);
+  CHECK(std::fabs(lower[0] + 1.0) < 1e-9);
+  CHECK(std::fabs(upper[0] - 1.0) < 1e-9);
+
+  // The same geometry with the cylinder frame rotated by 180 degrees gives the
+  // two lines opposite parameter order (u = +2.09 for y = -0.866 and u = -2.09
+  // for y = +0.866). The output order follows the geometry, not the parameters.
+  const Result<SsiPatch> flipped_patch = make_ssi_patch(
+      SurfaceGeometry{Cylinder3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{-1, 0, 0}, 1.0}},
+      {0, 2 * 3.141592653589793}, {0, 1});
+  const Result<SsiPatch> offset_plane = make_ssi_patch(
+      SurfaceGeometry{Plane3{{1, 0, 0}, 0.5}}, {-2, 2}, {-2, 2});
+  REQUIRE(flipped_patch.has_value());
+  REQUIRE(offset_plane.has_value());
+  const Result<SsiResult> flipped_result =
+      ssi(flipped_patch.value(), offset_plane.value(), SsiOptions{1e-9});
+  REQUIRE(flipped_result.has_value());
+  REQUIRE(flipped_result.value().curves.size() == 2);
+  const Point3d& flipped_lower = flipped_result.value().curves[0].segments.front().a;
+  const Point3d& flipped_upper = flipped_result.value().curves[1].segments.front().a;
+  CHECK(flipped_lower[1] < flipped_upper[1]);
+  CHECK(std::fabs(flipped_lower[1] + 0.8660254037844386) < 1e-9);
+  CHECK(std::fabs(flipped_upper[1] - 0.8660254037844386) < 1e-9);
 }
