@@ -154,14 +154,16 @@ volume (no arc provenance).
 1. Both uses of an edge must agree: same circle within `tolerance`, spans equal
    up to reversal. Otherwise `invalid_topology "assemble_curved_solid: arc span
    mismatch"`.
-2. Build the edge curve as an exact `CircleCurve3` on the span's circle: `x_axis`
-   is the unit radial at the start angle and `y_axis = cross(plane_normal,
-   x_axis)`, with the edge's `t0/t1` chosen so increasing parameter follows the
-   run's signed sweep (`t1 > t0`; swap the axes and negate the angles when the
-   sweep is negative; a closed full rim keeps `t1 - t0 == 2*pi`). Storing the
-   exact circle rather than a NURBS approximation preserves `face_loops_uv` arc
-   provenance, so `curved_solid_volume` stays exact instead of falling back to
-   the sampled pcurve. Endpoints replace the welded vertices' positions exactly.
+2. Build the edge curve as an exact `CircleCurve3` on the span's circle: anchor
+   `x_axis` at the run's start radial (unit, in the span's plane) and
+   `y_axis = unit(cross(plane_normal, x_axis))`; negate `y_axis` when the run's
+   signed sweep is negative (swapping the axes would move the start point). The
+   edge stores `t0 = 0` and `t1 = |sweep| > 0` (a closed full rim is exactly
+   `2*pi`), so `eval(t0)` is the welded start vertex and increasing parameter
+   follows the run's direction. Storing the exact circle rather than a NURBS
+   approximation preserves `face_loops_uv` arc provenance, so
+   `curved_solid_volume` stays exact instead of falling back to the sampled
+   pcurve. Endpoints replace the welded vertices' positions exactly.
 3. Generate both pcurves by sampling the arc at
    `n = clamp(ceil(span / (2*acos(1 - min(tolerance, 1e-6)/r))), 32, 4096)`
    angles from `t0` to `t1` and projecting each into the adjacent face's surface
