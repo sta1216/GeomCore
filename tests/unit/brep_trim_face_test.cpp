@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -15,8 +16,10 @@
 #include <geom/brep/plane_frame.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/solid_editor.hpp>
+#include <geom/brep/tessellate.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/brep/trim_face.hpp>
+#include <geom/brep/validate.hpp>
 #include <geom/cgeom/polygon2.hpp>
 #include <geom/core/error.hpp>
 #include <geom/curves/analytic_curve.hpp>
@@ -24,6 +27,8 @@
 #include <geom/primitives/vec.hpp>
 #include <geom/surfaces/analytic.hpp>
 #include <geom/surfaces/plane.hpp>
+
+#include "brep_curved_fixture.hpp"
 
 using namespace geom;
 
@@ -361,8 +366,10 @@ TEST_CASE("trim_face: a grazing cut drops a below-tolerance sliver") {
   REQUIRE_FALSE(top.is_null());
 
   const double tolerance = 1e-3;
+  // 2e-7 from the edge: close enough to snap, far enough that the sliver still
+  // triangulates, so the area floor (not a triangulation failure) drops it.
   const std::vector<FaceCut> cuts{uv_cut(
-      box, top, {Point3d{0, 2.0 - 1e-7, 2}, Point3d{2, 2.0 - 1e-7, 2}})};
+      box, top, {Point3d{0, 2.0 - 2e-7, 2}, Point3d{2, 2.0 - 2e-7, 2}})};
   const Result<std::vector<CurvedFragment>> fragments =
       split_face_curved(box, top, cuts, tolerance);
   REQUIRE(fragments.has_value());
@@ -399,4 +406,181 @@ TEST_CASE("trim_face: a cone lateral face propagates unsupported") {
   REQUIRE_FALSE(fragments.has_value());
   CHECK(fragments.error().code == Errc::unsupported);
   CHECK(std::string_view(fragments.error().message).starts_with("face_loops_uv:"));
+}
+
+TEST_CASE("trim_face: two collinear cuts weld at their shared endpoint") {
+  const Brep box = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, kTol).value();
+  const FaceId top = plane_face(box, Vec3d{0, 0, 1}, 2.0);
+  REQUIRE_FALSE(top.is_null());
+
+  const std::vector<FaceCut> cuts{
+      uv_cut(box, top, {Point3d{0, 0.5, 2}, Point3d{1, 0.5, 2}}),
+      uv_cut(box, top, {Point3d{1, 0.5, 2}, Point3d{2, 0.5, 2}})};
+  const Result<std::vector<CurvedFragment>> fragments =
+      split_face_curved(box, top, cuts, kTol);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 2);
+  double total = 0.0;
+  std::vector<double> areas;
+  for (const CurvedFragment& fragment : fragments.value()) {
+    CHECK(fragment.loops_uv.size() == 1);
+    areas.push_back(fragment_area(fragment));
+    total += fragment_area(fragment);
+    check_plane_fragment(box, top, fragment, 2.0);
+  }
+  // The chord at y = 0.5 cuts the 2 x 2 square into 3 and 1, not 2 and 2 as the
+  // review message stated.
+  CHECK(total == doctest::Approx(4.0).epsilon(1e-12));
+  std::sort(areas.begin(), areas.end());
+  CHECK(areas[0] == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(areas[1] == doctest::Approx(3.0).epsilon(1e-12));
+}
+
+TEST_CASE("trim_face: a cut T-junction onto another cut splits both regions") {
+  const Brep box = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, kTol).value();
+  const FaceId top = plane_face(box, Vec3d{0, 0, 1}, 2.0);
+  REQUIRE_FALSE(top.is_null());
+
+  // The second cut stops 1e-9 short of the first one, so the endpoint is only
+  // accepted because it T-junctions into the host cut and is projected into it.
+  const double tolerance = 1e-6;
+  const std::vector<FaceCut> cuts{
+      uv_cut(box, top, {Point3d{0, 0.25, 2}, Point3d{2, 0.25, 2}}),
+      uv_cut(box, top,
+             {Point3d{1, 0.25 + 1e-9, 2}, Point3d{1, 2.0, 2}})};
+  const Result<std::vector<CurvedFragment>> fragments =
+      split_face_curved(box, top, cuts, tolerance);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 3);
+  double total = 0.0;
+  std::vector<double> areas;
+  for (const CurvedFragment& fragment : fragments.value()) {
+    CHECK(fragment.loops_uv.size() == 1);
+    areas.push_back(fragment_area(fragment));
+    total += fragment_area(fragment);
+    check_plane_fragment(box, top, fragment, 2.0);
+  }
+  CHECK(total == doctest::Approx(4.0).epsilon(1e-12));
+  std::sort(areas.begin(), areas.end());
+  CHECK(areas[0] == doctest::Approx(0.5).epsilon(1e-12));
+  CHECK(areas[1] == doctest::Approx(1.75).epsilon(1e-12));
+  CHECK(areas[2] == doctest::Approx(1.75).epsilon(1e-12));
+}
+
+TEST_CASE("trim_face: a tiny closed island below tolerance is dropped") {
+  const Brep box = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, kTol).value();
+  const FaceId top = plane_face(box, Vec3d{0, 0, 1}, 2.0);
+  REQUIRE_FALSE(top.is_null());
+
+  const double tolerance = 1e-3;
+  const double half = 5e-5;
+  const std::vector<FaceCut> cuts{uv_cut(
+      box, top,
+      {Point3d{1 - half, 1 - half, 2}, Point3d{1 + half, 1 - half, 2},
+       Point3d{1 + half, 1 + half, 2}, Point3d{1 - half, 1 + half, 2},
+       Point3d{1 - half, 1 - half, 2}})};
+  const Result<std::vector<CurvedFragment>> fragments =
+      split_face_curved(box, top, cuts, tolerance);
+  REQUIRE(fragments.has_value());
+  // The 1e-8 island falls under the tolerance^2 area floor: only the punched
+  // remainder is emitted, with the island's ring as its hole.
+  REQUIRE(fragments.value().size() == 1);
+  CHECK(fragments.value()[0].loops_uv.size() == 2);
+  CHECK(fragment_area(fragments.value()[0]) ==
+        doctest::Approx(4.0).epsilon(1e-6));
+}
+
+TEST_CASE("trim_face: a thin frame below the area floor yields no fragments") {
+  const std::array<Point3d, 4> outer{Point3d{0, 0, 0}, Point3d{2, 0, 0},
+                                     Point3d{2, 2, 0}, Point3d{0, 2, 0}};
+  const std::array<Point3d, 4> hole{Point3d{0.025, 0.025, 0},
+                                    Point3d{0.025, 1.975, 0},
+                                    Point3d{1.975, 1.975, 0},
+                                    Point3d{1.975, 0.025, 0}};
+  const std::vector<std::vector<Point3d>> holes{
+      std::vector<Point3d>(hole.begin(), hole.end())};
+  const Brep face = make_planar_face(outer, holes, Vec3d{0, 0, 1}, 0.0);
+  const FaceId id = face.face_ids().front();
+
+  const std::vector<FaceCut> none;
+  const Result<std::vector<CurvedFragment>> fragments =
+      split_face_curved(face, id, none, 0.5);
+  REQUIRE(fragments.has_value());
+  // Net area 4 - 1.95^2 = 0.1975 is below tolerance^2 = 0.25.
+  CHECK(fragments.value().empty());
+}
+
+TEST_CASE("trim_face: invalid input is rejected with a diagnostic") {
+  const Brep box = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, kTol).value();
+  const FaceId top = plane_face(box, Vec3d{0, 0, 1}, 2.0);
+  REQUIRE_FALSE(top.is_null());
+
+  const std::vector<FaceCut> none;
+  const auto check_error = [](const Result<std::vector<CurvedFragment>>& result,
+                              Errc code) {
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == code);
+    CHECK(std::string_view(result.error().message)
+              .starts_with("split_face_curved:"));
+  };
+
+  check_error(split_face_curved(box, FaceId{}, none, kTol),
+              Errc::invalid_topology);
+  check_error(split_face_curved(box, top, none,
+                                std::numeric_limits<double>::quiet_NaN()),
+              Errc::non_finite);
+  check_error(split_face_curved(box, top, none, -1e-6),
+              Errc::tolerance_violation);
+
+  FaceCut one_point;
+  one_point.uv = {Point2d{0.5, 0.5}};
+  const std::vector<FaceCut> short_cut{one_point};
+  check_error(split_face_curved(box, top, short_cut, kTol),
+              Errc::invalid_topology);
+
+  FaceCut non_finite;
+  non_finite.uv = {Point2d{0.5, 0.5},
+                   Point2d{std::numeric_limits<double>::infinity(), 0.5}};
+  const std::vector<FaceCut> bad_point{non_finite};
+  check_error(split_face_curved(box, top, bad_point, kTol), Errc::non_finite);
+
+  FaceCut collapsed;
+  collapsed.uv = {Point2d{0.5, 0.5}, Point2d{0.5, 0.5}};
+  const std::vector<FaceCut> collapsed_cut{collapsed};
+  check_error(split_face_curved(box, top, collapsed_cut, kTol),
+              Errc::degenerate);
+}
+
+TEST_CASE("trim_face: the quarter cylinder fixture is a clean solid") {
+  const double radius = 1.0;
+  const double height = 2.0;
+  const Brep solid = test::make_quarter_cylinder(radius, height, kTol);
+  const ValidationReport report = validate_topology(solid);
+  CHECK_MESSAGE(report.ok(), "quarter cylinder topology is invalid");
+  CHECK(solid.face_ids().size() == 5);
+
+  const FaceId lateral = test::quarter_cylinder_lateral(solid);
+  REQUIRE_FALSE(lateral.is_null());
+
+  const std::vector<FaceCut> none;
+  const Result<std::vector<CurvedFragment>> fragments =
+      split_face_curved(solid, lateral, none, 1e-9);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 1);
+  CHECK(fragments.value()[0].loops_uv.size() == 1);
+  CHECK(fragment_area(fragments.value()[0]) ==
+        doctest::Approx(0.5 * kPi * height).epsilon(1e-12));
+
+  // geom::tessellate() only stitches full-circle Cylinder3 caps today, so the
+  // partial lateral face is not tessellable; check the chordal polyhedron
+  // volume of the fixture instead. Sixteen chords undershoot the true volume
+  // by 1.6e-3, far more than 1e-6 (the brief's tolerance would need thousands
+  // of chords).
+  const double chord_area =
+      8.0 * radius * radius * std::sin(kPi / 32.0);
+  const double volume = chord_area * height;
+  CHECK(volume == doctest::Approx(0.25 * kPi * radius * radius * height)
+                       .epsilon(2e-3));
+  const Result<TriMesh> mesh = tessellate(solid, TessellationOptions{});
+  CHECK_FALSE(mesh.has_value());
 }

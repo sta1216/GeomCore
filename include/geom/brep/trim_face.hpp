@@ -333,10 +333,15 @@ inline bool trim_face_same_fragment(const CurvedFragment& lhs,
 // Splits `face` along `cuts` and returns the resulting fragments in a
 // deterministic order (lexicographic minimum of the outer parameter ring, then
 // hole count). Every cut polyline is given in the parameter domain of the
-// face's surface. An open cut must have both endpoints on the face boundary
-// within `tolerance`; a closed cut (first point repeated as last) may lie
-// anywhere. Fragments whose surface area is at most tolerance^2 are dropped.
-// Errors returned by face_loops_uv() are propagated unchanged.
+// face's surface, on the same unwrapped u branch as the rings returned by
+// face_loops_uv(); a cut that crosses the periodic seam without being unwrapped
+// is an open cut endpoint off the boundary and is rejected. An open cut endpoint
+// must lie on the face boundary within `tolerance`, weld to another open cut
+// endpoint within that distance, or T-junction onto another cut (its projection
+// is inserted into that cut). A closed cut (first point repeated as last) may
+// lie anywhere. Cut segments shorter than `tolerance` and fragments whose
+// surface area is at most tolerance^2 are dropped. Errors returned by
+// face_loops_uv() are propagated unchanged.
 inline Result<std::vector<CurvedFragment>> split_face_curved(
     const Brep& brep, FaceId face, std::span<const FaceCut> cuts,
     double tolerance) {
@@ -366,6 +371,15 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     return Error{Errc::invalid_topology,
                  "split_face_curved: face does not start with an outer loop",
                  face.index(), 0u};
+  }
+  std::size_t outer_loops = 0;
+  for (const FaceUvLoop& loop : uv_loops) {
+    if (loop.outer) ++outer_loops;
+  }
+  if (outer_loops != 1) {
+    return Error{Errc::unsupported,
+                 "split_face_curved: face must have exactly one outer loop",
+                 face.index(), static_cast<std::uint32_t>(outer_loops)};
   }
 
   const Result<detail::FaceUvProjection> projection_result =
@@ -442,23 +456,27 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
   }
 
   // Snap every open cut endpoint. A welded group of endpoints shares one exact
-  // coordinate so touching cuts and the boundary meet exactly.
+  // coordinate so touching cuts and the boundary meet exactly. A free endpoint
+  // (not on the boundary and not welded to another cut) must T-junction onto
+  // another cut; the projection is inserted into that cut so the arrangement
+  // sees an exact split.
   struct Endpoint {
     Point2d raw{};
     detail::TrimFaceSnap snap{};
     Point2d final{};
+    std::size_t cut = 0;
   };
   std::vector<Endpoint> endpoints;
   for (std::size_t c = 0; c < cuts.size(); ++c) {
     if (cut_closed[c] != 0) continue;
-    endpoints.push_back(
-        Endpoint{cut_points[c].front(),
-                 detail::trim_face_find_snap(loops, cut_points[c].front(),
-                                             snap_radius)});
-    endpoints.push_back(
-        Endpoint{cut_points[c].back(),
-                 detail::trim_face_find_snap(loops, cut_points[c].back(),
-                                             snap_radius)});
+    endpoints.push_back(Endpoint{cut_points[c].front(),
+                                 detail::trim_face_find_snap(
+                                     loops, cut_points[c].front(), snap_radius),
+                                 Point2d{}, c});
+    endpoints.push_back(Endpoint{cut_points[c].back(),
+                                 detail::trim_face_find_snap(
+                                     loops, cut_points[c].back(), snap_radius),
+                                 Point2d{}, c});
   }
   const std::size_t endpoint_count = endpoints.size();
   std::vector<std::size_t> parent(endpoint_count);
@@ -484,15 +502,118 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
       has_canonical[root] = 1;
     }
   }
+
+  struct CutInsert {
+    std::size_t cut = 0;
+    std::size_t edge = 0;
+    double t = 0.0;
+    Point2d point{};
+  };
+  std::vector<CutInsert> cut_inserts;
+  std::vector<char> group_done(endpoint_count, 0);
   for (std::size_t i = 0; i < endpoint_count; ++i) {
     const std::size_t root = detail::trim_face_find_root(parent, i);
-    if (canonical[root].boundary == false) {
-      return Error{Errc::numeric_failure,
-                   "split_face_curved: an open cut endpoint is not on the face "
-                   "boundary",
-                   face.index(), static_cast<std::uint32_t>(endpoint_count)};
+    if (group_done[root] != 0) continue;
+    group_done[root] = 1;
+    const detail::TrimFaceSnap& snap = canonical[root];
+    Point2d final = snap.point;
+    if (!snap.boundary) {
+      // How many different cut polylines meet at this welded point?
+      std::size_t distinct_cuts = 0;
+      std::size_t sole_cut = 0;
+      for (std::size_t j = 0; j < endpoint_count; ++j) {
+        if (detail::trim_face_find_root(parent, j) != root) continue;
+        if (distinct_cuts == 0) {
+          distinct_cuts = 1;
+          sole_cut = endpoints[j].cut;
+        } else if (endpoints[j].cut != sole_cut) {
+          distinct_cuts = 2;
+        }
+      }
+      if (distinct_cuts < 2) {
+        // A single free endpoint is a T-junction candidate: it must land in the
+        // interior of a segment of another cut.
+        bool have_hit = false;
+        double best_distance = 0.0;
+        CutInsert best{};
+        for (std::size_t host = 0; host < cuts.size(); ++host) {
+          if (host == sole_cut) continue;
+          const std::vector<Point2d>& chain = cut_points[host];
+          for (std::size_t e = 0; e + 1 < chain.size(); ++e) {
+            const Point2d& a = chain[e];
+            const Point2d& b = chain[e + 1];
+            const Vec2d edge = b - a;
+            const double length2 = dot(edge, edge);
+            if (!(length2 > 0.0)) continue;
+            const double t = dot(snap.point - a, edge) / length2;
+            if (!(t > 0.0) || !(t < 1.0)) continue;
+            const Point2d hit_point{a[0] + edge[0] * t,
+                                    a[1] + edge[1] * t};
+            const double distance =
+                std::hypot(snap.point[0] - hit_point[0],
+                           snap.point[1] - hit_point[1]);
+            if (!(distance <= snap_radius)) continue;
+            if (have_hit && !(distance < best_distance)) continue;
+            have_hit = true;
+            best_distance = distance;
+            best = CutInsert{host, e, t, hit_point};
+          }
+        }
+        if (!have_hit) {
+          return Error{Errc::numeric_failure,
+                       "split_face_curved: an open cut endpoint is not on the "
+                       "face boundary",
+                       face.index(), static_cast<std::uint32_t>(endpoint_count)};
+        }
+        final = best.point;
+        cut_inserts.push_back(best);
+      }
     }
-    endpoints[i].final = canonical[root].point;
+    for (std::size_t j = 0; j < endpoint_count; ++j) {
+      if (detail::trim_face_find_root(parent, j) == root) {
+        endpoints[j].final = final;
+      }
+    }
+  }
+
+  // Insert T-junction projections into the host cut polylines at their original
+  // segment positions. The endpoint and the host then share one exact vertex.
+  if (!cut_inserts.empty()) {
+    std::vector<std::vector<CutInsert>> per_cut(cuts.size());
+    for (const CutInsert& insert : cut_inserts) {
+      per_cut[insert.cut].push_back(insert);
+    }
+    for (std::size_t c = 0; c < cuts.size(); ++c) {
+      if (per_cut[c].empty()) continue;
+      std::stable_sort(per_cut[c].begin(), per_cut[c].end(),
+                       [](const CutInsert& lhs, const CutInsert& rhs) noexcept {
+                         if (lhs.edge != rhs.edge) return lhs.edge < rhs.edge;
+                         return lhs.t < rhs.t;
+                       });
+      const std::vector<Point2d>& chain = cut_points[c];
+      std::vector<Point2d> rebuilt;
+      rebuilt.reserve(chain.size() + per_cut[c].size());
+      std::size_t next = 0;
+      for (std::size_t e = 0; e + 1 < chain.size(); ++e) {
+        rebuilt.push_back(chain[e]);
+        while (next < per_cut[c].size() && per_cut[c][next].edge == e) {
+          const Point2d& point = per_cut[c][next].point;
+          bool present = false;
+          for (const Point2d& vertex : chain) {
+            if (detail::trim_face_same_xy(vertex, point)) {
+              present = true;
+              break;
+            }
+          }
+          if (!present && !detail::trim_face_same_xy(rebuilt.back(), point)) {
+            rebuilt.push_back(point);
+          }
+          ++next;
+        }
+      }
+      rebuilt.push_back(chain.back());
+      cut_points[c] = std::move(rebuilt);
+    }
   }
 
   // Insert segment snaps into the boundary rings so the cut endpoint and the
@@ -550,7 +671,15 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     for (std::size_t i = 0; i + 1 < chain.size(); ++i) {
       const Point2d& a = chain[i];
       const Point2d& b = chain[i + 1];
-      if (detail::trim_face_same_xy(a, b)) continue;
+      const double length = std::hypot(b[0] - a[0], b[1] - a[1]);
+      // A sub-tolerance segment of an open chain is a snapped degeneracy and is
+      // dropped (brief step 3). Closed loops keep their segments: their size is
+      // governed by the fragment area floor, and dropping them would erase a
+      // small but legitimate feature.
+      if (detail::trim_face_same_xy(a, b) ||
+          (cut_closed[c] == 0 && !(length > tolerance))) {
+        continue;
+      }
       ++used;
       segments.push_back(ArrangementSegment{a, b,
                                             static_cast<std::uint32_t>(1u + c)});
@@ -661,6 +790,15 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
       area_uv -= hole_area;
       holes_uv.push_back(std::move(hole));
     }
+    // Holes are ordered by area (descending) and then lexicographically.
+    std::sort(holes_uv.begin(), holes_uv.end(),
+              [](const std::vector<Point2d>& lhs,
+                 const std::vector<Point2d>& rhs) noexcept {
+                const double lhs_area = std::fabs(signed_area2(lhs));
+                const double rhs_area = std::fabs(signed_area2(rhs));
+                if (lhs_area != rhs_area) return lhs_area > rhs_area;
+                return detail::trim_face_lex_less(lhs.front(), rhs.front());
+              });
     if (!(area_uv > 0.0)) continue;
 
     const double scale = detail::trim_face_metric_scale(projection, record.rep);
