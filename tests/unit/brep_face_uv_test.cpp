@@ -558,12 +558,14 @@ TEST_CASE("an apex-free cone face exposes a partial u ring") {
     max_u = std::max(max_u, point[0]);
     // The circle is a full turn, so every parameter pair sits at v = 1.
     CHECK(point[1] == doctest::Approx(v_param).epsilon(1e-12));
-    // Cyclic step, including the closing last -> first pair.
-    const geom::Point2d& next = points[(i + 1u) % points.size()];
-    double delta = next[0] - point[0];
-    while (delta > kPi) delta -= kTwoPi;
-    while (delta < -kPi) delta += kTwoPi;
-    CHECK(std::fabs(delta) <= kPi);
+    // The returned u must follow the circle parameter t = i*step, not just be
+    // self-consistent: this pins the azimuth direction and origin. A sign flip
+    // (u = -atan2) or a constant offset fails here because the ring is sampled
+    // at fixed t = i*step.
+    double delta_u = point[0] - static_cast<double>(i) * step;
+    while (delta_u > kPi) delta_u -= kTwoPi;
+    while (delta_u < -kPi) delta_u += kTwoPi;
+    CHECK(std::fabs(delta_u) <= 1e-12);
 
     const geom::Point3d reconstructed = cone.eval(point[0], point[1]);
     const geom::Point3d expected{rho * std::cos(point[0]), rho * std::sin(point[0]), v_param};
