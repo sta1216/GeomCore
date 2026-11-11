@@ -126,7 +126,7 @@ The reviewer must attack these five areas first:
 - Create: `include/geom/brep/pcurve2d.hpp`
 - Modify: `include/geom/brep/solid_editor.hpp` (`split_edge`, `join_vertex`)
 - Create: `tests/unit/brep_pcurve2d_test.cpp`
-- Modify: 	ests/unit/brep_euler_ops_test.cpp, 	ests/unit/brep_assemble_test.cpp (mechanical p0/p1 -> points.front()/points.back())
+- Modify: `tests/unit/brep_euler_ops_test.cpp`, `tests/unit/brep_assemble_test.cpp` (mechanical p0/p1 -> points.front()/points.back())
 - Modify: `tests/CMakeLists.txt`
 
 **Interfaces**
@@ -522,7 +522,7 @@ Algorithm:
 
 ## M3b-2 exit criteria
 
-- `Pcurve2d` is a polyline everywhere; `split_edge`/`merge_edges` preserve multi-segment pcurves.
+- `Pcurve2d` is a polyline everywhere; `split_edge`/`join_vertex` preserve multi-segment pcurves.
 - `face_loops_uv` unrolls periodic seams and samples edges without pcurves.
 - `split_face_curved` produces outer+holes fragments with correct nesting; cuts touching a boundary never create a sliver.
 - `assemble_curved_solid` produces a `validate_topology`-clean `Brep` from curved fragments with pcurves in edge direction.
