@@ -396,6 +396,7 @@ struct CurvedAssembledFace {
   SurfaceGeometry surface;
   std::vector<std::vector<Point3d>> loops;      // outer first
   std::vector<std::vector<Point2d>> loops_uv;   // same sizes as loops
+  std::vector<std::vector<std::optional<CurvedArcSpan>>> arc_spans;  // same shape; may be empty
 };
 
 Result<Brep> assemble_curved_solid(std::span<const CurvedAssembledFace> faces,
@@ -405,17 +406,18 @@ Result<Brep> assemble_curved_solid(std::span<const CurvedAssembledFace> faces,
 Algorithm:
 
 1. Validate: at least one face; every loop has >= 3 points; `loops.size() == loops_uv.size()`; matching sizes; finite points; tolerance finite and > 0.
-2. Weld all loop points within `tolerance` (grid with cell size `2 * tolerance`, plus neighbour-cell search). Reject a weld that merges two points farther than `tolerance`.
-3. Build each undirected edge key from the welded vertex ids. For each use record `(from, to, uv polyline)`.
-4. Every edge must have exactly two uses; their 3D polylines must be the reverse of each other within `tolerance` (compare vertex ids and count). Otherwise `invalid_topology "assemble_curved_solid: edge is used once"` / `"shared edge polyline mismatch"`.
-5. Create one polyline NURBS edge per key with `make_polyline_curve` in the direction of the first use; pcurve for each coedge from its uv polyline in the same edge direction (reverse the uv sequence when the coedge traverses backwards).
-6. Deduplicate surfaces by exact `SurfaceGeometry` comparison within `tolerance` (plane normal/offset, cylinder frame/radius, cone, sphere, torus). Reuse the surface id.
-7. `SolidEditor`: add vertices, edges (pcurve = uv polyline), faces, loops (`outer = index 0`), one shell with all faces and `closed = true`, one solid. Commit.
-8. Run `validate_topology` on the result; any finding becomes an `invalid_topology` error carrying the first finding's entity index and message.
+2. Split every loop into pieces: a maximal run of segments whose `arc_spans` entries are present and lie on the same circle (center and radius within `tolerance`) becomes one arc piece; every other segment is a straight piece. Piece endpoints are the only vertices.
+3. Weld piece endpoints within `tolerance` (grid with cell size `2 * tolerance`, plus neighbour-cell search). Reject a weld that merges endpoints farther than `tolerance`.
+4. Build each undirected edge key from the welded vertex ids. Every edge must have exactly two uses, and both uses must be the same kind: arcs on the same circle, or straight segments. Otherwise `invalid_topology "assemble_curved_solid: edge is used once"` / `"shared edge curve mismatch"`.
+5. Create one edge curve per key in the direction of the first use: an arc becomes a rational quadratic NURBS (`detail/curve_arc.hpp`, spans <= pi/2, weights {1, cos(theta/2), 1}); a straight piece uses `make_polyline_curve({a, b})`.
+6. For each use, sample the edge curve at `n = clamp(ceil(span / (2*acos(1 - min(tolerance, 1e-6)/r))), 32, 4096)` parameters, project the samples with `face_uv_project_point`, unwrap the periodic branch nearest the fragment's uv polyline, and reverse when the use is backwards; this dense pcurve is stored in edge direction `v0 -> v1`.
+7. Deduplicate surfaces by exact `SurfaceGeometry` comparison within `tolerance` (plane normal/offset, cylinder frame/radius, cone, sphere, torus). Reuse the surface id.
+8. `SolidEditor`: add vertices, edges (pcurve = uv polyline), faces, loops (`outer = index 0`), one shell with all faces and `closed = true`, one solid. Commit.
+9. Run `validate_topology` on the result; any finding becomes an `invalid_topology` error carrying the first finding's entity index and message.
 
 **Steps**
 
-1. Fixture: `make_quarter_cylinder` builds five faces via `SolidEditor` (lateral `Cylinder3` patch with polyline boundary, top/bottom quarter disks, two rectangular cut faces). Then split the lateral face with Task 4 and assemble the six fragments back into a solid; expect `validate_topology(result).findings.empty()` and `detail::curved_solid_volume(result, tol)` within `1e-9` of the fixture's polygonal volume `height * (n / 2) * radius^2 * sin(pi / (2n))` (`n = 16`; the analytic `pi * r^2 * h / 4` is 0.16% away because the B-rep's arcs are chords).
+1. Fixture: build the five faces of `make_quarter_cylinder`, read each with `face_loops_uv` (which now carries `arcs`), and assemble them back into a solid; expect `validate_topology(result).findings.empty()`, exactly 5 faces, `euler_characteristic == 2`, every circular boundary edge stored as a `NurbsCurve`, and `detail::curved_solid_volume(result, tol)` within `1e-9` of the analytic `pi * r^2 * h / 4` (arcs are exact, so the sampled 16-gon is no longer the reference).
 2. Add a mismatch test: two faces sharing an edge with different polylines -> `invalid_topology`, message contains `"polyline mismatch"`.
 3. Add a single-use edge test -> `"edge is used once"`.
 4. RED; implement; Debug/Release.
@@ -446,13 +448,14 @@ Algorithm:
 2. Build the plane patch: frame from `make_plane_frame(plane)`, uv box covering the solid's bounding box corners projected into that frame.
 3. `ssi(face_patch, plane_patch, options)`. A `tangent_contact` or `coincident` issue returns `unsupported "split_solid_by_plane: plane is tangent or coincident with a face"`. Map each returned segment's `ua/va` to a `FaceCut` for that face.
 4. `split_face_curved` for every face; classify each fragment by `surface_eval` at its outer-loop representative point (first ear centroid, as in Task 4). Side = `dot(normal, p) - offset` sign.
-5. Faces with no cut are assigned whole to one side.
-6. Assemble each side with `assemble_curved_solid`.
-7. If either side has no faces, return `degenerate "split_solid_by_plane: plane does not split the solid"`.
+5. Build the cut cap: project every returned cut polyline onto the plane frame, weld and stitch the pieces into closed loops; reject an unclosed loop with `numeric_failure "split_solid_by_plane: cut loops do not close"`. Each side gets one planar cap face on the same plane with its own outward normal: `+n` for the negative side and `-n` for the positive side (so its plane offset flips sign too), with the loops projected into that normal's uv frame and kept with the outer loop CCW.
+6. Faces with no cut are assigned whole to one side; the two cap faces are assigned one per side.
+7. Assemble each side with `assemble_curved_solid`.
+8. If either side has no faces inside the plane (no fragments and no cap area), return `degenerate "split_solid_by_plane: plane does not split the solid"`.
 
 **Steps**
 
-1. Test the quarter cylinder split at `z = 1`: two solids, `validate_topology` clean, each `detail::curved_solid_volume` equal to half the fixture's polygonal volume within `1e-9` (analytic half is 0.16% away, as documented in Task 4b).
+1. Test the quarter cylinder split at `z = 1`: two solids, `validate_topology` clean, each `detail::curved_solid_volume` equal to `pi * r^2 * h / 8` within `1e-9` (exact arcs, so the analytic half is attainable).
 2. Test a box split at `z = 0.5` (all-planar integration path), volumes 4 and 4 within `1e-12`.
 3. Test tangent plane at `z = 2` (touching the top face) -> `unsupported` with the documented message.
 4. RED; implement; Debug/Release.
