@@ -1,0 +1,517 @@
+#include <doctest/doctest.h>
+
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <numbers>
+#include <string_view>
+#include <variant>
+#include <vector>
+
+#include <geom/brep/face_uv.hpp>
+#include <geom/brep/plane_frame.hpp>
+#include <geom/brep/primitives.hpp>
+#include <geom/brep/solid_editor.hpp>
+#include <geom/brep/topology.hpp>
+#include <geom/core/error.hpp>
+#include <geom/curves/analytic_curve.hpp>
+#include <geom/primitives/point.hpp>
+#include <geom/surfaces/analytic.hpp>
+#include <geom/surfaces/nurbs_surface.hpp>
+#include <geom/surfaces/plane.hpp>
+
+namespace {
+
+constexpr double kPi = std::numbers::pi_v<double>;
+constexpr double kTwoPi = 2.0 * kPi;
+constexpr double kTolerance = 1e-9;
+
+template <class Surface>
+geom::FaceId face_with_surface(const geom::Brep& brep) {
+  for (const geom::FaceId id : brep.face_ids()) {
+    const geom::Face& face = brep.face(id);
+    if (face.surface == geom::kNoGeometry) continue;
+    if (std::holds_alternative<Surface>(brep.geometry().surfaces[face.surface])) return id;
+  }
+  return geom::FaceId{};
+}
+
+// The cap whose plane faces `axis` from the given side.
+geom::FaceId cap_facing(const geom::Brep& brep, const geom::Vec3d& axis, bool bottom) {
+  for (const geom::FaceId id : brep.face_ids()) {
+    const geom::Face& face = brep.face(id);
+    if (face.surface == geom::kNoGeometry) continue;
+    const auto* plane = std::get_if<geom::Plane3>(&brep.geometry().surfaces[face.surface]);
+    if (plane == nullptr) continue;
+    const double side = geom::dot(plane->normal, axis);
+    if (bottom ? side < 0.0 : side > 0.0) return id;
+  }
+  return geom::FaceId{};
+}
+
+// Unit square in the z = 0 plane with a stored pcurve per edge. The loop runs
+// A -> B -> C -> D when `reversed_loop` is false and A -> D -> C -> B when it is
+// true, so the reversed variant exercises Coedge::reversed on every coedge.
+struct PcurveQuad {
+  geom::Brep brep;
+  geom::FaceId face{};
+  geom::PlaneFrame frame{};
+};
+
+PcurveQuad make_pcurve_quad(bool reversed_loop, bool non_finite_pcurve = false) {
+  geom::SolidEditor editor;
+  const geom::Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
+  const geom::PlaneFrame frame = geom::make_plane_frame(plane).value();
+
+  const geom::Point3d corners[4] = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0},
+                                    {0.0, 1.0, 0.0}};
+  geom::VertexId vertices[4];
+  for (int i = 0; i < 4; ++i) vertices[i] = editor.add_vertex(corners[i], 0.0).value();
+
+  const std::uint32_t surface = editor.add_surface(plane);
+
+  // One line curve and one edge per side, each stored from its lower-index
+  // corner to the next one around the square.
+  geom::EdgeId edges[4];
+  for (int i = 0; i < 4; ++i) {
+    const geom::Point3d& from = corners[i];
+    const geom::Point3d& to = corners[(i + 1) % 4];
+    const geom::Vec3d direction{to[0] - from[0], to[1] - from[1], to[2] - from[2]};
+    const std::uint32_t curve = editor.add_curve(geom::LineCurve3{from, direction});
+    edges[i] = editor.add_edge(vertices[i], vertices[(i + 1) % 4], curve, 0.0, 1.0, 0.0).value();
+  }
+
+  // Pcurves follow the edges from v0 to v1, never the coedge direction.
+  std::uint32_t pcurves[4];
+  for (int i = 0; i < 4; ++i) {
+    const geom::Point2d from = geom::plane_frame_to_2d(frame, corners[i]);
+    const geom::Point2d to = geom::plane_frame_to_2d(frame, corners[(i + 1) % 4]);
+    if (non_finite_pcurve && i == 1) {
+      const double nan = std::numeric_limits<double>::quiet_NaN();
+      pcurves[i] = editor.add_pcurve(geom::Pcurve2d{from, geom::Point2d{nan, to[1]}});
+    } else {
+      pcurves[i] = editor.add_pcurve(geom::Pcurve2d{from, to});
+    }
+  }
+
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  std::array<geom::CoedgeSpec, 4> coedges{};
+  if (reversed_loop) {
+    // A -> D -> C -> B, i.e. the same square traversed backwards.
+    coedges[0] = geom::CoedgeSpec{edges[3], true, pcurves[3], 0.0};
+    coedges[1] = geom::CoedgeSpec{edges[2], true, pcurves[2], 0.0};
+    coedges[2] = geom::CoedgeSpec{edges[1], true, pcurves[1], 0.0};
+    coedges[3] = geom::CoedgeSpec{edges[0], true, pcurves[0], 0.0};
+  } else {
+    coedges[0] = geom::CoedgeSpec{edges[0], false, pcurves[0], 0.0};
+    coedges[1] = geom::CoedgeSpec{edges[1], false, pcurves[1], 0.0};
+    coedges[2] = geom::CoedgeSpec{edges[2], false, pcurves[2], 0.0};
+    coedges[3] = geom::CoedgeSpec{edges[3], false, pcurves[3], 0.0};
+  }
+  editor.add_loop(face, coedges, true).value();
+  return PcurveQuad{editor.brep(), face, frame};
+}
+
+}  // namespace
+
+TEST_CASE("box faces expose four uv corners") {
+  const auto box = geom::make_box(geom::Point3d{-1.0, -1.0, -1.0}, geom::Point3d{1.0, 1.0, 1.0},
+                                  kTolerance);
+  REQUIRE(box.has_value());
+  const geom::Brep& brep = box.value();
+  REQUIRE(brep.face_count() == 6u);
+  const geom::FaceId first_face = brep.face_ids().front();
+  const auto loops = geom::face_loops_uv(brep, first_face, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  CHECK(loops.value()[0].outer);
+  CHECK(loops.value()[0].points.size() == 4u);
+
+  for (const geom::FaceId id : brep.face_ids()) {
+    const auto face_loops = geom::face_loops_uv(brep, id, kTolerance);
+    REQUIRE(face_loops.has_value());
+    REQUIRE(face_loops.value().size() == 1u);
+    CHECK(face_loops.value()[0].outer);
+    CHECK(face_loops.value()[0].points.size() == 4u);
+  }
+}
+
+TEST_CASE("box uv loops map back to the box corners") {
+  const auto box = geom::make_box(geom::Point3d{-1.0, -1.0, -1.0}, geom::Point3d{1.0, 1.0, 1.0},
+                                  kTolerance);
+  REQUIRE(box.has_value());
+  const geom::Brep& brep = box.value();
+  for (const geom::FaceId id : brep.face_ids()) {
+    const geom::Face& face = brep.face(id);
+    const auto& surface = brep.geometry().surfaces[face.surface];
+    const auto* plane = std::get_if<geom::Plane3>(&surface);
+    REQUIRE(plane != nullptr);
+    const geom::PlaneFrame frame = geom::make_plane_frame(*plane).value();
+
+    const auto loops = geom::face_loops_uv(brep, id, kTolerance);
+    REQUIRE(loops.has_value());
+    REQUIRE(loops.value().size() == 1u);
+    REQUIRE(loops.value()[0].points.size() == 4u);
+
+    std::array<geom::Point3d, 4> corners{};
+    for (std::size_t i = 0; i < loops.value()[0].points.size(); ++i) {
+      const geom::Point3d point = geom::plane_frame_to_3d(frame, loops.value()[0].points[i]);
+      for (int axis = 0; axis < 3; ++axis) {
+        CHECK(std::fabs(point[axis]) == doctest::Approx(1.0));
+      }
+      corners[i] = point;
+    }
+    for (std::size_t i = 0; i < corners.size(); ++i) {
+      for (std::size_t j = i + 1u; j < corners.size(); ++j) {
+        CHECK(geom::norm2(corners[i] - corners[j]) > 1.0);
+      }
+    }
+  }
+}
+
+TEST_CASE("cylinder lateral loop unwraps one full turn of u") {
+  const geom::Vec3d axis{0.0, 0.0, 1.0};
+  const auto cylinder = geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, axis, 2.0, 3.0,
+                                            kTolerance);
+  REQUIRE(cylinder.has_value());
+  const geom::Brep& brep = cylinder.value();
+  const geom::FaceId lateral = face_with_surface<geom::Cylinder3>(brep);
+  REQUIRE_FALSE(lateral.is_null());
+
+  const auto loops = geom::face_loops_uv(brep, lateral, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  const std::vector<geom::Point2d>& points = loops.value()[0].points;
+  REQUIRE(points.size() == 66u);
+
+  double min_u = points[0][0];
+  double max_u = points[0][0];
+  double min_v = points[0][1];
+  double max_v = points[0][1];
+  for (const geom::Point2d& point : points) {
+    min_u = std::min(min_u, point[0]);
+    max_u = std::max(max_u, point[0]);
+    min_v = std::min(min_v, point[1]);
+    max_v = std::max(max_v, point[1]);
+  }
+  CHECK(max_u - min_u == doctest::Approx(kTwoPi));
+  CHECK(max_v - min_v == doctest::Approx(3.0));
+  for (std::size_t i = 0; i + 1u < points.size(); ++i) {
+    CHECK(std::fabs(points[i + 1u][0] - points[i][0]) <= kPi);
+  }
+
+  // Every parameter pair evaluates back onto the cylinder wall.
+  const auto& surface =
+      std::get<geom::Cylinder3>(brep.geometry().surfaces[brep.face(lateral).surface]);
+  for (const geom::Point2d& point : points) {
+    const geom::Point3d point3d = surface.eval(point[0], point[1]);
+    const geom::Vec3d offset = point3d - surface.origin;
+    const double height = geom::dot(offset, surface.axis);
+    const geom::Vec3d radial = offset - surface.axis * height;
+    CHECK(geom::norm2(radial) == doctest::Approx(2.0).epsilon(1e-12));
+    CHECK(height >= -kTolerance);
+    CHECK(height <= 3.0 + kTolerance);
+  }
+}
+
+TEST_CASE("a circular cap edge yields one closed uv ring") {
+  const geom::Vec3d axis{0.0, 0.0, 1.0};
+  const auto cylinder = geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, axis, 2.0, 3.0,
+                                            kTolerance);
+  REQUIRE(cylinder.has_value());
+  const geom::Brep& brep = cylinder.value();
+  const geom::FaceId bottom = cap_facing(brep, axis, true);
+  REQUIRE_FALSE(bottom.is_null());
+
+  const geom::Face& face = brep.face(bottom);
+  const auto& plane = std::get<geom::Plane3>(brep.geometry().surfaces[face.surface]);
+  const geom::PlaneFrame frame = geom::make_plane_frame(plane).value();
+
+  const auto loops = geom::face_loops_uv(brep, bottom, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  CHECK(loops.value()[0].outer);
+  const std::vector<geom::Point2d>& points = loops.value()[0].points;
+  REQUIRE(points.size() == 32u);
+  const bool same_u = points.front()[0] == points.back()[0];
+  const bool same_v = points.front()[1] == points.back()[1];
+  const bool repeated_closing_point = same_u && same_v;
+  CHECK_FALSE(repeated_closing_point);
+
+  for (const geom::Point2d& point : points) {
+    const geom::Point3d point3d = geom::plane_frame_to_3d(frame, point);
+    const geom::Vec3d offset = point3d - geom::Point3d{0.0, 0.0, 0.0};
+    const double height = geom::dot(offset, axis);
+    const geom::Vec3d radial = offset - axis * height;
+    CHECK(std::fabs(height) <= kTolerance);
+    CHECK(geom::norm2(radial) == doctest::Approx(2.0).epsilon(1e-12));
+  }
+}
+
+TEST_CASE("pcurve direction follows the coedge") {
+  const geom::Point3d corners[4] = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 1.0, 0.0},
+                                    {0.0, 1.0, 0.0}};
+  const PcurveQuad forward = make_pcurve_quad(false);
+  const auto forward_loops = geom::face_loops_uv(forward.brep, forward.face, kTolerance);
+  REQUIRE(forward_loops.has_value());
+  REQUIRE(forward_loops.value().size() == 1u);
+  REQUIRE(forward_loops.value()[0].points.size() == 4u);
+  for (std::size_t i = 0; i < 4u; ++i) {
+    const geom::Point2d expected = geom::plane_frame_to_2d(forward.frame, corners[i]);
+    CHECK(forward_loops.value()[0].points[i][0] == doctest::Approx(expected[0]));
+    CHECK(forward_loops.value()[0].points[i][1] == doctest::Approx(expected[1]));
+  }
+
+  const PcurveQuad reversed = make_pcurve_quad(true);
+  const auto reversed_loops = geom::face_loops_uv(reversed.brep, reversed.face, kTolerance);
+  REQUIRE(reversed_loops.has_value());
+  REQUIRE(reversed_loops.value().size() == 1u);
+  REQUIRE(reversed_loops.value()[0].points.size() == 4u);
+  const std::size_t order[4] = {0u, 3u, 2u, 1u};
+  for (std::size_t i = 0; i < 4u; ++i) {
+    const geom::Point2d expected = geom::plane_frame_to_2d(reversed.frame, corners[order[i]]);
+    CHECK(reversed_loops.value()[0].points[i][0] == doctest::Approx(expected[0]));
+    CHECK(reversed_loops.value()[0].points[i][1] == doctest::Approx(expected[1]));
+  }
+}
+
+TEST_CASE("face_loops_uv rejects a dead face and a bad tolerance") {
+  const auto box = geom::make_box(geom::Point3d{-1.0, -1.0, -1.0}, geom::Point3d{1.0, 1.0, 1.0},
+                                  kTolerance);
+  REQUIRE(box.has_value());
+  const geom::Brep& brep = box.value();
+
+  const auto dead = geom::face_loops_uv(brep, geom::FaceId{}, kTolerance);
+  REQUIRE_FALSE(dead.has_value());
+  CHECK(dead.error().code == geom::Errc::invalid_topology);
+  CHECK(std::string_view(dead.error().message).starts_with("face_loops_uv:"));
+
+  const geom::FaceId first_face = brep.face_ids().front();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  const double inf = std::numeric_limits<double>::infinity();
+  for (const double bad : {-1.0, nan, inf}) {
+    const auto result = geom::face_loops_uv(brep, first_face, bad);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == geom::Errc::tolerance_violation);
+    CHECK(std::string_view(result.error().message).starts_with("face_loops_uv:"));
+  }
+}
+
+TEST_CASE("a face without a loop is rejected") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+
+  const auto loops = geom::face_loops_uv(editor.brep(), face, kTolerance);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::invalid_topology);
+  CHECK(std::string_view(loops.error().message).starts_with("face_loops_uv:"));
+}
+
+TEST_CASE("a NURBS surface face is unsupported") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(
+      geom::NurbsSurface(1, 1, {0.0, 0.0, 1.0, 1.0}, {0.0, 0.0, 1.0, 1.0},
+                         {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 1.0, 0.0}},
+                         {1.0, 1.0, 1.0, 1.0}));
+  const geom::VertexId a = editor.add_vertex(geom::Point3d{0.0, 0.0, 0.0}, 0.0).value();
+  const geom::VertexId b = editor.add_vertex(geom::Point3d{1.0, 0.0, 0.0}, 0.0).value();
+  const std::uint32_t curve = editor.add_curve(
+      geom::LineCurve3{geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{1.0, 0.0, 0.0}});
+  const geom::EdgeId ab = editor.add_edge(a, b, curve, 0.0, 1.0, 0.0).value();
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 1> coedges{geom::CoedgeSpec{ab, false, geom::kNoGeometry,
+                                                                 0.0}};
+  editor.add_loop(face, coedges, true).value();
+
+  const auto loops = geom::face_loops_uv(editor.brep(), face, kTolerance);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::unsupported);
+}
+
+TEST_CASE("a non-finite pcurve point is rejected") {
+  const PcurveQuad quad = make_pcurve_quad(false, true);
+  const auto loops = geom::face_loops_uv(quad.brep, quad.face, kTolerance);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::non_finite);
+  CHECK(std::string_view(loops.error().message).starts_with("face_loops_uv:"));
+}
+
+TEST_CASE("an open loop is rejected as not closed") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+  const geom::Point3d a_point{0.0, 0.0, 0.0};
+  const geom::Point3d b_point{1.0, 0.0, 0.0};
+  const std::uint32_t curve =
+      editor.add_curve(geom::LineCurve3{a_point, geom::Vec3d{1.0, 0.0, 0.0}});
+  const geom::VertexId a = editor.add_vertex(a_point, 0.0).value();
+  const geom::VertexId b = editor.add_vertex(b_point, 0.0).value();
+  const geom::EdgeId ab = editor.add_edge(a, b, curve, 0.0, 1.0, 0.0).value();
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 1> coedges{geom::CoedgeSpec{ab, false, geom::kNoGeometry,
+                                                                 0.0}};
+  editor.add_loop(face, coedges, true).value();
+
+  const auto loops = geom::face_loops_uv(editor.brep(), face, kTolerance);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::numeric_failure);
+  CHECK(std::string_view(loops.error().message).starts_with("face_loops_uv: loop is not closed"));
+}
+
+TEST_CASE("a loop that collapses to two points is rejected") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+  const geom::Point3d a_point{0.0, 0.0, 0.0};
+  const geom::Point3d b_point{1.0, 0.0, 0.0};
+  const std::uint32_t curve =
+      editor.add_curve(geom::LineCurve3{a_point, geom::Vec3d{1.0, 0.0, 0.0}});
+  const geom::VertexId a = editor.add_vertex(a_point, 0.0).value();
+  const geom::VertexId b = editor.add_vertex(b_point, 0.0).value();
+  const geom::EdgeId ab = editor.add_edge(a, b, curve, 0.0, 1.0, 0.0).value();
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  // The edge is used once in each direction: the ring is A -> B -> A, which
+  // closes but holds only two distinct points.
+  const std::array<geom::CoedgeSpec, 2> coedges{
+      geom::CoedgeSpec{ab, false, geom::kNoGeometry, 0.0},
+      geom::CoedgeSpec{ab, true, geom::kNoGeometry, 0.0}};
+  editor.add_loop(face, coedges, true).value();
+
+  const auto loops = geom::face_loops_uv(editor.brep(), face, kTolerance);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::invalid_topology);
+  CHECK(std::string_view(loops.error().message).starts_with("face_loops_uv:"));
+}
+
+TEST_CASE("a broken coedge chain is rejected") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+  const std::uint32_t curve =
+      editor.add_curve(geom::LineCurve3{geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{1.0, 0.0, 0.0}});
+  const geom::VertexId a = editor.add_vertex(geom::Point3d{0.0, 0.0, 0.0}, 0.0).value();
+  const geom::VertexId b = editor.add_vertex(geom::Point3d{1.0, 0.0, 0.0}, 0.0).value();
+  const geom::VertexId c = editor.add_vertex(geom::Point3d{10.0, 0.0, 0.0}, 0.0).value();
+  const geom::VertexId d = editor.add_vertex(geom::Point3d{11.0, 0.0, 0.0}, 0.0).value();
+  const geom::EdgeId ab = editor.add_edge(a, b, curve, 0.0, 1.0, 0.0).value();
+  const geom::EdgeId cd = editor.add_edge(c, d, curve, 0.0, 1.0, 0.0).value();
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 2> coedges{
+      geom::CoedgeSpec{ab, false, geom::kNoGeometry, 0.0},
+      geom::CoedgeSpec{cd, false, geom::kNoGeometry, 0.0}};
+  editor.add_loop(face, coedges, true).value();
+
+  const auto loops = geom::face_loops_uv(editor.brep(), face, kTolerance);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::invalid_topology);
+  CHECK(std::string_view(loops.error().message).starts_with("face_loops_uv:"));
+}
+
+TEST_CASE("a sphere seam loop stays finite at the poles") {
+  const auto sphere = geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 2.0, kTolerance);
+  REQUIRE(sphere.has_value());
+  const geom::Brep& brep = sphere.value();
+  const geom::FaceId face = face_with_surface<geom::Sphere3>(brep);
+  REQUIRE_FALSE(face.is_null());
+
+  const auto loops = geom::face_loops_uv(brep, face, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  const std::vector<geom::Point2d>& points = loops.value()[0].points;
+  REQUIRE(points.size() >= 4u);
+
+  const auto& surface =
+      std::get<geom::Sphere3>(brep.geometry().surfaces[brep.face(face).surface]);
+  double min_v = points[0][1];
+  double max_v = points[0][1];
+  for (const geom::Point2d& point : points) {
+    // The projection keeps the previous u at a pole instead of returning NaN.
+    CHECK(std::isfinite(point[0]));
+    CHECK(std::isfinite(point[1]));
+    CHECK(std::fabs(point[0]) <= kPi + kTolerance);
+    CHECK(point[1] >= -0.5 * kPi - kTolerance);
+    CHECK(point[1] <= 0.5 * kPi + kTolerance);
+    min_v = std::min(min_v, point[1]);
+    max_v = std::max(max_v, point[1]);
+
+    const geom::Point3d point3d = surface.eval(point[0], point[1]);
+    CHECK(geom::norm2(point3d - surface.center) == doctest::Approx(2.0).epsilon(1e-12));
+  }
+  // The seam meridian spans both poles.
+  CHECK(max_v - min_v == doctest::Approx(kPi).epsilon(1e-12));
+}
+
+TEST_CASE("a torus seam loop covers both parameter periods") {
+  const double major = 2.0;
+  const double minor = 0.5;
+  const auto torus = geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                                      major, minor, kTolerance);
+  REQUIRE(torus.has_value());
+  const geom::Brep& brep = torus.value();
+  const geom::FaceId face = face_with_surface<geom::Torus3>(brep);
+  REQUIRE_FALSE(face.is_null());
+
+  const auto loops = geom::face_loops_uv(brep, face, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  const std::vector<geom::Point2d>& points = loops.value()[0].points;
+  REQUIRE(points.size() >= 4u);
+
+  double min_u = points[0][0];
+  double max_u = points[0][0];
+  double min_v = points[0][1];
+  double max_v = points[0][1];
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    min_u = std::min(min_u, points[i][0]);
+    max_u = std::max(max_u, points[i][0]);
+    min_v = std::min(min_v, points[i][1]);
+    max_v = std::max(max_v, points[i][1]);
+    if (i + 1u < points.size()) {
+      CHECK(std::fabs(points[i + 1u][0] - points[i][0]) <= kPi);
+      CHECK(std::fabs(points[i + 1u][1] - points[i][1]) <= kPi);
+    }
+  }
+  // Both seam circles are traversed once, so each period appears exactly once.
+  CHECK(max_u - min_u == doctest::Approx(kTwoPi));
+  CHECK(max_v - min_v == doctest::Approx(kTwoPi));
+
+  const auto& surface = std::get<geom::Torus3>(brep.geometry().surfaces[brep.face(face).surface]);
+  const double outer_radius = major + minor;
+  for (const geom::Point2d& point : points) {
+    const geom::Point3d point3d = surface.eval(point[0], point[1]);
+    const geom::Vec3d offset = point3d - surface.center;
+    const double axial = geom::dot(offset, surface.axis);
+    const double x = geom::dot(offset, surface.x_axis);
+    const double radius = geom::norm2(offset - surface.axis * axial);
+    // Each parameter pair must reconstruct a point of one of the two seam
+    // circles the primitive stored: the outer equator (v = 0) or the tube
+    // circle through center + major * x (u = 0).
+    const double u_seam_error = std::max(std::fabs(radius - outer_radius), std::fabs(axial));
+    const double v_seam_error = std::fabs(std::hypot(x - major, axial) - minor);
+    CHECK(std::min(u_seam_error, v_seam_error) <= kTolerance);
+  }
+}
+TEST_CASE("a cone lateral loop that reaches the apex is unsupported") {
+  const auto cone = geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0,
+                                    2.0, kTolerance);
+  REQUIRE(cone.has_value());
+  const geom::Brep& brep = cone.value();
+  const geom::FaceId lateral = face_with_surface<geom::Cone3>(brep);
+  REQUIRE_FALSE(lateral.is_null());
+
+  // The lateral loop runs base circle -> apex -> base circle, and the apex has
+  // no azimuth, so the uv preimage of the loop does not exist.
+  const auto loops = geom::face_loops_uv(brep, lateral, kTolerance);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(loops.error().message).starts_with("face_loops_uv: cone projection"));
+
+  // The flat cap of the same cone still exposes a planar ring.
+  const geom::FaceId cap = cap_facing(brep, geom::Vec3d{0.0, 0.0, 1.0}, true);
+  REQUIRE_FALSE(cap.is_null());
+  const auto cap_loops = geom::face_loops_uv(brep, cap, kTolerance);
+  REQUIRE(cap_loops.has_value());
+  REQUIRE(cap_loops.value().size() == 1u);
+  CHECK(cap_loops.value()[0].outer);
+  CHECK(cap_loops.value()[0].points.size() == 32u);
+}
