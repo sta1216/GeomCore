@@ -372,6 +372,9 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
                  "split_face_curved: face does not start with an outer loop",
                  face.index(), 0u};
   }
+  // Defensive: SolidEditor::commit() already rejects a face with more than one
+  // outer loop, so this branch is only reachable for a corrupt Brep that was
+  // assembled some other way.
   std::size_t outer_loops = 0;
   for (const FaceUvLoop& loop : uv_loops) {
     if (loop.outer) ++outer_loops;
@@ -532,7 +535,10 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
       }
       if (distinct_cuts < 2) {
         // A single free endpoint is a T-junction candidate: it must land in the
-        // interior of a segment of another cut.
+        // interior of a segment of another cut. Two welded endpoints of the SAME
+        // cut cannot reach this branch: a cut whose first and last point are
+        // within snap_radius was classified as a closed loop before endpoint
+        // grouping, so this group holds exactly one endpoint.
         bool have_hit = false;
         double best_distance = 0.0;
         CutInsert best{};
@@ -649,6 +655,28 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     endpoint_index += 2;
   }
 
+  // A sub-tolerance FIRST or LAST segment of an open chain is a snapping
+  // artifact: the rewritten endpoint sits within the tolerance of its
+  // neighbour. Collapse that neighbour onto the endpoint. Interior segments are
+  // never dropped, however short: dropping one would silently disconnect the
+  // chain into two open pieces, and the arrangement would see two free interior
+  // endpoints instead of a cut crossing the face.
+  for (std::size_t c = 0; c < cuts.size(); ++c) {
+    if (cut_closed[c] != 0) continue;
+    std::vector<Point2d>& chain = cut_points[c];
+    while (chain.size() > 2 &&
+           !(std::hypot(chain[1][0] - chain[0][0], chain[1][1] - chain[0][1]) >
+             tolerance)) {
+      chain.erase(chain.begin() + 1);
+    }
+    while (chain.size() > 2 &&
+           !(std::hypot(chain[chain.size() - 2][0] - chain.back()[0],
+                        chain[chain.size() - 2][1] - chain.back()[1]) >
+             tolerance)) {
+      chain.erase(chain.end() - 2);
+    }
+  }
+
   // All boundary loops belong to one source, so their contributions cancel
   // inside a hole: the outer ring winds once and the hole ring winds once the
   // other way. Each cut is its own source.
@@ -671,13 +699,10 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     for (std::size_t i = 0; i + 1 < chain.size(); ++i) {
       const Point2d& a = chain[i];
       const Point2d& b = chain[i + 1];
-      const double length = std::hypot(b[0] - a[0], b[1] - a[1]);
-      // A sub-tolerance segment of an open chain is a snapped degeneracy and is
-      // dropped (brief step 3). Closed loops keep their segments: their size is
-      // governed by the fragment area floor, and dropping them would erase a
-      // small but legitimate feature.
-      if (detail::trim_face_same_xy(a, b) ||
-          (cut_closed[c] == 0 && !(length > tolerance))) {
+      // Sub-tolerance first/last segments were collapsed above; interior short
+      // segments are kept so the chain stays connected. Exact duplicate points
+      // still carry no direction and are skipped.
+      if (detail::trim_face_same_xy(a, b)) {
         continue;
       }
       ++used;
@@ -801,6 +826,11 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
               });
     if (!(area_uv > 0.0)) continue;
 
+    // A fragment suppressed by the area floor (for example a tiny island) does
+    // not remove its cycle from the arrangement: the enclosing fragment keeps
+    // the island outline as a hole, so the emitted parent ring has a hole where
+    // no fragment was emitted. The hole is left in place rather than patched,
+    // because its outline is still an exact piece of the input subdivision.
     const double scale = detail::trim_face_metric_scale(projection, record.rep);
     if (!(area_uv * scale > area_floor)) continue;
 
@@ -853,3 +883,5 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
 
 }  // namespace v1
 }  // namespace geom
+
+

@@ -510,6 +510,60 @@ TEST_CASE("trim_face: a thin frame below the area floor yields no fragments") {
   CHECK(fragments.value().empty());
 }
 
+TEST_CASE("trim_face: an interior sub-tolerance step keeps the cut connected") {
+  const Brep box = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, kTol).value();
+  const FaceId top = plane_face(box, Vec3d{0, 0, 1}, 2.0);
+  REQUIRE_FALSE(top.is_null());
+
+  // The middle step is 1e-9 long, far below the 1e-6 tolerance. Dropping that
+  // segment would leave two disconnected pieces and the cut would not split.
+  const std::vector<FaceCut> cuts{uv_cut(
+      box, top,
+      {Point3d{0, 0.5, 2}, Point3d{0.5, 0.5, 2}, Point3d{0.5 + 1e-9, 0.5, 2},
+       Point3d{2, 0.5, 2}})};
+  const Result<std::vector<CurvedFragment>> fragments =
+      split_face_curved(box, top, cuts, 1e-6);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 2);
+  const double first = fragment_area(fragments.value()[0]);
+  const double second = fragment_area(fragments.value()[1]);
+  CHECK(first + second == doctest::Approx(4.0).epsilon(1e-12));
+  CHECK(std::min(first, second) == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(std::max(first, second) == doctest::Approx(3.0).epsilon(1e-12));
+}
+
+TEST_CASE("trim_face: a fragment's holes are ordered by descending area") {
+  const std::array<Point3d, 4> outer{Point3d{0, 0, 0}, Point3d{4, 0, 0},
+                                     Point3d{4, 4, 0}, Point3d{0, 4, 0}};
+  // Small hole (area 0.25) at (3,3) and large hole (area 1) at (0.25,0.25).
+  // The arrangement discovers the small hole's cycle first, so the area sort is
+  // what puts the large hole first in the emitted fragment.
+  const std::array<Point3d, 4> small{Point3d{3, 3, 0}, Point3d{3, 3.5, 0},
+                                     Point3d{3.5, 3.5, 0}, Point3d{3.5, 3, 0}};
+  const std::array<Point3d, 4> large{Point3d{0.25, 0.25, 0},
+                                     Point3d{0.25, 1.25, 0},
+                                     Point3d{1.25, 1.25, 0},
+                                     Point3d{1.25, 0.25, 0}};
+  const std::vector<std::vector<Point3d>> holes{
+      std::vector<Point3d>(small.begin(), small.end()),
+      std::vector<Point3d>(large.begin(), large.end())};
+  const Brep face = make_planar_face(outer, holes, Vec3d{0, 0, 1}, 0.0);
+  const FaceId id = face.face_ids().front();
+
+  const std::vector<FaceCut> none;
+  const Result<std::vector<CurvedFragment>> fragments =
+      split_face_curved(face, id, none, kTol);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 1);
+  const CurvedFragment& fragment = fragments.value()[0];
+  REQUIRE(fragment.loops_uv.size() == 3);
+  CHECK(ring_area(fragment.loops_uv[1]) ==
+        doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(ring_area(fragment.loops_uv[2]) ==
+        doctest::Approx(0.25).epsilon(1e-12));
+  CHECK(fragment_area(fragment) == doctest::Approx(14.75).epsilon(1e-12));
+}
+
 TEST_CASE("trim_face: invalid input is rejected with a diagnostic") {
   const Brep box = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, kTol).value();
   const FaceId top = plane_face(box, Vec3d{0, 0, 1}, 2.0);
@@ -558,6 +612,16 @@ TEST_CASE("trim_face: the quarter cylinder fixture is a clean solid") {
   const ValidationReport report = validate_topology(solid);
   CHECK_MESSAGE(report.ok(), "quarter cylinder topology is invalid");
   CHECK(solid.face_ids().size() == 5);
+
+  // Self-check: every vertex is either on the axis or exactly on the cylinder
+  // radius, and on one of the two cap planes.
+  for (const VertexId vertex : solid.vertex_ids()) {
+    const Point3d& point = solid.vertex(vertex).point;
+    const double radial = std::hypot(point[0], point[1]);
+    CHECK((radial == 0.0 || std::fabs(radial - radius) <= 1e-12 * radius));
+    CHECK((std::fabs(point[2]) <= 1e-12 * height ||
+           std::fabs(point[2] - height) <= 1e-12 * height));
+  }
 
   const FaceId lateral = test::quarter_cylinder_lateral(solid);
   REQUIRE_FALSE(lateral.is_null());
