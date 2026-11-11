@@ -408,7 +408,7 @@ Algorithm:
 1. Validate: at least one face; every loop has >= 3 points; `loops.size() == loops_uv.size()`; matching sizes; finite points; tolerance finite and > 0.
 2. Split every loop into pieces: a maximal run of segments whose `arc_spans` entries are present and lie on the same circle (center and radius within `tolerance`) becomes one arc piece; every other segment is a straight piece. Piece endpoints are the only vertices.
 3. Weld piece endpoints within `tolerance` (grid with cell size `2 * tolerance`, plus neighbour-cell search). Reject a weld that merges endpoints farther than `tolerance`.
-4. Build each undirected edge key from the welded vertex ids. Every edge must have exactly two uses, and both uses must be the same kind: arcs on the same circle, or straight segments. Otherwise `invalid_topology "assemble_curved_solid: edge is used once"` / `"shared edge curve mismatch"`.
+4. Build each undirected edge key from the welded vertex ids. Every edge must have exactly two uses, and both uses must be the same kind: arcs on the same circle, or straight segments. A closed arc (start vertex == end vertex, e.g. a full rim circle) is legal: its key is `(v, v)` and it must still be used twice. Otherwise `invalid_topology "assemble_curved_solid: edge is used once"` / `"shared edge curve mismatch"`.
 5. Create one edge curve per key in the direction of the first use: an arc becomes a rational quadratic NURBS (`detail/curve_arc.hpp`, spans <= pi/2, weights {1, cos(theta/2), 1}); a straight piece uses `make_polyline_curve({a, b})`.
 6. For each use, sample the edge curve at `n = clamp(ceil(span / (2*acos(1 - min(tolerance, 1e-6)/r))), 32, 4096)` parameters, project the samples with `face_uv_project_point`, unwrap the periodic branch nearest the fragment's uv polyline, and reverse when the use is backwards; this dense pcurve is stored in edge direction `v0 -> v1`.
 7. Deduplicate surfaces by exact `SurfaceGeometry` comparison within `tolerance` (plane normal/offset, cylinder frame/radius, cone, sphere, torus). Reuse the surface id.
@@ -417,11 +417,12 @@ Algorithm:
 
 **Steps**
 
-1. Fixture: build the five faces of `make_quarter_cylinder`, read each with `face_loops_uv` (which now carries `arcs`), and assemble them back into a solid; expect `validate_topology(result).findings.empty()`, exactly 5 faces, `euler_characteristic == 2`, every circular boundary edge stored as a `NurbsCurve`, and `detail::curved_solid_volume(result, tol)` within `1e-9` of the analytic `pi * r^2 * h / 4` (arcs are exact, so the sampled 16-gon is no longer the reference).
-2. Add a mismatch test: two faces sharing an edge with different polylines -> `invalid_topology`, message contains `"polyline mismatch"`.
-3. Add a single-use edge test -> `"edge is used once"`.
-4. RED; implement; Debug/Release.
-5. Commit: `feat(m3b2): assemble curved fragments into a Brep`.
+1. Exact-arc test: build `make_cylinder(2, 3)`, read its three faces with `face_loops_uv` (the lateral face is a full-period rectangle, the caps carry circular provenance), and assemble them back into a solid; expect `validate_topology(result).findings.empty()`, exactly 3 faces, `euler_characteristic == 2`, both rim edges stored as `NurbsCurve`, every pcurve well-formed and closed, and `detail::curved_solid_volume(result, tol)` within `1e-9` of `pi * r^2 * h` (arcs are exact).
+2. Chordal test: assemble the five faces of `make_quarter_cylinder` (its 16-chord `LineCurve3` arcs carry no provenance, so every boundary piece is straight); expect a valid solid and volume within `1e-9` of the prism value `h * (n / 2) * r^2 * sin(pi / (2n))`, `n = 16`.
+3. Add a mismatch test: two faces sharing an edge with incompatible curves (arc vs chordal polyline, or two different circles) -> `invalid_topology`, message contains `"curve mismatch"`.
+4. Add a single-use edge test -> `"edge is used once"`.
+5. RED; implement; Debug/Release.
+6. Commit: `feat(m3b2): assemble curved fragments into a Brep`.
 
 ## Task 6: Split a solid by a plane
 
