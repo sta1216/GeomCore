@@ -84,6 +84,98 @@ inline int curved_volume_subdivision_level(double max_edge) noexcept {
 // fixed point of the solid: a closed shell has zero normal flux, so this is an
 // exact change of origin, but it keeps a solid placed far from the world origin
 // from losing its volume to cancellation between the large face contributions.
+// Signed area of one face loop using Green's theorem, with exact circular-arc
+// segments when the provenance is available. `frame` is the face's parameter
+// frame; `shift` keeps the sums well conditioned for large parameters.
+inline double curved_volume_arc_term(const Point2d& a, const Point2d& b,
+                                     const Point2d& center, double radius, double turn) {
+  const double ax = a[0] - center[0];
+  const double ay = a[1] - center[1];
+  const double bx = b[0] - center[0];
+  const double by = b[1] - center[1];
+  const double angle_a = std::atan2(ay, ax);
+  const double angle_b = std::atan2(by, bx);
+  double delta = angle_b - angle_a;
+  if (turn > 0.0) {
+    while (delta <= 0.0) delta += 2.0 * kFaceUvPi;
+  } else {
+    while (delta >= 0.0) delta -= 2.0 * kFaceUvPi;
+  }
+  return 0.5 * (radius * radius * delta +
+                radius * (center[0] * (std::sin(angle_b) - std::sin(angle_a)) -
+                          center[1] * (std::cos(angle_b) - std::cos(angle_a))));
+}
+
+inline bool curved_volume_same_circle(const FaceUvArcRef& a, const FaceUvArcRef& b,
+                                      double tolerance) {
+  const double slack = std::max(tolerance, 1e-12 * std::max(a.circle.radius, 1.0));
+  const double center_distance = std::hypot(
+      a.circle.center[0] - b.circle.center[0], a.circle.center[1] - b.circle.center[1],
+      a.circle.center[2] - b.circle.center[2]);
+  return center_distance <= slack && std::fabs(a.circle.radius - b.circle.radius) <= slack;
+}
+
+// Exact signed area of a planar face's loops in parameter space. Circle arcs
+// whose plane is parallel to the face plane contribute their circular-segment
+// area; everything else is a straight chord. This is what makes a cylinder cap
+// integrate to pi*r^2 rather than to the 32-gon polygon.
+inline Result<double> curved_volume_planar_area(const std::vector<FaceUvLoop>& loops,
+                                                const PlaneFrame& frame, double tolerance) {
+  const Point2d shift = loops.front().points.front();
+  double area = 0.0;
+  for (const FaceUvLoop& loop : loops) {
+    const std::size_t count = loop.points.size();
+    double twice_area = 0.0;
+    for (std::size_t i = 0; i < count; ++i) {
+      const Point2d& a = loop.points[i];
+      const Point2d& b = loop.points[(i + 1) % count];
+      twice_area += (a[0] - shift[0]) * (b[1] - shift[1]) -
+                    (b[0] - shift[0]) * (a[1] - shift[1]);
+    }
+    const double turn = twice_area >= 0.0 ? 1.0 : -1.0;
+    for (std::size_t i = 0; i < count; ++i) {
+      const std::size_t next = (i + 1) % count;
+      const Point2d& a = loop.points[i];
+      const Point2d& b = loop.points[next];
+      bool arc = false;
+      double radius = 0.0;
+      Point2d center{0.0, 0.0};
+      if (loop.arcs.size() == count && loop.arcs[i].has_value() &&
+          loop.arcs[next].has_value() &&
+          curved_volume_same_circle(*loop.arcs[i], *loop.arcs[next], tolerance)) {
+        const CircleCurve3& circle = loop.arcs[i]->circle;
+        const Vec3d circle_normal = cross(circle.x_axis, circle.y_axis);
+        const double circle_normal_length =
+            std::hypot(circle_normal[0], circle_normal[1], circle_normal[2]);
+        if (circle_normal_length > 0.0) {
+          const double alignment =
+              std::fabs(dot(circle_normal, frame.normal)) / circle_normal_length;
+          const double plane_distance =
+              std::fabs(dot(circle.center - frame.origin, frame.normal));
+          const double slack =
+              std::max(tolerance, 1e-12 * std::max(circle.radius, 1.0));
+          if (alignment >= 1.0 - 1e-12 && plane_distance <= slack) {
+            const Vec3d offset = circle.center - frame.origin;
+            center[0] = dot(offset, frame.u) - shift[0];
+            center[1] = dot(offset, frame.v) - shift[1];
+            radius = circle.radius;
+            arc = true;
+          }
+        }
+      }
+      if (arc) {
+        area += curved_volume_arc_term(Point2d{a[0] - shift[0], a[1] - shift[1]},
+                                       Point2d{b[0] - shift[0], b[1] - shift[1]}, center,
+                                       radius, turn);
+      } else {
+        area += 0.5 * ((a[0] - shift[0]) * (b[1] - shift[1]) -
+                       (b[0] - shift[0]) * (a[1] - shift[1]));
+      }
+    }
+  }
+  return area;
+}
+
 inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, double tolerance) {
   if (!std::isfinite(tolerance) || tolerance <= 0.0) {
     return Error{Errc::tolerance_violation,
@@ -157,6 +249,33 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
                      face_id.index(), 0u};
       }
 
+      const SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
+      const bool planar = std::holds_alternative<Plane3>(surface);
+      if (planar) {
+        // Planar faces have a constant divergence integrand, so only the exact
+        // (arc-aware) area is needed; skip the chord triangulation entirely.
+        const Result<FaceUvProjection> projection =
+            face_uv_projection(brep, face, tolerance);
+        if (!projection.has_value()) return projection.error();
+        const Result<double> area =
+            curved_volume_planar_area(loops, projection.value().frame, tolerance);
+        if (!area.has_value()) return area.error();
+        const Point2d& first = loops[outer_index].points.front();
+        const Result<SurfacePoint> sample = surface_eval(surface, first[0], first[1]);
+        if (!sample.has_value()) return sample.error();
+        if (!has_reference) {
+          reference = sample.value().p;
+          has_reference = true;
+        }
+        const Vec3d normal = cross(sample.value().du, sample.value().dv);
+        const Vec3d position{sample.value().p[0] - reference[0],
+                             sample.value().p[1] - reference[1],
+                             sample.value().p[2] - reference[2]};
+        const double face_volume = area.value() * dot(position, normal) / 3.0;
+        total += face.reversed ? -face_volume : face_volume;
+        continue;
+      }
+
       Polygon2d polygon;
       polygon.ring_starts.push_back(0u);
       const auto append_ring = [&polygon](const FaceUvLoop& loop) {
@@ -184,8 +303,6 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
                      face_id.index(), 0u};
       }
 
-      const SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
-      const bool planar = std::holds_alternative<Plane3>(surface);
       double face_volume = 0.0;
 
       // Integrates the seven-point rule over one uv subtriangle. `area` is the

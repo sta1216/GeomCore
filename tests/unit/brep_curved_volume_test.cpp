@@ -203,17 +203,10 @@ TEST_CASE("curved_solid_volume: cylinder") {
       geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), kTolerance);
   REQUIRE(volume.has_value());
 
-  // The caps are the 32-gon used by face_loops_uv, but the lateral face is
-  // integrated on the exact cylinder. The prescribed quadrature therefore
-  // returns h * (2*pi*r^2 + A) / 3 with A the inscribed 32-gon area.
-  const double n = static_cast<double>(segments);
-  const double cap_area = 0.5 * n * radius * radius * std::sin(kTwoPi / n);
-  const double expected = height * (kTwoPi * radius * radius + cap_area) / 3.0;
-  CHECK(relative_error(volume.value(), expected) <= 1e-9);
-
-  // 32 chords make the sampled solid about 0.21% smaller than the true
-  // cylinder, so the brief's 1e-3 analytic bound is unattainable here.
-  CHECK(relative_error(volume.value(), kPi * radius * radius * height) <= 3e-3);
+  // The caps carry exact circle provenance, so the arc-aware planar area uses
+  // pi*r^2 rather than the 32-gon; the lateral face is integrated on the exact
+  // cylinder. The result must therefore equal the analytic volume.
+  CHECK(relative_error(volume.value(), kPi * radius * radius * height) <= 1e-9);
 }
 
 TEST_CASE("curved_solid_volume: quarter cylinder") {
@@ -263,7 +256,7 @@ TEST_CASE("curved_solid_volume: translated cylinder") {
 
   // Quadrature over the raw uv triangles used to depend on where the solid sat.
   CHECK(relative_error(translated_volume.value(), origin_volume.value()) <= 1e-9);
-  CHECK(relative_error(translated_volume.value(), kPi * radius * radius * height) <= 3e-3);
+  CHECK(relative_error(translated_volume.value(), kPi * radius * radius * height) <= 1e-9);
 }
 
 TEST_CASE("curved_solid_volume: box far from the origin") {
