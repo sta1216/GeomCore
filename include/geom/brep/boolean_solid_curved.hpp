@@ -20,7 +20,13 @@
 // are shared with `split_solid.hpp` (they live in `detail` there and are
 // included, not modified). A cut that crosses the periodic seam of a cylindrical
 // face is placed so that its ends land on the seam edges (u = 0 and u = 2 pi),
-// which is what lets a closed rim cut the full lateral face.
+// which is what lets a closed rim cut the full lateral face. Cuts are clipped to
+// both faces of the pair, and where two cuts of the same face meet at a boundary
+// edge the shared corner is recomputed as the exact circle/plane crossing (a
+// uv-scaled junction tolerance decides when two ends meet, an endpoint that stays
+// 1e-2 inside the face is still rejected). Healing only rewrites runs whose
+// samples lie on the circle: a straight clipped chord between two on-circle
+// vertices stays a chord, and a run may wrap the end of a ring.
 //
 // Classification is two-sided, mirroring `detail::solid_boolean_classify_face`
 // in `boolean_solid.hpp`: a fragment is kept when the membership rule differs on
@@ -914,11 +920,16 @@ inline bool curved_boolean_rebase_closed_chain(std::vector<Point2d>& chain, cons
 
 // Finds the point where the 3D segment p0 -> p1 leaves the trimmed region of a
 // face: a boundary arc contributes its exact circle crossing, a straight
-// boundary edge a segment-to-segment contact. The crossing nearest the middle
-// of the segment wins, so a chain vertex that grazes the boundary is treated as
-// a single crossing.
+// boundary edge a segment-to-segment contact. When the cut lies on a known
+// circle, a straight boundary edge is intersected with that circle exactly: the
+// chord between two samples lands inside the circle by the sagitta, which is far
+// above the assembly weld and would leave the two faces' rims subdivided
+// differently. The crossing nearest the middle of the segment wins, so a chain
+// vertex that grazes the boundary is treated as a single crossing.
 inline Result<Point3d> curved_boolean_boundary_crossing(const CurvedBooleanFaceInfo& face,
                                                         const Point3d& p0, const Point3d& p1,
+                                                        const CircleCurve3* curve,
+                                                        const Point3d* prefer,
                                                         double tolerance) {
   Point3d best;
   double best_score = std::numeric_limits<double>::infinity();
@@ -926,10 +937,15 @@ inline Result<Point3d> curved_boolean_boundary_crossing(const CurvedBooleanFaceI
   const auto consider = [&](const Point3d& point) {
     const Vec3d span = p1 - p0;
     const double length2 = dot(span, span);
-    double s = 0.5;
-    if (length2 > 0.0) s = dot(point - p0, span) / length2;
-    if (s < -1e-9 || s > 1.0 + 1e-9) return;
-    const double score = std::abs(s - 0.5);
+    double score = 0.5;
+    if (prefer != nullptr) {
+      const Vec3d gap = point - *prefer;
+      const double distance = std::sqrt(dot(gap, gap));
+      if (distance > 1e-4 * (1.0 + std::sqrt(length2))) return;
+      score = distance;
+    } else {
+      if (length2 > 0.0) score = std::abs(dot(point - p0, span) / length2 - 0.5);
+    }
     if (score < best_score) {
       best_score = score;
       best = point;
@@ -956,6 +972,38 @@ inline Result<Point3d> curved_boolean_boundary_crossing(const CurvedBooleanFaceI
       const Result<Point3d> begin = face_uv_eval(face.projection, loop.points[i]);
       const Result<Point3d> end = face_uv_eval(face.projection, loop.points[next]);
       if (!begin.has_value() || !end.has_value()) continue;
+      if (curve != nullptr) {
+        const Vec3d normal = [&]() {
+          const Vec3d raw = cross(curve->x_axis, curve->y_axis);
+          const double length = std::sqrt(dot(raw, raw));
+          if (!(length > 0.0)) return raw;
+          return Vec3d{raw[0] / length, raw[1] / length, raw[2] / length};
+        }();
+        const auto in_plane = [&](const Point3d& point) {
+          const double offset = dot(point - curve->center, normal);
+          return Point3d{point[0] - normal[0] * offset, point[1] - normal[1] * offset,
+                         point[2] - normal[2] * offset};
+        };
+        const Point3d plane_begin = in_plane(begin.value());
+        const Point3d plane_end = in_plane(end.value());
+        const Vec3d edge = plane_end - plane_begin;
+        const Vec3d offset = plane_begin - curve->center;
+        const double a = dot(edge, edge);
+        if (a > 1e-30) {
+          const double b = 2.0 * dot(offset, edge);
+          const double c = dot(offset, offset) - curve->radius * curve->radius;
+          const double discriminant = b * b - 4.0 * a * c;
+          if (discriminant >= 0.0) {
+            const double root = std::sqrt(discriminant);
+            for (const double t : {(-b - root) / (2.0 * a), (-b + root) / (2.0 * a)}) {
+              if (t < -1e-12 || t > 1.0 + 1e-12) continue;
+              consider(Point3d{plane_begin[0] + edge[0] * t, plane_begin[1] + edge[1] * t,
+                               plane_begin[2] + edge[2] * t});
+            }
+          }
+        }
+        continue;
+      }
       const Vec3d cut = p1 - p0;
       const Vec3d edge = end.value() - begin.value();
       const Vec3d offset = p0 - begin.value();
@@ -995,7 +1043,7 @@ inline Result<Point3d> curved_boolean_boundary_crossing(const CurvedBooleanFaceI
 // vertex.
 inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
     const CurvedBooleanFaceInfo& face, const std::vector<Point2d>& chain,
-    const CurvedBooleanFaceInfo& other, double tolerance) {
+    const CurvedBooleanFaceInfo& other, const CircleCurve3* curve, double tolerance) {
   const std::size_t count = chain.size();
   if (count < 2) return {};
   std::vector<std::vector<Point2d>> loops;
@@ -1030,10 +1078,11 @@ inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
     inside[i] = own && foreign;
     if (!inside[i]) all_inside = false;
   }
-  if (all_inside) return {chain};
-
-  std::vector<Point2d> clipped;
   std::vector<std::vector<Point2d>> pieces;
+  if (all_inside) {
+    pieces.push_back(chain);
+  } else {
+  std::vector<Point2d> clipped;
   const auto flush = [&]() {
     if (clipped.size() >= 2) pieces.push_back(std::move(clipped));
     clipped.clear();
@@ -1048,13 +1097,13 @@ inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
   };
   const auto crossing = [&](std::size_t from, std::size_t to) {
     const Result<Point3d> hit =
-        curved_boolean_boundary_crossing(face, points[from], points[to], tolerance);
+        curved_boolean_boundary_crossing(face, points[from], points[to], curve, nullptr, tolerance);
     if (hit.has_value()) {
       const Result<Point2d> uv = face_uv_project(face.projection, hit.value(), chain[from][0], true);
       if (uv.has_value()) return uv.value();
     }
     const Result<Point3d> other_hit =
-        curved_boolean_boundary_crossing(other, points[from], points[to], tolerance);
+        curved_boolean_boundary_crossing(other, points[from], points[to], curve, nullptr, tolerance);
     if (other_hit.has_value()) {
       const Result<Point2d> uv = face_uv_project(face.projection, other_hit.value(), chain[from][0], true);
       if (uv.has_value()) return uv.value();
@@ -1085,6 +1134,59 @@ inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
     }
   }
   flush();
+  }
+  // The intersector traces within the surfaces' parameter rectangles, so an end
+  // of the clipped chain can sit a few micro-units inside the true boundary
+  // crossing. When the cut lies on a known circle, both faces snap their open
+  // ends onto the exact circle-boundary crossing: otherwise one face heals its
+  // rim into an arc while the other keeps a chord, and the assembler cannot pair
+  // the two subdivisions.
+  const double diagonal_u = face.u[1] - face.u[0];
+  const double diagonal_v = face.v[1] - face.v[0];
+  const double junction_tol =
+      std::max(64.0 * tolerance, 1e-5 * std::sqrt(diagonal_u * diagonal_u + diagonal_v * diagonal_v));
+  for (std::vector<Point2d>& piece : pieces) {
+    if (piece.size() < 2) continue;
+    for (const int end : {0, 1}) {
+      const std::size_t index = end == 0 ? 0 : piece.size() - 1;
+      const std::size_t neighbor = end == 0 ? 1 : piece.size() - 2;
+      const Result<Point3d> tip = face_uv_eval(face.projection, piece[index]);
+      const Result<Point3d> next = face_uv_eval(face.projection, piece[neighbor]);
+      if (!tip.has_value() || !next.has_value()) continue;
+      Result<Point3d> hit = curved_boolean_boundary_crossing(face, next.value(), tip.value(),
+                                                             curve, &tip.value(), tolerance);
+      if (!hit.has_value()) {
+        hit = curved_boolean_boundary_crossing(other, next.value(), tip.value(), curve,
+                                               &tip.value(), tolerance);
+      }
+      if (!hit.has_value()) continue;
+      const Vec3d gap = hit.value() - tip.value();
+      if (!(std::sqrt(dot(gap, gap)) <= junction_tol)) continue;
+      const Result<Point2d> projected =
+          face_uv_project(face.projection, hit.value(), piece[index][0], true);
+      if (projected.has_value()) piece[index] = projected.value();
+    }
+  }
+  // The intersector and `face_uv_project` report a periodic coordinate in
+  // (-pi, pi], while the face's own parameter window is [u_lo, u_lo + 2*pi]. A
+  // chain that reaches the splitter with u below u_lo reads as "outside the
+  // face" there, so the splitter trims its end and tears the ring it should
+  // close. Wrapping every sample into the window and splitting at the seam keeps
+  // each piece inside the window with its ends exactly on the seam edges.
+  if (face.projection.periodic_u()) {
+    const double base = face.u[0];
+    std::vector<std::vector<Point2d>> windowed;
+    windowed.reserve(pieces.size());
+    for (const std::vector<Point2d>& piece : pieces) {
+      if (piece.size() < 2) continue;
+      std::vector<Point2d> wrapped = piece;
+      for (Point2d& uv : wrapped) uv[0] = curved_boolean_wrap_periodic(uv[0], base);
+      for (std::vector<Point2d>& run : curved_boolean_split_at_seam(wrapped, base, tolerance)) {
+        windowed.push_back(std::move(run));
+      }
+    }
+    pieces.swap(windowed);
+  }
   return pieces;
 }
 
@@ -1352,6 +1454,64 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
     infos_b.push_back(info.value());
   }
 
+  // A curved fragment whose result interior lies on the side its own surface
+  // normal points to must be emitted with a flipped normal, and this driver has
+  // no reparameterization for a curved surface (see the harvest lambda below).
+  // Decide that from the operation and the operand bounds before any cut work:
+  // such a fragment is discarded anyway, and a cut that cannot be traced would
+  // otherwise mask the real limitation with a numeric failure.
+  {
+    const auto operand_bounds =
+        [](const std::vector<detail::CurvedBooleanFaceInfo>& infos) {
+          detail::CurvedBooleanBounds bounds{};
+          bool valid = false;
+          for (const detail::CurvedBooleanFaceInfo& info : infos) {
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+              if (!valid || info.bounds.lo[axis] < bounds.lo[axis]) {
+                bounds.lo[axis] = info.bounds.lo[axis];
+              }
+              if (!valid || info.bounds.hi[axis] > bounds.hi[axis]) {
+                bounds.hi[axis] = info.bounds.hi[axis];
+              }
+            }
+            valid = true;
+          }
+          return bounds;
+        };
+    const detail::CurvedBooleanBounds bounds_a = operand_bounds(infos_a);
+    const detail::CurvedBooleanBounds bounds_b = operand_bounds(infos_b);
+    if (detail::curved_boolean_bounds_overlap(bounds_a, bounds_b, tolerance)) {
+      const auto flipped_face =
+          [op](const Brep& operand,
+               const std::vector<detail::CurvedBooleanFaceInfo>& infos,
+               bool from_a) -> std::optional<std::uint32_t> {
+        for (const detail::CurvedBooleanFaceInfo& info : infos) {
+          if (std::holds_alternative<Plane3>(*info.surface)) continue;
+          const bool reversed = operand.face(info.id).reversed;
+          for (const bool other_in : {false, true}) {
+            const bool keep_plus =
+                from_a ? detail::solid_boolean_member(false, other_in, op)
+                       : detail::solid_boolean_member(other_in, false, op);
+            const bool keep_minus =
+                from_a ? detail::solid_boolean_member(true, other_in, op)
+                       : detail::solid_boolean_member(other_in, true, op);
+            if (keep_plus == keep_minus) continue;
+            if (reversed == keep_plus) continue;
+            return static_cast<std::uint32_t>(info.id.index());
+          }
+        }
+        return std::nullopt;
+      };
+      std::optional<std::uint32_t> flipped = flipped_face(a, infos_a, true);
+      if (!flipped.has_value()) flipped = flipped_face(b, infos_b, false);
+      if (flipped.has_value()) {
+        return Error{Errc::unsupported,
+                     "boolean_solid_curved: flipped curved fragments are not supported yet",
+                     flipped.value(), 0u};
+      }
+    }
+  }
+
   // Membership is decided against a triangulated copy of the other operand.
   const Result<TriMesh> mesh_a = detail::curved_boolean_solid_mesh(a, infos_a, tolerance);
   if (!mesh_a.has_value()) return mesh_a.error();
@@ -1431,8 +1591,10 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
       report.max_cut_residual = std::max(report.max_cut_residual, intersected.value().max_residual);
 
       CircleCurve3 circle;
+      bool has_circle = false;
       if (detail::curved_boolean_pair_circle(*face_a.surface, face_a.projection.frame,
                                              *face_b.surface, face_b.projection.frame, circle)) {
+        has_circle = true;
         circles_a[ia].push_back(circle);
         circles_b[ib].push_back(circle);
       }
@@ -1459,16 +1621,16 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
           }
         }
         for (std::vector<Point2d>& chain : chains_a) {
-          for (std::vector<Point2d>& piece :
-               detail::curved_boolean_clip_pair(face_a, chain, face_b, tolerance)) {
+          for (std::vector<Point2d>& piece : detail::curved_boolean_clip_pair(
+                   face_a, chain, face_b, has_circle ? &circle : nullptr, tolerance)) {
             if (detail::curved_boolean_push_cut(cuts_a[ia], std::move(piece), tolerance)) {
               ++report.cuts;
             }
           }
         }
         for (std::vector<Point2d>& chain : chains_b) {
-          for (std::vector<Point2d>& piece :
-               detail::curved_boolean_clip_pair(face_b, chain, face_a, tolerance)) {
+          for (std::vector<Point2d>& piece : detail::curved_boolean_clip_pair(
+                   face_b, chain, face_a, has_circle ? &circle : nullptr, tolerance)) {
             if (detail::curved_boolean_push_cut(cuts_b[ib], std::move(piece), tolerance)) {
               ++report.cuts;
             }
@@ -1662,3 +1824,4 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
 
 }  // namespace v1
 }  // namespace geom
+

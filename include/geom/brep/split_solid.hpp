@@ -57,6 +57,13 @@ namespace detail {
 inline constexpr double kSplitSolidPi = 3.141592653589793238462643383279502884;
 inline constexpr double kSplitSolidTwoPi = 2.0 * kSplitSolidPi;
 
+// Largest angular step accepted between two consecutive vertices of a healed
+// chain (28.6 degrees). Cut circles are sampled at 1.4 to 3.2 degrees, so a
+// segment spanning more than this between two on-circle vertices is a straight
+// chord of the face boundary (for example where a clipped planar fragment meets
+// a side face), not a sample of the circle.
+inline constexpr double kSplitSolidArcStep = 0.5;
+
 inline Vec3d split_solid_unit(const Vec3d& v) noexcept {
   const double length = norm2(v);
   if (!(length > 0.0) || !std::isfinite(length)) return Vec3d{0.0, 0.0, 0.0};
@@ -210,17 +217,23 @@ inline Result<void> split_solid_heal_loop(SplitSolidLoop& loop, const CircleCurv
       std::min(kSplitSolidPi, std::max(1e-12, 2.0 * tolerance / circle.radius));
 
   std::vector<char> on(count, 0);
-  bool all_on = true;
   for (std::size_t i = 0; i < count; ++i) {
     on[i] = split_solid_on_circle(circle, loop.points[i], tolerance) ? 1 : 0;
-    if (!on[i]) all_on = false;
   }
 
   std::vector<char> usable(count, 0);
   std::size_t usable_count = 0;
+  bool all_arc_edges = true;
   for (std::size_t i = 0; i < count; ++i) {
     const std::size_t next = (i + 1) % count;
-    if (loop.spans[i].has_value() || !on[i] || !on[next]) continue;
+    const bool on_edge = on[i] != 0 && on[next] != 0;
+    const double step =
+        on_edge ? split_solid_wrapped_delta(split_solid_circle_angle(circle, loop.points[next]) -
+                                            split_solid_circle_angle(circle, loop.points[i]))
+                : 0.0;
+    if (!on_edge || !(std::abs(step) <= kSplitSolidArcStep)) all_arc_edges = false;
+    if (loop.spans[i].has_value() || !on_edge) continue;
+    if (!(std::abs(step) <= kSplitSolidArcStep)) continue;
     usable[i] = 1;
     ++usable_count;
   }
@@ -284,10 +297,12 @@ inline Result<void> split_solid_heal_loop(SplitSolidLoop& loop, const CircleCurv
     unengaged_on = true;
     break;
   }
-  // A loop that lies entirely on the circle has already been handled above:
-  // handing it to `collapse_circular_chains` would rewrite it into two
-  // half-turn spans and drop any span the pre-pass just engaged.
-  if (unengaged_on && !all_on) {
+  // A loop whose every segment samples the circle has already been handled
+  // above: handing it to `collapse_circular_chains` would rewrite it into two
+  // half-turn spans and drop any span the pre-pass just engaged. A loop that
+  // also contains straight chords still needs the collapse pass for its
+  // remaining short arc runs.
+  if (unengaged_on && !all_arc_edges) {
     CurvedFragment fragment;
     fragment.loops.push_back(loop.points);
     fragment.loops_uv.push_back(loop.uv);

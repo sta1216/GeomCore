@@ -537,11 +537,12 @@ TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a box above its 
   struct Case {
     geom::SolidBooleanOp op;
     double volume;
+    std::size_t faces;
   };
   const Case cases[] = {
-      {geom::SolidBooleanOp::union_, 144.0 + kPi},
-      {geom::SolidBooleanOp::intersection, kPi},
-      {geom::SolidBooleanOp::difference, kPi},
+      {geom::SolidBooleanOp::union_, 144.0 + kPi, 8},
+      {geom::SolidBooleanOp::intersection, kPi, 3},
+      {geom::SolidBooleanOp::difference, kPi, 3},
   };
   for (const Case& item : cases) {
     const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
@@ -552,6 +553,7 @@ TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a box above its 
     const geom::Brep& brep = result.value().brep;
     CHECK(geom::validate_topology(brep).ok());
     CHECK(std::abs(volume_of(brep) - item.volume) <= 1e-6);
+    CHECK(brep.face_ids().size() == item.faces);
     CHECK(result.value().report.kept ==
           static_cast<std::uint32_t>(brep.face_ids().size()));
   }
@@ -580,6 +582,7 @@ TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a vertical slab"
                   "boolean_solid_curved failed: " << message_of(intersect.error()));
   CHECK(geom::validate_topology(intersect.value().brep).ok());
   CHECK(std::abs(volume_of(intersect.value().brep) - intersection) <= 1e-6);
+  CHECK(intersect.value().brep.face_ids().size() == 5);
 
   const geom::Result<geom::CurvedBooleanResult> take_away = geom::boolean_solid_curved(
       cylinder, only_solid(cylinder), slab, only_solid(slab), geom::SolidBooleanOp::difference,
@@ -588,6 +591,7 @@ TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a vertical slab"
                   "boolean_solid_curved failed: " << message_of(take_away.error()));
   CHECK(geom::validate_topology(take_away.value().brep).ok());
   CHECK(std::abs(volume_of(take_away.value().brep) - difference) <= 1e-6);
+  CHECK(take_away.value().brep.face_ids().size() == 4);
 
   const geom::Result<geom::CurvedBooleanResult> united = geom::boolean_solid_curved(
       cylinder, only_solid(cylinder), slab, only_solid(slab), geom::SolidBooleanOp::union_,
@@ -596,6 +600,7 @@ TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a vertical slab"
                   "boolean_solid_curved failed: " << message_of(united.error()));
   CHECK(geom::validate_topology(united.value().brep).ok());
   CHECK(std::abs(volume_of(united.value().brep) - (slab_volume + difference)) <= 1e-6);
+  CHECK(united.value().brep.face_ids().size() == 9);
 }
 
 TEST_CASE("brep: boolean_solid_curved defers a symmetric difference that touches itself") {
@@ -658,5 +663,197 @@ TEST_CASE("brep: boolean_solid_curved classification mesh is watertight") {
   const geom::detail::CurvedBooleanMeshClosure full =
       geom::detail::curved_boolean_mesh_closure(mesh_of(make_test_cylinder(tolerance)));
   CHECK(full.closed());
+}
+
+TEST_CASE("brep: boolean_solid_curved cuts an offset cap box from a full cylinder") {
+  const double tolerance = 1e-9;
+  const geom::Brep cylinder = make_test_cylinder(tolerance);
+  // The box shares the equator: it removes the slab y in [-0.5, 0.5] above
+  // z = 0.5. Its four side planes meet the lateral face along the vertical
+  // lines u = +-30 degrees (y = +-0.5) and u = +-60 degrees (x = 0.5), so the
+  // cut corners are exact circle points shared by both operands.
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{0.5, -0.5, 0.5}, geom::Point3d{2.0, 0.5, 1.5}, tolerance)
+          .value();
+  REQUIRE(geom::validate_topology(cylinder).ok());
+  REQUIRE(geom::validate_topology(box).ok());
+
+  // Shared area of one cap plane and the unit disk {x >= 0.5, |y| <= 0.5}:
+  //   int_{0.5}^{sqrt(3)/2} 1 dx + int_{sqrt(3)/2}^{1} 2 sqrt(1 - x^2) dx
+  // = sqrt(3)/4 - 1/2 + pi/6. The overlap is one unit tall and its volume is
+  // the same number.
+  const double intersection = kPi / 6.0 + std::numbers::sqrt3_v<double> / 4.0 - 0.5;
+  const double difference = 2.0 * kPi - intersection;
+  const double box_volume = 1.5 * 1.0 * 1.0;
+
+  struct Case {
+    geom::SolidBooleanOp op;
+    double volume;
+    std::size_t faces;
+  };
+  const Case cases[] = {
+      {geom::SolidBooleanOp::union_, box_volume + difference, 8},
+      {geom::SolidBooleanOp::intersection, intersection, 7},
+      {geom::SolidBooleanOp::difference, difference, 8},
+  };
+  for (const Case& item : cases) {
+    const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+        cylinder, only_solid(cylinder), box, only_solid(box), item.op,
+        geom::CurvedBooleanOptions{tolerance});
+    REQUIRE_MESSAGE(result.has_value(), "boolean_solid_curved failed: "
+                                            << message_of(result.error()));
+    const geom::Brep& brep = result.value().brep;
+    CHECK(geom::validate_topology(brep).ok());
+    CHECK(std::abs(volume_of(brep) - item.volume) <= 1e-6);
+    CHECK(brep.face_ids().size() == item.faces);
+  }
+}
+
+TEST_CASE("brep: boolean_solid_curved cuts a box across both cylinder caps") {
+  const double tolerance = 1e-9;
+  const geom::Brep cylinder = make_test_cylinder(tolerance);
+  // x in [-0.2, 0.4] reaches through both caps; the box is 1.5 tall from
+  // z = 1.5 to 3, so the overlap is the 0.5 high slab.
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-0.2, -2.0, 1.5}, geom::Point3d{0.4, 2.0, 3.0}, tolerance)
+          .value();
+  REQUIRE(geom::validate_topology(cylinder).ok());
+  REQUIRE(geom::validate_topology(box).ok());
+
+  // Area of the disk strip between x = -0.2 and x = 0.4 is
+  //   int_{-0.2}^{0.4} 2 sqrt(1 - x^2) dx
+  // = [x sqrt(1 - x^2) + asin(x)]_{-0.2}^{0.4}, and the 0.5 height cancels the
+  // two, so the intersection volume equals
+  //   (0.4 sqrt(0.84) + asin(0.4) + 0.2 sqrt(0.96) + asin(0.2)) / 2.
+  const auto cap = [](double x) {
+    return (x * std::sqrt(1.0 - x * x) + std::asin(x)) / 2.0;
+  };
+  const double intersection = cap(0.4) - cap(-0.2);
+  const double difference = 2.0 * kPi - intersection;
+  const double box_volume = 0.6 * 4.0 * 1.5;
+
+  struct Case {
+    geom::SolidBooleanOp op;
+    double volume;
+    std::size_t faces;
+  };
+  const Case cases[] = {
+      {geom::SolidBooleanOp::union_, box_volume + difference, 11},
+      {geom::SolidBooleanOp::intersection, intersection, 6},
+      {geom::SolidBooleanOp::difference, difference, 7},
+  };
+  for (const Case& item : cases) {
+    const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+        cylinder, only_solid(cylinder), box, only_solid(box), item.op,
+        geom::CurvedBooleanOptions{tolerance});
+    REQUIRE_MESSAGE(result.has_value(), "boolean_solid_curved failed: "
+                                            << message_of(result.error()));
+    const geom::Brep& brep = result.value().brep;
+    CHECK(geom::validate_topology(brep).ok());
+    CHECK(std::abs(volume_of(brep) - item.volume) <= 1e-6);
+    CHECK(brep.face_ids().size() == item.faces);
+  }
+}
+
+TEST_CASE("brep: boolean_solid_curved defers a box minus a curved cap operand") {
+  const double tolerance = 1e-9;
+  const geom::Brep quarter = make_exact_quarter_cylinder(1.0, 2.0, tolerance);
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-1.0, -1.0, 1.0}, geom::Point3d{10.0, 10.0, 10.0}, tolerance)
+          .value();
+  REQUIRE(geom::validate_topology(quarter).ok());
+  REQUIRE(geom::validate_topology(box).ok());
+
+  // The kept cavity fragments of the quarter would have to be emitted with the
+  // lateral face flipped. That is deferred, and the driver has to say so before
+  // it starts cutting instead of failing somewhere inside the split.
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      box, only_solid(box), quarter, only_solid(quarter), geom::SolidBooleanOp::difference,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE(!result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) ==
+        "boolean_solid_curved: flipped curved fragments are not supported yet");
+}
+
+TEST_CASE("brep: split_face_curved rejects a cut that ends inside the face") {
+  const double tolerance = 1e-9;
+  const geom::Brep cylinder = make_test_cylinder(tolerance);
+  geom::FaceId lateral{};
+  bool found = false;
+  for (const geom::FaceId id : cylinder.face_ids()) {
+    const geom::SurfaceGeometry& surface =
+        cylinder.geometry().surfaces[cylinder.face(id).surface];
+    if (std::holds_alternative<geom::Cylinder3>(surface)) {
+      lateral = id;
+      found = true;
+    }
+  }
+  REQUIRE(found);
+
+  // The lower end stops 1e-2 short of the v = 0 rim, far beyond the junction
+  // tolerance (about 6.6e-5 in uv); the reconciliation pass must not absorb
+  // that gap.
+  std::vector<geom::FaceCut> cuts(1);
+  cuts[0].uv = {geom::Point2d{1.0, 0.01}, geom::Point2d{1.0, 1.0}};
+  const geom::Result<std::vector<geom::CurvedFragment>> result =
+      geom::split_face_curved(cylinder, lateral, cuts, tolerance);
+  REQUIRE(!result.has_value());
+  CHECK(result.error().code == geom::Errc::numeric_failure);
+  CHECK(message_of(result.error()) ==
+        "split_face_curved: an open cut endpoint is not on the face boundary");
+}
+
+TEST_CASE("brep: collapse_circular_chains heals a rim run beside the cut corner") {
+  const double tolerance = 1e-9;
+  const geom::CircleCurve3 circle{geom::Point3d{0.0, 0.0, 0.5}, geom::Vec3d{1.0, 0.0, 0.0},
+                                  geom::Vec3d{0.0, 1.0, 0.0}, 1.0};
+  const auto at_degrees = [&circle](double degrees) {
+    const double radians = degrees * kPi / 180.0;
+    return circle.center + circle.x_axis * (circle.radius * std::cos(radians)) +
+           circle.y_axis * (circle.radius * std::sin(radians));
+  };
+
+  // The failing rim of the offset-cap fixture: a 30 degree arc sampled every
+  // 1.875 degrees, ending exactly at the cut corner (cos(-30), sin(-30), 0.5)
+  // where the box plane y = -0.5 crosses the circle, then the straight clipped
+  // chords back to the start of the arc.
+  geom::CurvedFragment fragment;
+  std::vector<geom::Point3d>& loop = fragment.loops.emplace_back();
+  for (int step = 0; step <= 16; ++step) {
+    loop.push_back(at_degrees(-60.0 + 1.875 * static_cast<double>(step)));
+  }
+  loop.push_back(geom::Point3d{0.5, -0.5, 0.5});
+  fragment.loops_uv.emplace_back(loop.size(), geom::Point2d{0.0, 0.0});
+  CHECK(std::abs(loop[16][0] - 0.8660254037844386) <= 1e-12);
+  // Copy the corner: the collapse replaces the whole ring vector.
+  const geom::Point3d corner = loop[16];
+
+  const geom::Result<bool> collapsed =
+      geom::detail::collapse_circular_chains(fragment, circle, tolerance);
+  REQUIRE_MESSAGE(collapsed.has_value(), "collapse failed: " << message_of(collapsed.error()));
+  CHECK(collapsed.value());
+
+  // The dense samples collapse into one span whose sweep advances in a single
+  // direction (no backtracking), and the exact corner stays a ring vertex.
+  REQUIRE(fragment.loops[0].size() == 3);
+  REQUIRE(fragment.arc_spans[0].size() == fragment.loops[0].size());
+  std::size_t engaged = fragment.arc_spans[0].size();
+  for (std::size_t i = 0; i < fragment.arc_spans[0].size(); ++i) {
+    if (!fragment.arc_spans[0][i].has_value()) continue;
+    CHECK(engaged == fragment.arc_spans[0].size());
+    engaged = i;
+  }
+  REQUIRE(engaged < fragment.arc_spans[0].size());
+  const double sweep =
+      fragment.arc_spans[0][engaged]->t1 - fragment.arc_spans[0][engaged]->t0;
+  CHECK(std::abs(sweep - kPi / 6.0) <= 1e-9);
+  bool keeps_corner = false;
+  for (const geom::Point3d& point : fragment.loops[0]) {
+    if (std::abs(point[0] - corner[0]) <= 1e-15 && std::abs(point[1] - corner[1]) <= 1e-15) {
+      keeps_corner = true;
+    }
+  }
+  CHECK(keeps_corner);
 }
 

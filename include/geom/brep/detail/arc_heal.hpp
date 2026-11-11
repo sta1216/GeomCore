@@ -34,6 +34,13 @@ namespace arc_heal_detail {
 
 inline constexpr double kArcHealPi = 3.14159265358979323846;
 
+// Largest angular step accepted between two consecutive vertices of a healed
+// chain (28.6 degrees). Cut circles are sampled at 1.4 to 3.2 degrees, so a
+// segment spanning more than this between two on-circle vertices is a straight
+// chord of the face boundary (for example where a clipped planar fragment meets
+// a side face), not a sample of the circle.
+inline constexpr double kArcHealMaxStep = 0.5;
+
 inline double arc_heal_wrap(double delta) noexcept {
   const double turn = 2.0 * kArcHealPi;
   delta = std::fmod(delta, turn);
@@ -114,11 +121,34 @@ inline Result<ArcHealLoop> arc_heal_loop(const std::vector<Point3d>& points,
             std::abs(std::sqrt(dot(in_plane, in_plane)) - circle.radius) <= slack;
   }
 
+  // A run continues along a segment only when that segment samples the circle.
+  // Two vertices can both lie on the circle while the segment joining them is a
+  // straight chord of the face boundary (where a clipped planar fragment meets
+  // a side face, for example); healing such a chord as an arc would bend the
+  // boundary. Sampling is far finer than kArcHealMaxStep, so a longer step
+  // between two on-circle vertices marks a chord.
+  std::vector<bool> arc_edge(size, false);
+  for (std::size_t i = 0; i < size; ++i) {
+    const std::size_t next = (i + 1u) % size;
+    if (!on[i] || !on[next]) continue;
+    const double delta = arc_heal_wrap(arc_heal_angle(circle, points[next]) -
+                                       arc_heal_angle(circle, points[i]));
+    arc_edge[i] = std::abs(delta) <= kArcHealMaxStep;
+  }
+
   std::size_t anchor = size;
   for (std::size_t i = 0; i < size; ++i) {
     if (!on[i]) {
       anchor = i;
       break;
+    }
+  }
+  if (anchor == size) {
+    for (std::size_t i = 0; i < size; ++i) {
+      if (!arc_edge[i]) {
+        anchor = i;
+        break;
+      }
     }
   }
 
@@ -161,11 +191,14 @@ inline Result<ArcHealLoop> arc_heal_loop(const std::vector<Point3d>& points,
   while (index < size) {
     const std::size_t begin = current;
     const bool engaged = begin < spans.size() && spans[begin].has_value();
-    if (on[begin] && !engaged) {
+    if (on[begin] && arc_edge[begin] && !engaged) {
+      // A run may wrap past the end of the ring; the ring has no natural start,
+      // so the walk begins at a chord and must be allowed to close the loop.
       std::size_t length = 1;
-      while (length < size - index) {
+      while (length < size) {
         const std::size_t next = (begin + length) % size;
         if (!on[next]) break;
+        if (!arc_edge[(begin + length - 1u) % size]) break;
         if (next < spans.size() && spans[next].has_value()) break;
         ++length;
       }

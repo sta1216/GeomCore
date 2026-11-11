@@ -743,6 +743,16 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
                  face.index(), 0u};
   }
   const double snap_radius = std::max(tolerance, 1e-12 * extent);
+  // Junction radius for corners where two cuts meet. The intersector traces
+  // every cut over the face's parameter patch and stops where the patch ends,
+  // so a trace can stop short of (or run past) the crossing with another cut by
+  // a fraction of a sample step: measured 2.5e-5 rad on a unit cylinder, about
+  // 4e-6 of the lateral face's uv diagonal. Those two endpoints describe one
+  // geometric corner, so they are reconciled at this radius instead of the exact
+  // weld radius. The constant is a parametrization error, not a model tolerance;
+  // it stays far below a real gap, because a cut that stops 1e-2 short of the
+  // boundary must still be reported as an open endpoint.
+  const double junction_tol = std::max(64.0 * tolerance, 1e-5 * extent);
 
   // Validate cuts and classify them as open or closed.
   std::vector<std::vector<Point2d>> cut_points;
@@ -1007,18 +1017,26 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     detail::TrimFaceSnap snap{};
     Point2d final{};
     std::size_t cut = 0;
+    bool front = false;
   };
   std::vector<Endpoint> endpoints;
   for (std::size_t c = 0; c < cut_points.size(); ++c) {
     if (cut_closed[c] != 0) continue;
-    endpoints.push_back(Endpoint{cut_points[c].front(),
-                                 detail::trim_face_find_snap(
-                                     loops, cut_points[c].front(), snap_radius),
-                                 Point2d{}, c});
-    endpoints.push_back(Endpoint{cut_points[c].back(),
-                                 detail::trim_face_find_snap(
-                                     loops, cut_points[c].back(), snap_radius),
-                                 Point2d{}, c});
+    for (const bool front : {true, false}) {
+      const Point2d& raw = front ? cut_points[c].front() : cut_points[c].back();
+      detail::TrimFaceSnap snap = detail::trim_face_find_snap(loops, raw, junction_tol);
+      // A boundary projection is exact only on a straight boundary segment: the
+      // chord of an arc would pull the vertex off the true circle and the arc
+      // healing would then have to treat the chord as the boundary. An endpoint
+      // that stops just short of an arc boundary keeps its own position and is
+      // reconciled against the other cuts below.
+      if (snap.boundary && !snap.vertex && snap.ring < loop_arcs.size() &&
+          snap.edge < loop_arcs[snap.ring].size() && loop_arcs[snap.ring][snap.edge]) {
+        snap.boundary = false;
+        snap.point = raw;
+      }
+      endpoints.push_back(Endpoint{raw, snap, Point2d{}, c, front});
+    }
   }
   const std::size_t endpoint_count = endpoints.size();
   std::vector<std::size_t> parent(endpoint_count);
@@ -1028,7 +1046,7 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
       const double distance = std::hypot(
           endpoints[i].raw[0] - endpoints[j].raw[0],
           endpoints[i].raw[1] - endpoints[j].raw[1]);
-      if (!(distance <= snap_radius)) continue;
+      if (!(distance <= junction_tol)) continue;
       const std::size_t root_i = detail::trim_face_find_root(parent, i);
       const std::size_t root_j = detail::trim_face_find_root(parent, j);
       if (root_i != root_j) parent[root_j] = root_i;
@@ -1097,7 +1115,7 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
             const double distance =
                 std::hypot(snap.point[0] - hit_point[0],
                            snap.point[1] - hit_point[1]);
-            if (!(distance <= snap_radius)) continue;
+            if (!(distance <= junction_tol)) continue;
             if (have_hit && !(distance < best_distance)) continue;
             have_hit = true;
             best_distance = distance;
@@ -1112,6 +1130,63 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
         }
         final = best.point;
         cut_inserts.push_back(best);
+      } else {
+        // Two open ends meet at a corner that neither trace samples exactly.
+        // Weld them onto the intersection of their end segments: welding onto
+        // either raw point would drag the other chain off its own exact plane
+        // (the vertical cut carries the exact coordinate, the patch-limited arc
+        // trace is the one that stops short), leaving the two faces a trace step
+        // apart when the result is assembled.
+        std::size_t first = endpoint_count;
+        std::size_t second = endpoint_count;
+        double closest = 0.0;
+        for (std::size_t j = 0; j < endpoint_count; ++j) {
+          if (detail::trim_face_find_root(parent, j) != root) continue;
+          for (std::size_t k = j + 1; k < endpoint_count; ++k) {
+            if (detail::trim_face_find_root(parent, k) != root) continue;
+            if (endpoints[j].cut == endpoints[k].cut) continue;
+            const double distance =
+                std::hypot(endpoints[j].raw[0] - endpoints[k].raw[0],
+                           endpoints[j].raw[1] - endpoints[k].raw[1]);
+            if (first == endpoint_count || distance < closest) {
+              closest = distance;
+              first = j;
+              second = k;
+            }
+          }
+        }
+        if (first != endpoint_count) {
+          const Endpoint& lhs = endpoints[first];
+          const Endpoint& rhs = endpoints[second];
+          const auto end_direction = [&cut_points](const Endpoint& endpoint) -> Vec2d {
+            const std::vector<Point2d>& chain = cut_points[endpoint.cut];
+            if (endpoint.front) {
+              return Vec2d{chain[1][0] - chain[0][0], chain[1][1] - chain[0][1]};
+            }
+            const std::size_t last = chain.size() - 1;
+            return Vec2d{chain[last - 1][0] - chain[last][0],
+                         chain[last - 1][1] - chain[last][1]};
+          };
+          const Vec2d lhs_edge = end_direction(lhs);
+          const Vec2d rhs_edge = end_direction(rhs);
+          const double lhs_length = std::hypot(lhs_edge[0], lhs_edge[1]);
+          const double rhs_length = std::hypot(rhs_edge[0], rhs_edge[1]);
+          const double determinant =
+              lhs_edge[0] * rhs_edge[1] - lhs_edge[1] * rhs_edge[0];
+          if (lhs_length > 0.0 && rhs_length > 0.0 &&
+              std::fabs(determinant) > 1e-12 * lhs_length * rhs_length) {
+            const Vec2d delta{rhs.raw[0] - lhs.raw[0], rhs.raw[1] - lhs.raw[1]};
+            const double along_lhs =
+                (delta[0] * rhs_edge[1] - delta[1] * rhs_edge[0]) / determinant;
+            const double along_rhs =
+                (delta[0] * lhs_edge[1] - delta[1] * lhs_edge[0]) / determinant;
+            if (std::fabs(along_lhs) <= 2.0 * junction_tol &&
+                std::fabs(along_rhs) <= 2.0 * junction_tol) {
+              final = Point2d{lhs.raw[0] + along_lhs * lhs_edge[0],
+                              lhs.raw[1] + along_lhs * lhs_edge[1]};
+            }
+          }
+        }
       }
     }
     for (std::size_t j = 0; j < endpoint_count; ++j) {
