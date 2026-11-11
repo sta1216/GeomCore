@@ -43,6 +43,7 @@ set(GEOM_TEST_SOURCES
   unit/brep_face_uv_test.cpp
   unit/brep_curved_volume_test.cpp
   unit/brep_trim_face_test.cpp
+    unit/brep_arc_heal_test.cpp
   unit/brep_assemble_curved_test.cpp
   unit/brep_box_test.cpp
   unit/brep_cylinder_test.cpp
