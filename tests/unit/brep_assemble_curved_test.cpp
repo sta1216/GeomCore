@@ -148,6 +148,30 @@ TEST_CASE("assemble_curved_solid rebuilds a cylinder from its three faces") {
   CHECK(std::abs(volume.value() - kPi * 4.0 * 3.0) <= 1e-9);
 }
 
+TEST_CASE("assemble_curved_solid honors the reversed flag on every face") {
+  const geom::Brep cylinder =
+      geom::make_cylinder({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 2.0, 3.0, kTolerance).value();
+  std::vector<geom::CurvedAssembledFace> faces = fragments_from(cylinder, kTolerance);
+  for (geom::CurvedAssembledFace& face : faces) face.reversed = true;
+
+  const auto result = geom::assemble_curved_solid(faces, kTolerance);
+  REQUIRE(result.has_value());
+  const geom::Brep& solid = result.value();
+  std::size_t reversed = 0;
+  for (const geom::FaceId face_id : solid.face_ids()) {
+    if (solid.face(face_id).reversed) ++reversed;
+  }
+  CHECK(reversed == solid.face_count());
+
+  // Every face carries the flag, so the signed volume is -12*pi and the
+  // positive-volume guard rejects it instead of reporting a wrong result.
+  const auto volume =
+      geom::detail::curved_solid_volume(solid, solid.solid_ids().front(), kTolerance);
+  REQUIRE_FALSE(volume.has_value());
+  CHECK(volume.error().code == geom::Errc::numeric_failure);
+  CHECK(std::string(volume.error().message).find("volume is not positive") != std::string::npos);
+}
+
 TEST_CASE("assemble_curved_solid rebuilds a faceted quarter cylinder") {
   const geom::Brep quarter = geom::test::make_quarter_cylinder(2.0, 3.0, kTolerance);
   const std::vector<geom::CurvedAssembledFace> faces = fragments_from(quarter, kTolerance);
