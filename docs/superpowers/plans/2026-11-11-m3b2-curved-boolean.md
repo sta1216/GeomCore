@@ -318,7 +318,7 @@ Algorithm:
    - top and bottom caps: `Plane3` faces, quarter-disk outer loops (two radii + the same 16-chord arc);
    - side faces at u = 0 and u = pi/2: `Plane3` rectangles;
    - every coedge gets a `Pcurve2d` in its own surface parameters (bottom arc `(t, 0)`, top arc `(t, height)`, side lines `(u, t)`), so the fixture does not depend on Task 3's projection path;
-   - `validate_topology` must be clean and the tessellated volume must be `pi * radius^2 * height / 4` within `1e-6` relative.
+   - `validate_topology` must be clean. The 16-chord arcs make the exact volume `height * (n / 2) * radius^2 * sin(pi / (2n))` with `n = 16`, which is about 0.16% below the analytic `pi * radius^2 * height / 4`; the analytic value is *not* the volume of this B-rep. Trimmed curved faces cannot be tessellated by the M2 `tessellate` (it handles full analytic primitives only), so Task 4b adds the volume query.
    Put the helper in the header only (no CMake entry) so Tasks 4–8 include it.
 2. Test:
 
@@ -340,6 +340,46 @@ TEST_CASE("a lateral cut splits a cylindrical face into two fragments") {
 4. Add a boundary-touching cut test: a cut from one loop edge to the opposite edge splits the face into two fragments, no holes.
 5. RED; implement; Debug/Release.
 6. Commit: `feat(m3b2): split curved faces in parameter space`.
+
+## Task 4b: Volume by parameter-space quadrature
+
+The M2 `tessellate` only meshes full analytic primitives (a trimmed cylinder patch with polyline boundaries fails with `tessellate: cylinder face is missing a cap circle`) and `mass_properties` only integrates untrimmed rectangles. A Boolean result has trimmed curved faces, so both are unavailable for verification. The divergence theorem gives the volume from the face loops alone: `V = (1/3) * sum_faces integral(S . (Su x Sv) du dv)` over the exact uv polygon. The polygon boundary is piecewise linear in uv (pcurves are polylines), so the domain is exact and a degree-5 rule per triangle is accurate for analytic surfaces.
+
+**Files**
+
+- Create: `include/geom/brep/detail/curved_volume.hpp`
+- Create: `tests/unit/brep_curved_volume_test.cpp`
+- Modify: `tests/CMakeLists.txt`
+
+**Interfaces**
+
+```cpp
+namespace geom::v1::detail {
+// Signed volume of one solid, integrated over each face's exact uv polygon.
+// Analytic surfaces only (Plane3, Cylinder3, Cone3, Sphere3, Torus3).
+Result<double> curved_solid_volume(const Brep& brep, SolidId solid, double tolerance);
+}
+```
+
+Algorithm:
+
+1. Reject a null/foreign `SolidId` (`index_out_of_range`), a missing/zero shell, an open shell (`invalid_topology`), `tolerance` not finite or `<= 0` (`tolerance_violation`), and any face whose surface is `NurbsSurface` (`unsupported "curved_solid_volume: NURBS surfaces are not supported"`).
+2. For each face: `face_loops_uv(brep, face, tolerance)`; require one outer loop and build `Polygon2d{outer, holes}` with the returned orientation (outer counter-clockwise, holes clockwise).
+3. `triangulate_polygon2(polygon)`; failure is `degenerate "curved_solid_volume: face triangulation failed"` carrying the face index.
+4. For each triangle with uv vertices `a, b, c`: map a 7-point Dunavant rule (degree 5: barycentric `(1/3,1/3,1/3)` weight `0.225`; the three `(0.05971587,0.47014206,0.47014206)` permutations weight `0.13239415`; the three `(0.79742699,0.10128651,0.10128651)` permutations weight `0.12593918`) to uv, evaluate `surface_eval`, `surface_du`, `surface_dv`, and accumulate `2 * area_uv * w * dot(S, cross(Su, Sv)) / 3`.
+5. Negate a face's contribution when `face.reversed` is set (the loop orientation then follows the reversed normal).
+6. Sum in deterministic face order; require a finite positive total, otherwise `numeric_failure "curved_solid_volume: volume is not finite"` / `"curved_solid_volume: volume is not positive"`.
+
+**Steps**
+
+1. Test `make_box(2, 2, 2)` -> 8 within `1e-12` relative (planar faces take the same quadrature path).
+2. Test `make_cylinder(2.0, 3.0, 1e-9)` -> the 32-gon prism volume `h * (n / 2) * r^2 * sin(2 * pi / n)` with `n` equal to the pcurve sample count used by `face_loops_uv`, within `1e-9` relative; also assert it is within `1e-3` relative of `pi * r^2 * h` (the sampling error).
+3. Test the quarter-cylinder fixture -> `height * (n / 2) * radius^2 * sin(pi / (2n))` with `n = 16` within `1e-9`, and within `2e-3` of `pi * radius^2 * height / 4`.
+4. Error paths: null `SolidId`, empty `Brep`, `tolerance` 0/NaN, and (if constructible without a NURBS face) NURBS rejection.
+5. RED; implement; Debug/Release.
+6. Commit: `feat(m3b2): integrate curved solid volume in parameter space`.
+
+Note for Task 9 docs: trimmed curved faces remain non-tessellatable and `mass_properties` remains limited to untrimmed rectangles; record this as an M3c item. Volume is available through this helper (and is what Task 5/6/8 and the bench use for verification).
 
 ## Task 5: Assemble curved fragments
 
@@ -375,7 +415,7 @@ Algorithm:
 
 **Steps**
 
-1. Fixture: `make_quarter_cylinder` builds five faces via `SolidEditor` (lateral `Cylinder3` patch with polyline boundary, top/bottom quarter disks, two rectangular cut faces). Then split the lateral face with Task 4 and assemble the six fragments back into a solid; expect `validate_topology(result).findings.empty()` and `tessellate` volume within `1e-6` of `pi * r^2 * h / 4`.
+1. Fixture: `make_quarter_cylinder` builds five faces via `SolidEditor` (lateral `Cylinder3` patch with polyline boundary, top/bottom quarter disks, two rectangular cut faces). Then split the lateral face with Task 4 and assemble the six fragments back into a solid; expect `validate_topology(result).findings.empty()` and `detail::curved_solid_volume(result, tol)` within `1e-9` of the fixture's polygonal volume `height * (n / 2) * radius^2 * sin(pi / (2n))` (`n = 16`; the analytic `pi * r^2 * h / 4` is 0.16% away because the B-rep's arcs are chords).
 2. Add a mismatch test: two faces sharing an edge with different polylines -> `invalid_topology`, message contains `"polyline mismatch"`.
 3. Add a single-use edge test -> `"edge is used once"`.
 4. RED; implement; Debug/Release.
@@ -412,8 +452,8 @@ Algorithm:
 
 **Steps**
 
-1. Test the quarter cylinder split at `z = 1`: two solids, volumes `pi/8` and `pi/8` (via `tessellate` + signed tetrahedra), `validate_topology` clean.
-2. Test a box split at `z = 0.5` (all-planar integration path), volumes 4 and 4.
+1. Test the quarter cylinder split at `z = 1`: two solids, `validate_topology` clean, each `detail::curved_solid_volume` equal to half the fixture's polygonal volume within `1e-9` (analytic half is 0.16% away, as documented in Task 4b).
+2. Test a box split at `z = 0.5` (all-planar integration path), volumes 4 and 4 within `1e-12`.
 3. Test tangent plane at `z = 2` (touching the top face) -> `unsupported` with the documented message.
 4. RED; implement; Debug/Release.
 5. Commit: `feat(m3b2): split solids by a plane through trimmed faces`.
@@ -495,7 +535,7 @@ Algorithm:
 
 **Steps**
 
-1. Test quarter-cylinder minus a half-space? Use `split_solid_by_plane` as the reference: `difference` of the quarter cylinder with a box occupying `z >= 1` must equal the lower half within `1e-6` volume and face count.
+1. Test `split_solid_by_plane` as the reference: `difference` of the quarter cylinder with a box occupying `z >= 1` must equal the lower half within `1e-6` relative volume (both sides measured with `detail::curved_solid_volume`) and the same face count.
 2. Test union of two overlapping boxes via the curved driver (all-planar path) and compare volume with `boolean_solid`; assert same volume within `1e-9` and no `validate_topology` findings.
 3. Test NURBS operand -> `unsupported`.
 4. Test cone operand (`make_cone`) -> `unsupported "boolean_solid_curved: cone operands are not supported (apex-touching loops are deferred)"`.
@@ -517,9 +557,9 @@ Algorithm:
 
 **Steps**
 
-1. Bench: a quarter-cylinder and a box with 5000 lateral samples; measure `boolean_solid_curved` union/intersection/difference with `tessellate`-based volume verification. Report min/median/max over 5 runs. Target: median <= 2 s per operation; record FAIL honestly. Exit non-zero on validation failure, not on slowness.
-2. QA corpus in `brep_boolean_curved_test.cpp`: twelve cases covering cylinder-box, sphere-box, torus-box, seam cuts, boundary cuts, tangency rejection, coplanar rejection, NURBS rejection, and cone rejection (documented `unsupported`); each result must be either a validated solid with volume matching an independent tessellation sum within `1e-6` relative, or a diagnosed error.
-3. ADR-0025 records: analytic-only scope, sampled closed edges, no coplanar contact, cone operands deferred (apex-touching loops), single-component result, seam unwrapping, classification-tolerance policy.
+1. Bench: a quarter-cylinder and a box with 5000 lateral samples; measure `boolean_solid_curved` union/intersection/difference with `detail::curved_solid_volume` verification. Report min/median/max over 5 runs. Target: median <= 2 s per operation; record FAIL honestly. Exit non-zero on validation failure, not on slowness.
+2. QA corpus in `brep_boolean_curved_test.cpp`: twelve cases covering cylinder-box, sphere-box, torus-box, seam cuts, boundary cuts, tangency rejection, coplanar rejection, NURBS rejection, and cone rejection (documented `unsupported`); each result must be either a validated solid whose `detail::curved_solid_volume` matches the independently expected volume within `1e-6` relative, or a diagnosed error.
+3. ADR-0025 records: analytic-only scope, sampled closed edges, no coplanar contact, cone operands deferred (apex-touching loops), single-component result, seam unwrapping, classification-tolerance policy, and the fact that trimmed curved faces are not yet tessellatable or accepted by `mass_properties` (volume is available through `detail::curved_solid_volume`; trimmed tessellation and mass properties are M3c work).
 4. Update §16.3 with the M3b-2 status and the measured bench number; leave QA-8 and QA-9 unchanged and do not claim M3b-2 exit until the bench and QA corpus pass.
 5. Full suite Debug/Release, `ctest`, warnings clean.
 
@@ -529,7 +569,8 @@ Algorithm:
 - `face_loops_uv` unrolls periodic seams and samples edges without pcurves.
 - `split_face_curved` produces outer+holes fragments with correct nesting; cuts touching a boundary never create a sliver.
 - `assemble_curved_solid` produces a `validate_topology`-clean `Brep` from curved fragments with pcurves in edge direction.
-- `split_solid_by_plane` splits a quarter cylinder and a box with analytic volumes.
+- `split_solid_by_plane` splits a quarter cylinder and a box with parameter-space quadrature volumes.
+- Trimmed curved faces remain outside `tessellate`/`mass_properties`; the limitation and the `curved_solid_volume` substitute are documented in ADR-0025 and §16.3.
 - `boolean_solid_curved` passes the twelve-case corpus with diagnosed unsupported configurations.
 - Bench and QA recorded in `docs/benchmarks/m3b2-curved-boolean.md`; FAILs are reported as FAILs.
 - No regression: full Debug/Release suites green, 0 warnings.
