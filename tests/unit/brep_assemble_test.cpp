@@ -65,10 +65,10 @@ double pcurve_endpoint_error(const Brep& brep) {
     const Pcurve2d& pcurve = brep.geometry().pcurves[coedge.pcurve];
     error = std::max(
         {error,
-         std::hypot(pcurve.p0[0] - expected_start[0],
-                    pcurve.p0[1] - expected_start[1]),
-         std::hypot(pcurve.p1[0] - expected_end[0],
-                    pcurve.p1[1] - expected_end[1])});
+         std::hypot(pcurve.points.front()[0] - expected_start[0],
+                    pcurve.points.front()[1] - expected_start[1]),
+         std::hypot(pcurve.points.back()[0] - expected_end[0],
+                    pcurve.points.back()[1] - expected_end[1])});
   }
   return error;
 }

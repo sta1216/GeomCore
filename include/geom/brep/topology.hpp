@@ -3,7 +3,9 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <span>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -110,10 +112,16 @@ struct SolidEntity {
 using CurveGeometry = std::variant<LineCurve3, CircleCurve3, NurbsCurve>;
 using SurfaceGeometry = std::variant<Plane3, Cylinder3, Cone3, Sphere3, Torus3, NurbsSurface>;
 
-// Straight pcurve segment in the surface parameter domain.
+// Polyline pcurve in the surface parameter domain. The points run along the edge
+// from t0 to t1, independent of the coedge's traversal direction, so the first
+// and last points project the edge's start and end vertices. A pcurve is well
+// formed when it has at least two finite points (see geom/brep/pcurve2d.hpp).
 struct Pcurve2d {
-  Point2d p0{};
-  Point2d p1{};
+  std::vector<Point2d> points;
+
+  Pcurve2d() = default;
+  Pcurve2d(std::initializer_list<Point2d> pts) : points(pts) {}
+  explicit Pcurve2d(std::vector<Point2d> pts) : points(std::move(pts)) {}
 };
 
 struct GeometryStore {

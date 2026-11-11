@@ -224,14 +224,14 @@ TEST_CASE("split edge splits a forward pcurve at the parameter") {
   CHECK_FALSE(tail.reversed);
   const geom::Pcurve2d& first = b.geometry().pcurves[head.pcurve];
   const geom::Pcurve2d& second = b.geometry().pcurves[tail.pcurve];
-  CHECK(first.p0[0] == 0.0);
-  CHECK(first.p0[1] == 0.0);
-  CHECK(first.p1[0] == 0.5);
-  CHECK(first.p1[1] == 0.5);
-  CHECK(second.p0[0] == 0.5);
-  CHECK(second.p0[1] == 0.5);
-  CHECK(second.p1[0] == 1.0);
-  CHECK(second.p1[1] == 1.0);
+  CHECK(first.points.front()[0] == 0.0);
+  CHECK(first.points.front()[1] == 0.0);
+  CHECK(first.points.back()[0] == 0.5);
+  CHECK(first.points.back()[1] == 0.5);
+  CHECK(second.points.front()[0] == 0.5);
+  CHECK(second.points.front()[1] == 0.5);
+  CHECK(second.points.back()[0] == 1.0);
+  CHECK(second.points.back()[1] == 1.0);
 }
 
 TEST_CASE("split edge splits a reversed pcurve at the parameter") {
@@ -258,14 +258,14 @@ TEST_CASE("split edge splits a reversed pcurve at the parameter") {
   CHECK(second_edge.t1 == 0.25);
   const geom::Pcurve2d& high = b.geometry().pcurves[head.pcurve];
   const geom::Pcurve2d& low = b.geometry().pcurves[tail.pcurve];
-  CHECK(low.p0[0] == 0.0);
-  CHECK(low.p0[1] == 0.0);
-  CHECK(low.p1[0] == 0.25);
-  CHECK(low.p1[1] == 0.25);
-  CHECK(high.p0[0] == 0.25);
-  CHECK(high.p0[1] == 0.25);
-  CHECK(high.p1[0] == 1.0);
-  CHECK(high.p1[1] == 1.0);
+  CHECK(low.points.front()[0] == 0.0);
+  CHECK(low.points.front()[1] == 0.0);
+  CHECK(low.points.back()[0] == 0.25);
+  CHECK(low.points.back()[1] == 0.25);
+  CHECK(high.points.front()[0] == 0.25);
+  CHECK(high.points.front()[1] == 0.25);
+  CHECK(high.points.back()[0] == 1.0);
+  CHECK(high.points.back()[1] == 1.0);
 }
 
 TEST_CASE("split edge uses the interval-relative pcurve fraction") {
@@ -291,14 +291,14 @@ TEST_CASE("split edge uses the interval-relative pcurve fraction") {
   const geom::Pcurve2d& low = b.geometry().pcurves[head.pcurve];
   const geom::Pcurve2d& high = b.geometry().pcurves[tail.pcurve];
   // f = (0.65 - 0.4) / (0.9 - 0.4) = 0.5, so the split point is (1, 0.5).
-  CHECK(low.p0[0] == 0.0);
-  CHECK(low.p0[1] == 0.0);
-  CHECK(low.p1[0] == doctest::Approx(1.0).epsilon(1e-12));
-  CHECK(low.p1[1] == doctest::Approx(0.5).epsilon(1e-12));
-  CHECK(high.p0[0] == doctest::Approx(1.0).epsilon(1e-12));
-  CHECK(high.p0[1] == doctest::Approx(0.5).epsilon(1e-12));
-  CHECK(high.p1[0] == 2.0);
-  CHECK(high.p1[1] == 1.0);
+  CHECK(low.points.front()[0] == 0.0);
+  CHECK(low.points.front()[1] == 0.0);
+  CHECK(low.points.back()[0] == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(low.points.back()[1] == doctest::Approx(0.5).epsilon(1e-12));
+  CHECK(high.points.front()[0] == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(high.points.front()[1] == doctest::Approx(0.5).epsilon(1e-12));
+  CHECK(high.points.back()[0] == 2.0);
+  CHECK(high.points.back()[1] == 1.0);
 }
 
 TEST_CASE("join rebuilds the pcurve over the merged interval") {
@@ -314,10 +314,10 @@ TEST_CASE("join rebuilds the pcurve over the merged interval") {
   const geom::Coedge& survivor = b.coedge(b.loop(loop).start);
   CHECK(survivor.pcurve != geom::kNoGeometry);
   const geom::Pcurve2d& merged = b.geometry().pcurves[survivor.pcurve];
-  CHECK(merged.p0[0] == 0.0);
-  CHECK(merged.p0[1] == 0.0);
-  CHECK(merged.p1[0] == 2.0);
-  CHECK(merged.p1[1] == 1.0);
+  CHECK(merged.points.front()[0] == 0.0);
+  CHECK(merged.points.front()[1] == 0.0);
+  CHECK(merged.points.back()[0] == 2.0);
+  CHECK(merged.points.back()[1] == 1.0);
   CHECK(geom::validate_topology(b).ok());
 }
 
@@ -337,10 +337,10 @@ TEST_CASE("join rebuilds the pcurve for a reversed coedge") {
   // The pcurve always runs along the edge from t0 to t1, independent of the
   // coedge direction, so the merged segment is the original one.
   const geom::Pcurve2d& merged = b.geometry().pcurves[survivor.pcurve];
-  CHECK(merged.p0[0] == 0.0);
-  CHECK(merged.p0[1] == 0.0);
-  CHECK(merged.p1[0] == 2.0);
-  CHECK(merged.p1[1] == 1.0);
+  CHECK(merged.points.front()[0] == 0.0);
+  CHECK(merged.points.front()[1] == 0.0);
+  CHECK(merged.points.back()[0] == 2.0);
+  CHECK(merged.points.back()[1] == 1.0);
 }
 
 TEST_CASE("join drops the pcurve when either half has none") {

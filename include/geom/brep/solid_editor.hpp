@@ -9,6 +9,7 @@
 #include <variant>
 #include <vector>
 
+#include <geom/brep/pcurve2d.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/brep/validate.hpp>
 #include <geom/core/error.hpp>
@@ -70,7 +71,7 @@ class SolidEditor {
     return static_cast<std::uint32_t>(staged_.geometry_.surfaces.size() - 1u);
   }
   std::uint32_t add_pcurve(Pcurve2d pcurve) {
-    staged_.geometry_.pcurves.push_back(pcurve);
+    staged_.geometry_.pcurves.push_back(std::move(pcurve));
     return static_cast<std::uint32_t>(staged_.geometry_.pcurves.size() - 1u);
   }
 
@@ -331,11 +332,14 @@ class SolidEditor {
   // keep the original curve index and only differ in their parameter intervals
   // ([t0, t] and [t, t1]); both inherit the edge tolerance, and the new vertex
   // inherits it too. Every coedge that uses the edge is replaced in its loop by
-  // two coedges in traversal order with the same orientation. A pcurve is split
-  // linearly at the curve-parameter fraction (pcurves are treated as running
-  // along the edge from t0 to t1, not along the coedge's traversal direction).
-  // The old edge and its old coedges are released; the new vertex is returned.
-  // Nothing is staged unless every check passes.
+  // two coedges in traversal order with the same orientation. Every pcurve that
+  // references the edge is split at the fraction of its chord length that
+  // corresponds to the curve-parameter fraction (pcurves run along the edge from
+  // t0 to t1, not along the coedge's traversal direction); both halves share the
+  // computed junction point exactly, so join_vertex() can rebuild the polyline.
+  // A pcurve that cannot be split aborts the call with its error and nothing is
+  // staged. The old edge and its old coedges are released; the new vertex is
+  // returned. Nothing is staged unless every check passes.
   Result<VertexId> split_edge(EdgeId edge, double t) {
     if (!staged_.edge_alive(edge)) {
       return Error{Errc::index_out_of_range, "solid_editor: split edge is not alive",
@@ -369,6 +373,22 @@ class SolidEditor {
       if (staged_.coedges_[i].pcurve != kNoGeometry) ++pcurves_needed;
     }
     const std::uint32_t use_count = static_cast<std::uint32_t>(uses.size());
+
+    // Split every referenced pcurve before any handle is allocated: appending to
+    // the store can reallocate it, so the halves are computed from copies first,
+    // and a malformed pcurve must leave the staged topology unchanged.
+    std::vector<Pcurve2d> low_parts(use_count);
+    std::vector<Pcurve2d> high_parts(use_count);
+    const double fraction = (t - split.t0) / (split.t1 - split.t0);
+    for (std::uint32_t i = 0; i < use_count; ++i) {
+      if (old_coedges[i].pcurve == kNoGeometry) continue;
+      const Pcurve2d source = staged_.geometry_.pcurves[old_coedges[i].pcurve];
+      Result<std::pair<Pcurve2d, Pcurve2d>> halves =
+          detail::pcurve_split_halves(source, fraction);
+      if (!halves.has_value()) return halves.error();
+      low_parts[i] = std::move(halves.value().first);
+      high_parts[i] = std::move(halves.value().second);
+    }
 
     // One vertex + two edges are added, and each use trades one coedge for two,
     // so the coedge pool grows by use_count. pcurves grow by two per use that
@@ -412,19 +432,14 @@ class SolidEditor {
     second_half.v1 = split.v1;
     place(staged_.edges_, second_edge, second_half);
 
-    // Split the pcurves before releasing the old coedges, copying each source
-    // segment first because appending to the store can reallocate it.
+    // Append the pre-split halves before releasing the old coedges. A use whose
+    // pcurve was absent has an empty part and keeps kNoGeometry.
     std::vector<std::uint32_t> low_pcurves(use_count, kNoGeometry);
     std::vector<std::uint32_t> high_pcurves(use_count, kNoGeometry);
-    const double fraction = (t - split.t0) / (split.t1 - split.t0);
     for (std::uint32_t i = 0; i < use_count; ++i) {
-      if (old_coedges[i].pcurve == kNoGeometry) continue;
-      const Pcurve2d source = staged_.geometry_.pcurves[old_coedges[i].pcurve];
-      Point2d split_uv;
-      split_uv[0] = source.p0[0] + (source.p1[0] - source.p0[0]) * fraction;
-      split_uv[1] = source.p0[1] + (source.p1[1] - source.p0[1]) * fraction;
-      low_pcurves[i] = add_pcurve(Pcurve2d{source.p0, split_uv});
-      high_pcurves[i] = add_pcurve(Pcurve2d{split_uv, source.p1});
+      if (low_parts[i].points.empty()) continue;
+      low_pcurves[i] = add_pcurve(std::move(low_parts[i]));
+      high_pcurves[i] = add_pcurve(std::move(high_parts[i]));
     }
 
     for (const CoedgeId id : uses) staged_.coedge_alloc_.release(id);
@@ -507,11 +522,12 @@ class SolidEditor {
   // 0). The merged edge keeps the lower interval's start and curve, extends to
   // the upper interval's end, and takes the larger of the two tolerances; the
   // two coedges collapse into one, and the vertex and the other edge are
-  // released. The survivor's pcurve is rebuilt over the merged interval from the
-  // lower half's p0 to the upper half's p1 (pcurves run along the edge from t0 to
-  // t1, as in split_edge); if either half has no pcurve the merged edge has none
-  // and the two segments' continuity is not re-validated. Nothing is staged
-  // unless every check passes.
+  // released. The survivor's pcurve is rebuilt over the merged interval by
+  // concatenating the lower half's points with the upper half's points, with the
+  // shared junction stored once (pcurves run along the edge from t0 to t1, as in
+  // split_edge); if either half has no pcurve the merged edge has none and the
+  // two segments' continuity is not re-validated. Nothing is staged unless every
+  // check passes.
   Result<bool> join_vertex(VertexId vertex) {
     if (!staged_.vertex_alive(vertex)) {
       return Error{Errc::index_out_of_range, "solid_editor: join vertex is not alive",
@@ -623,9 +639,9 @@ class SolidEditor {
 
     // Rebuild the survivor's pcurve over the merged interval. pcurves run along
     // the edge from t0 to t1 (the convention split_edge uses), so the merged
-    // segment joins the lower half's p0 to the upper half's p1. The two source
-    // segments' continuity is not re-validated. If either half has no pcurve the
-    // merged edge has none either.
+    // polyline is the lower half followed by the upper half with the exactly
+    // shared junction stored once. The two source segments' continuity is not
+    // re-validated. If either half has no pcurve the merged edge has none either.
     const std::uint32_t lower_pcurve = end_is_lower ? end_coedge.pcurve : start_coedge.pcurve;
     const std::uint32_t upper_pcurve = end_is_lower ? start_coedge.pcurve : end_coedge.pcurve;
     std::uint32_t merged_pcurve = kNoGeometry;
@@ -635,7 +651,7 @@ class SolidEditor {
       }
       const Pcurve2d lower = staged_.geometry_.pcurves[lower_pcurve];
       const Pcurve2d upper = staged_.geometry_.pcurves[upper_pcurve];
-      merged_pcurve = add_pcurve(Pcurve2d{lower.p0, upper.p1});
+      merged_pcurve = add_pcurve(pcurve_merge(lower, upper));
     }
 
     staged_.edges_[kept_edge.index()] = merged;
