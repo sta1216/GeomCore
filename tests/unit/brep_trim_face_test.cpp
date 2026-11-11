@@ -670,3 +670,380 @@ TEST_CASE("trim_face: the quarter cylinder fixture is a clean solid") {
   const Result<TriMesh> mesh = tessellate(solid, TessellationOptions{});
   CHECK_FALSE(mesh.has_value());
 }
+
+namespace {
+
+double point_distance(const Point3d& lhs, const Point3d& rhs) {
+  return std::hypot(std::hypot(lhs[0] - rhs[0], lhs[1] - rhs[1]),
+                    lhs[2] - rhs[2]);
+}
+
+std::size_t engaged_span_count(const CurvedFragment& fragment) {
+  std::size_t count = 0;
+  for (const std::vector<std::optional<CurvedArcSpan>>& loop :
+       fragment.arc_spans) {
+    for (const std::optional<CurvedArcSpan>& span : loop) {
+      if (span) ++count;
+    }
+  }
+  return count;
+}
+
+// Checks the alignment contract of every reported span and that each span
+// actually lies on its circle between the two ring vertices it describes.
+void check_arc_spans(const CurvedFragment& fragment) {
+  REQUIRE(fragment.arc_spans.size() == fragment.loops.size());
+  REQUIRE(fragment.arc_spans.size() == fragment.loops_uv.size());
+  for (std::size_t l = 0; l < fragment.loops.size(); ++l) {
+    const std::size_t n = fragment.loops[l].size();
+    REQUIRE(fragment.arc_spans[l].size() == n);
+    REQUIRE(fragment.loops_uv[l].size() == n);
+    for (std::size_t i = 0; i < n; ++i) {
+      const std::optional<CurvedArcSpan>& span = fragment.arc_spans[l][i];
+      if (!span) continue;
+      const double radius = span->circle.radius;
+      CHECK(span->t0 >= 0.0);
+      CHECK(span->t1 > span->t0);
+      CHECK(span->t1 <= span->t0 + 2.0 * kPi + 1e-12);
+
+      const Point3d& a = fragment.loops[l][i];
+      const Point3d& b = fragment.loops[l][(i + 1) % n];
+      const Point3d start = span->circle.eval(span->t0);
+      const Point3d end = span->circle.eval(span->t1);
+      const double eps = 1e-12 * radius;
+      // The ring may follow the arc in either direction; the stored span is the
+      // geometric interval between its two vertices.
+      const bool forward = point_distance(start, a) <= eps &&
+                           point_distance(end, b) <= eps;
+      const bool backward = point_distance(start, b) <= eps &&
+                            point_distance(end, a) <= eps;
+      CHECK((forward || backward));
+
+      const double middle_t = 0.5 * (span->t0 + span->t1);
+      const Point3d middle = span->circle.eval(middle_t);
+      CHECK(std::fabs(point_distance(middle, span->circle.center) - radius) <=
+            eps);
+    }
+  }
+}
+
+// Lengths of the maximal runs of consecutive engaged segments in loop l.
+std::vector<double> span_run_lengths(const CurvedFragment& fragment,
+                                     std::size_t l) {
+  std::vector<double> lengths;
+  const std::vector<std::optional<CurvedArcSpan>>& spans = fragment.arc_spans[l];
+  const std::size_t n = spans.size();
+  if (n == 0) return lengths;
+  std::size_t first = n;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (spans[i] && !spans[(i + n - 1) % n]) {
+      first = i;
+      break;
+    }
+  }
+  if (first == n) {
+    double total = 0.0;
+    for (const std::optional<CurvedArcSpan>& span : spans) {
+      total += span->t1 - span->t0;
+    }
+    lengths.push_back(total);
+    return lengths;
+  }
+  double total = 0.0;
+  for (std::size_t step = 0; step < n; ++step) {
+    const std::size_t index = (first + step) % n;
+    if (spans[index]) {
+      total += spans[index]->t1 - spans[index]->t0;
+    } else if (total > 0.0) {
+      lengths.push_back(total);
+      total = 0.0;
+    }
+  }
+  if (total > 0.0) lengths.push_back(total);
+  return lengths;
+}
+
+// Total reported arc length on one circle across every fragment.
+double span_length_on_circle(const std::vector<CurvedFragment>& fragments,
+                             const Point3d& center, double radius) {
+  double total = 0.0;
+  for (const CurvedFragment& fragment : fragments) {
+    for (const std::vector<std::optional<CurvedArcSpan>>& loop :
+         fragment.arc_spans) {
+      for (const std::optional<CurvedArcSpan>& span : loop) {
+        if (!span) continue;
+        const double scale = std::max(1.0, radius);
+        if (std::fabs(span->circle.radius - radius) > 1e-12 * scale) continue;
+        if (point_distance(span->circle.center, center) > 1e-12 * scale) {
+          continue;
+        }
+        total += span->t1 - span->t0;
+      }
+    }
+  }
+  return total;
+}
+
+}  // namespace
+
+TEST_CASE("trim_face: an axial cut splits the cylinder wall into two arc runs") {
+  const double radius = 2.0;
+  const double height = 3.0;
+  const Brep cylinder =
+      make_cylinder(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, radius, height, kTol)
+          .value();
+  const FaceId lateral = face_with_surface<Cylinder3>(cylinder);
+  REQUIRE_FALSE(lateral.is_null());
+
+  FaceCut cut;
+  cut.uv = {Point2d{kPi, 0.0}, Point2d{kPi, height}};
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(cylinder, lateral, cuts, 1e-9);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 2);
+
+  for (const CurvedFragment& fragment : result.value()) {
+    check_arc_spans(fragment);
+    CHECK(fragment_area(fragment) ==
+          doctest::Approx(kPi * height).epsilon(1e-12));
+    // Each half follows half of the bottom rim and half of the top rim.
+    const std::vector<double> lengths = span_run_lengths(fragment, 0);
+    REQUIRE(lengths.size() == 2);
+    CHECK(lengths[0] == doctest::Approx(kPi).epsilon(1e-12));
+    CHECK(lengths[1] == doctest::Approx(kPi).epsilon(1e-12));
+  }
+
+  // The two fragments together cover each rim exactly once.
+  CHECK(span_length_on_circle(result.value(), Point3d{0, 0, 0}, radius) ==
+        doctest::Approx(2.0 * kPi).epsilon(1e-12));
+  CHECK(span_length_on_circle(result.value(), Point3d{0, 0, height}, radius) ==
+        doctest::Approx(2.0 * kPi).epsilon(1e-12));
+}
+
+TEST_CASE("trim_face: a diameter cut splits both cylinder caps along their arcs") {
+  const double radius = 2.0;
+  const double height = 3.0;
+  const Brep cylinder =
+      make_cylinder(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, radius, height, kTol)
+          .value();
+  const FaceId bottom = plane_face(cylinder, Vec3d{0, 0, -1}, 0.0);
+  const FaceId top = plane_face(cylinder, Vec3d{0, 0, 1}, height);
+  REQUIRE_FALSE(bottom.is_null());
+  REQUIRE_FALSE(top.is_null());
+
+  const auto check_cap = [&](const FaceId face, const Point3d& center) {
+    const CircleCurve3 circle{center, Vec3d{1, 0, 0}, Vec3d{0, 1, 0}, radius};
+    const std::vector<FaceCut> cuts{uv_cut(
+        cylinder, face, {circle.eval(kPi / 2.0), circle.eval(3.0 * kPi / 2.0)})};
+    const Result<std::vector<CurvedFragment>> result =
+        split_face_curved(cylinder, face, cuts, 1e-9);
+    REQUIRE(result.has_value());
+    REQUIRE(result.value().size() == 2);
+    for (const CurvedFragment& fragment : result.value()) {
+      check_arc_spans(fragment);
+      const std::vector<double> lengths = span_run_lengths(fragment, 0);
+      REQUIRE(lengths.size() == 1);
+      CHECK(lengths[0] == doctest::Approx(kPi).epsilon(1e-12));
+    }
+    CHECK(span_length_on_circle(result.value(), center, radius) ==
+          doctest::Approx(2.0 * kPi).epsilon(1e-12));
+  };
+
+  check_cap(bottom, Point3d{0, 0, 0});
+  check_cap(top, Point3d{0, 0, height});
+}
+
+TEST_CASE("trim_face: a mid-height cut leaves one full-circle arc run per half") {
+  const double radius = 2.0;
+  const double height = 3.0;
+  const Brep cylinder =
+      make_cylinder(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, radius, height, kTol)
+          .value();
+  const FaceId lateral = face_with_surface<Cylinder3>(cylinder);
+  REQUIRE_FALSE(lateral.is_null());
+
+  FaceCut cut;
+  cut.uv = {Point2d{0.0, height / 2.0}, Point2d{2.0 * kPi, height / 2.0}};
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(cylinder, lateral, cuts, 1e-9);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 2);
+
+  double bottom = 0.0;
+  double top = 0.0;
+  for (const CurvedFragment& fragment : result.value()) {
+    check_arc_spans(fragment);
+    const std::vector<double> lengths = span_run_lengths(fragment, 0);
+    REQUIRE(lengths.size() == 1);
+    CHECK(lengths[0] == doctest::Approx(2.0 * kPi).epsilon(1e-12));
+    if (std::fabs(fragment.loops[0][0][2]) < 1e-12) {
+      bottom += lengths[0];
+    } else {
+      top += lengths[0];
+    }
+  }
+  CHECK(bottom == doctest::Approx(2.0 * kPi).epsilon(1e-12));
+  CHECK(top == doctest::Approx(2.0 * kPi).epsilon(1e-12));
+}
+
+TEST_CASE("trim_face: a polygonal face reports no arc spans") {
+  const Brep box = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, kTol).value();
+  const FaceId top = plane_face(box, Vec3d{0, 0, 1}, 2.0);
+  REQUIRE_FALSE(top.is_null());
+
+  const std::vector<FaceCut> none;
+  const Result<std::vector<CurvedFragment>> whole =
+      split_face_curved(box, top, none, kTol);
+  REQUIRE(whole.has_value());
+  REQUIRE(whole.value().size() == 1);
+  check_arc_spans(whole.value()[0]);
+  CHECK(engaged_span_count(whole.value()[0]) == 0);
+
+  const std::vector<FaceCut> cuts{
+      uv_cut(box, top, {Point3d{0, 0.5, 2}, Point3d{2, 1.5, 2}})};
+  const Result<std::vector<CurvedFragment>> split =
+      split_face_curved(box, top, cuts, kTol);
+  REQUIRE(split.has_value());
+  REQUIRE(split.value().size() == 2);
+  for (const CurvedFragment& fragment : split.value()) {
+    check_arc_spans(fragment);
+    CHECK(engaged_span_count(fragment) == 0);
+  }
+}
+
+TEST_CASE("trim_face: a cut ending on an arc splits it at the exact junction") {
+  const double radius = 2.0;
+  const double height = 3.0;
+  const Brep cylinder =
+      make_cylinder(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, radius, height, kTol)
+          .value();
+  const FaceId lateral = face_with_surface<Cylinder3>(cylinder);
+  REQUIRE_FALSE(lateral.is_null());
+
+  FaceCut cut;
+  cut.uv = {Point2d{0.0, height / 2.0}, Point2d{0.3, 0.0}};
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(cylinder, lateral, cuts, 1e-9);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 2);
+
+  std::vector<double> lengths;
+  for (const CurvedFragment& fragment : result.value()) {
+    check_arc_spans(fragment);
+    const std::vector<double> run = span_run_lengths(fragment, 0);
+    lengths.insert(lengths.end(), run.begin(), run.end());
+  }
+  std::sort(lengths.begin(), lengths.end());
+  REQUIRE(lengths.size() == 3);
+  CHECK(lengths[0] == doctest::Approx(0.3).epsilon(1e-12));
+  CHECK(lengths[1] == doctest::Approx(2.0 * kPi - 0.3).epsilon(1e-12));
+  CHECK(lengths[2] == doctest::Approx(2.0 * kPi).epsilon(1e-12));
+  CHECK(span_length_on_circle(result.value(), Point3d{0, 0, 0}, radius) ==
+        doctest::Approx(2.0 * kPi).epsilon(1e-12));
+  CHECK(span_length_on_circle(result.value(), Point3d{0, 0, height}, radius) ==
+        doctest::Approx(2.0 * kPi).epsilon(1e-12));
+}
+
+TEST_CASE("trim_face: a chord cuts a cap into a major and a minor arc run") {
+  const double radius = 2.0;
+  const double height = 3.0;
+  const Brep cylinder =
+      make_cylinder(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, radius, height, kTol)
+          .value();
+  const FaceId bottom = plane_face(cylinder, Vec3d{0, 0, -1}, 0.0);
+  REQUIRE_FALSE(bottom.is_null());
+
+  const CircleCurve3 circle{Point3d{0, 0, 0}, Vec3d{1, 0, 0}, Vec3d{0, 1, 0},
+                            radius};
+  const std::vector<FaceCut> cuts{uv_cut(
+      cylinder, bottom, {circle.eval(0.4), circle.eval(1.1)})};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(cylinder, bottom, cuts, 1e-9);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 2);
+
+  std::vector<double> lengths;
+  for (const CurvedFragment& fragment : result.value()) {
+    check_arc_spans(fragment);
+    const std::vector<double> run = span_run_lengths(fragment, 0);
+    REQUIRE(run.size() == 1);
+    lengths.push_back(run[0]);
+  }
+  std::sort(lengths.begin(), lengths.end());
+  REQUIRE(lengths.size() == 2);
+  CHECK(lengths[0] == doctest::Approx(0.7).epsilon(1e-12));
+  CHECK(lengths[1] == doctest::Approx(2.0 * kPi - 0.7).epsilon(1e-12));
+  CHECK(span_length_on_circle(result.value(), circle.center, radius) ==
+        doctest::Approx(2.0 * kPi).epsilon(1e-12));
+}
+
+TEST_CASE("trim_face: the chordal quarter cylinder reports no arc spans") {
+  const double radius = 1.0;
+  const double height = 2.0;
+  const Brep solid = test::make_quarter_cylinder(radius, height, kTol);
+  const FaceId lateral = test::quarter_cylinder_lateral(solid);
+  REQUIRE_FALSE(lateral.is_null());
+
+  const std::vector<FaceCut> none;
+  const Result<std::vector<CurvedFragment>> whole =
+      split_face_curved(solid, lateral, none, 1e-9);
+  REQUIRE(whole.has_value());
+  REQUIRE(whole.value().size() == 1);
+  check_arc_spans(whole.value()[0]);
+  CHECK(engaged_span_count(whole.value()[0]) == 0);
+
+  FaceCut cut;
+  cut.uv = {Point2d{kPi / 4.0, 0.0}, Point2d{kPi / 4.0, height}};
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> split =
+      split_face_curved(solid, lateral, cuts, 1e-9);
+  REQUIRE(split.has_value());
+  REQUIRE(split.value().size() == 2);
+  for (const CurvedFragment& fragment : split.value()) {
+    check_arc_spans(fragment);
+    CHECK(engaged_span_count(fragment) == 0);
+  }
+}
+
+TEST_CASE("trim_face: a cut tangent to a cap circle does not split it") {
+  const double radius = 2.0;
+  const double height = 3.0;
+  const Brep cylinder =
+      make_cylinder(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, radius, height, kTol)
+          .value();
+  const FaceId bottom = plane_face(cylinder, Vec3d{0, 0, -1}, 0.0);
+  REQUIRE_FALSE(bottom.is_null());
+
+  const std::vector<FaceCut> none;
+  const Result<std::vector<CurvedFragment>> whole =
+      split_face_curved(cylinder, bottom, none, 1e-9);
+  REQUIRE(whole.has_value());
+  REQUIRE(whole.value().size() == 1);
+  const double whole_area = fragment_area(whole.value()[0]);
+  const std::size_t whole_points = whole.value()[0].loops_uv[0].size();
+
+  // A closed square whose left edge touches the cap circle at one point.
+  const Point2d center_uv = uv_cut(cylinder, bottom, {Point3d{0, 0, 0}}).uv[0];
+  FaceCut square;
+  square.uv = {Point2d{center_uv[0] - radius, center_uv[1] - radius - 1.0},
+               Point2d{center_uv[0] + radius + 1.0, center_uv[1] - radius - 1.0},
+               Point2d{center_uv[0] + radius + 1.0, center_uv[1] + radius + 1.0},
+               Point2d{center_uv[0] - radius, center_uv[1] + radius + 1.0},
+               Point2d{center_uv[0] - radius, center_uv[1] - radius - 1.0}};
+  const std::vector<FaceCut> cuts{square};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(cylinder, bottom, cuts, 1e-9);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 1);
+  check_arc_spans(result.value()[0]);
+  CHECK(result.value()[0].loops_uv[0].size() == whole_points);
+  CHECK(fragment_area(result.value()[0]) ==
+        doctest::Approx(whole_area).epsilon(1e-12));
+  const std::vector<double> lengths = span_run_lengths(result.value()[0], 0);
+  REQUIRE(lengths.size() == 1);
+  CHECK(lengths[0] == doctest::Approx(2.0 * kPi).epsilon(1e-12));
+  CHECK(engaged_span_count(result.value()[0]) == whole_points);
+}

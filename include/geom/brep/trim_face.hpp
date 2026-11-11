@@ -29,15 +29,29 @@ struct FaceCut {
   std::vector<Point2d> uv;
 };
 
+// One piece of a boundary arc carried by a fragment ring: the circle and the
+// parameter interval the ring follows. t0 < t1 and t1 - t0 <= 2*pi; a segment
+// that closes a full circle has t1 - t0 == 2*pi. The interval is geometric, so
+// the ring may traverse it in either direction.
+struct CurvedArcSpan {
+  CircleCurve3 circle;
+  double t0 = 0.0;
+  double t1 = 0.0;
+};
+
 // One piece of a split curved face. `loops` holds the 3D rings and `loops_uv`
 // the matching parameter rings; index 0 is the outer ring and the rest are
 // holes. The rings are implicitly closed, outer is counter-clockwise and holes
 // are clockwise. `reversed` is always false here: the boolean driver flips the
 // B-side fragments when it needs the opposite material side.
+// `arc_spans[l][i]` describes the segment from point i to point (i+1)%size of
+// loop l. It is empty by default and, after split_face_curved, is sized exactly
+// like `loops`, with a value only on segments that follow an arc.
 struct CurvedFragment {
   std::vector<std::vector<Point3d>> loops;
   std::vector<std::vector<Point2d>> loops_uv;
   bool reversed = false;
+  std::vector<std::vector<std::optional<CurvedArcSpan>>> arc_spans;
 };
 
 namespace detail {
@@ -328,6 +342,186 @@ inline bool trim_face_same_fragment(const CurvedFragment& lhs,
   return true;
 }
 
+inline constexpr double kTrimFaceTwoPi = 2.0 * kFaceUvPi;
+
+// Two arc references describe the same circle when their radii and frames agree
+// within `tolerance`.
+inline bool trim_face_same_circle(const CircleCurve3& lhs,
+                                  const CircleCurve3& rhs,
+                                  double tolerance) noexcept {
+  const double scale =
+      std::max({1.0, std::fabs(lhs.radius), std::fabs(rhs.radius)});
+  const double eps = std::max(tolerance, 1e-12 * scale);
+  if (!(std::fabs(lhs.radius - rhs.radius) <= eps)) return false;
+  if (!(norm2(lhs.center - rhs.center) <= eps)) return false;
+  if (!(norm2(lhs.x_axis - rhs.x_axis) <= eps)) return false;
+  if (!(norm2(lhs.y_axis - rhs.y_axis) <= eps)) return false;
+  return true;
+}
+
+// A point where a cut segment meets a boundary circle. `s` is the fraction along
+// the cut segment (0 or 1 when the hit is a cut endpoint).
+struct TrimFaceCircleHit {
+  double s = 0.0;
+  Point3d point{};
+  double t = 0.0;
+};
+
+// Intersects the segment p0->p1 with `circle`: the unique crossing of the
+// circle's plane, or the two intersections inside that plane. A segment that
+// only grazes the circle (no penetration deeper than tolerance) reports no
+// interior hit, so a tangent cut never splits the boundary.
+inline std::vector<TrimFaceCircleHit> trim_face_circle_hits(
+    const CircleCurve3& circle, const Point3d& p0, const Point3d& p1,
+    double tolerance) {
+  std::vector<TrimFaceCircleHit> hits;
+  const double radius = circle.radius;
+  const double tol = std::max(tolerance, 1e-12 * std::max(1.0, radius));
+  const Vec3d normal = cross(circle.x_axis, circle.y_axis);
+  const Vec3d d = p1 - p0;
+  const Vec3d f = p0 - circle.center;
+  const auto on_circle = [&](const Point3d& point) {
+    const Vec3d offset = point - circle.center;
+    return std::fabs(norm2(offset) - radius) <= tol &&
+           std::fabs(dot(offset, normal)) <= tol;
+  };
+  if (on_circle(p0)) {
+    hits.push_back(
+        TrimFaceCircleHit{0.0, p0, face_uv_circle_angle(circle, p0)});
+  }
+  if (on_circle(p1)) {
+    hits.push_back(
+        TrimFaceCircleHit{1.0, p1, face_uv_circle_angle(circle, p1)});
+  }
+  const double along_normal = dot(d, normal);
+  if (std::fabs(along_normal) <= tol) {
+    // The segment lies in (or parallel to) the circle's plane.
+    if (std::fabs(dot(f, normal)) > tol) return hits;
+    const double start_u = dot(f, circle.x_axis);
+    const double start_v = dot(f, circle.y_axis);
+    const double delta_u = dot(d, circle.x_axis);
+    const double delta_v = dot(d, circle.y_axis);
+    const double a = delta_u * delta_u + delta_v * delta_v;
+    if (!(a > 0.0)) return hits;
+    const double b = 2.0 * (start_u * delta_u + start_v * delta_v);
+    const double c = start_u * start_u + start_v * start_v - radius * radius;
+    const double discriminant = b * b - 4.0 * a * c;
+    if (!(discriminant > 0.0)) return hits;
+    // Reject a tangency: the chord must sink below the radius by more than the
+    // tolerance at its closest point.
+    const double middle_s = -b / (2.0 * a);
+    const double middle_u = start_u + delta_u * middle_s;
+    const double middle_v = start_v + delta_v * middle_s;
+    const double middle_distance =
+        std::hypot(middle_u, middle_v);
+    if (!(radius - middle_distance > tol)) return hits;
+    const double root = std::sqrt(discriminant);
+    const double params[2] = {(-b - root) / (2.0 * a),
+                              (-b + root) / (2.0 * a)};
+    for (const double s : params) {
+      if (!(s > 0.0) || !(s < 1.0)) continue;
+      const Point3d point{p0[0] + d[0] * s, p0[1] + d[1] * s,
+                          p0[2] + d[2] * s};
+      hits.push_back(
+          TrimFaceCircleHit{s, point, face_uv_circle_angle(circle, point)});
+    }
+    return hits;
+  }
+  const double s = -dot(f, normal) / along_normal;
+  if (!(s > 0.0) || !(s < 1.0)) return hits;
+  const Point3d point{p0[0] + d[0] * s, p0[1] + d[1] * s, p0[2] + d[2] * s};
+  if (std::fabs(norm2(point - circle.center) - radius) > tol) return hits;
+  hits.push_back(
+      TrimFaceCircleHit{s, point, face_uv_circle_angle(circle, point)});
+  return hits;
+}
+
+// The loop point a fragment ring vertex came from.
+using TrimFaceRingRef = std::pair<std::size_t, std::size_t>;
+
+inline void trim_face_drop_repeats_refs(
+    std::vector<Point2d>& ring,
+    std::vector<std::optional<TrimFaceRingRef>>& refs) {
+  if (refs.size() != ring.size()) refs.resize(ring.size());
+  std::vector<Point2d> cleaned;
+  std::vector<std::optional<TrimFaceRingRef>> cleaned_refs;
+  cleaned.reserve(ring.size());
+  cleaned_refs.reserve(ring.size());
+  for (std::size_t i = 0; i < ring.size(); ++i) {
+    if (!cleaned.empty() && trim_face_same_xy(cleaned.back(), ring[i])) continue;
+    cleaned.push_back(ring[i]);
+    cleaned_refs.push_back(refs[i]);
+  }
+  while (cleaned.size() >= 2 &&
+         trim_face_same_xy(cleaned.front(), cleaned.back())) {
+    cleaned.pop_back();
+    cleaned_refs.pop_back();
+  }
+  ring.swap(cleaned);
+  refs.swap(cleaned_refs);
+}
+
+// trim_face_normalize_ring with the per-vertex loop references kept in lockstep.
+inline void trim_face_normalize_ring_refs(
+    std::vector<Point2d>& ring,
+    std::vector<std::optional<TrimFaceRingRef>>& refs, bool want_ccw) {
+  trim_face_drop_repeats_refs(ring, refs);
+  if (ring.size() < 3) return;
+  const int orientation = ring_orientation2(ring);
+  if (orientation != 0 && ((orientation > 0) != want_ccw)) {
+    std::reverse(ring.begin(), ring.end());
+    std::reverse(refs.begin(), refs.end());
+  }
+  std::size_t first = 0;
+  for (std::size_t i = 1; i < ring.size(); ++i) {
+    if (trim_face_lex_less(ring[i], ring[first])) first = i;
+  }
+  if (first != 0) {
+    const auto offset = static_cast<std::ptrdiff_t>(first);
+    std::rotate(ring.begin(), ring.begin() + offset, ring.end());
+    std::rotate(refs.begin(), refs.begin() + offset, refs.end());
+  }
+}
+
+// The arc span of ring segment i, when both of its ends are adjacent points of
+// the same boundary arc.
+inline std::optional<CurvedArcSpan> trim_face_ring_span(
+    const std::vector<std::optional<TrimFaceRingRef>>& refs,
+    const std::vector<std::vector<Point2d>>& loops,
+    const std::vector<std::vector<std::optional<FaceUvArcRef>>>& loop_arcs,
+    std::size_t i, double tolerance) {
+  if (refs.empty()) return std::nullopt;
+  const std::size_t j = (i + 1) % refs.size();
+  if (!refs[i] || !refs[j]) return std::nullopt;
+  const TrimFaceRingRef a = *refs[i];
+  const TrimFaceRingRef b = *refs[j];
+  if (a.first != b.first) return std::nullopt;
+  if (a.first >= loops.size()) return std::nullopt;
+  const std::size_t count = loops[a.first].size();
+  if (count < 2) return std::nullopt;
+  if (!((a.second + 1) % count == b.second ||
+        (b.second + 1) % count == a.second)) {
+    return std::nullopt;
+  }
+  if (a.second >= loop_arcs[a.first].size() ||
+      b.second >= loop_arcs[a.first].size()) {
+    return std::nullopt;
+  }
+  const std::optional<FaceUvArcRef>& arc_a = loop_arcs[a.first][a.second];
+  const std::optional<FaceUvArcRef>& arc_b = loop_arcs[a.first][b.second];
+  if (!arc_a || !arc_b) return std::nullopt;
+  if (!trim_face_same_circle(arc_a->circle, arc_b->circle, tolerance)) {
+    return std::nullopt;
+  }
+  double sweep = arc_b->t - arc_a->t;
+  sweep -= kTrimFaceTwoPi * std::round(sweep / kTrimFaceTwoPi);
+  if (sweep == 0.0) sweep = kTrimFaceTwoPi;
+  const double low = std::min(arc_a->t, arc_a->t + sweep);
+  const double high = std::max(arc_a->t, arc_a->t + sweep);
+  double shifted = low - kTrimFaceTwoPi * std::floor(low / kTrimFaceTwoPi);
+  return CurvedArcSpan{arc_a->circle, shifted, shifted + (high - low)};
+}
+
 }  // namespace detail
 
 // Splits `face` along `cuts` and returns the resulting fragments in a
@@ -456,6 +650,177 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     if (closed) points.back() = points.front();
     cut_points.push_back(std::move(points));
     cut_closed.push_back(closed ? 1 : 0);
+  }
+
+  // Exact arc junctions. A cut segment that meets a boundary arc is split at
+  // the analytic point on the circle: the loop gains a vertex whose arc
+  // reference carries the exact parameter, and the cut gains the same projected
+  // vertex, so the arrangement never approximates the crossing with the
+  // inscribed chord.
+  std::vector<std::vector<std::optional<FaceUvArcRef>>> loop_arcs(loops.size());
+  for (std::size_t l = 0; l < loops.size(); ++l) {
+    loop_arcs[l] = uv_loops[l].arcs;
+    loop_arcs[l].resize(loops[l].size());
+  }
+  struct ArcJunction {
+    double along = 0.0;
+    double t = 0.0;
+    Point2d uv{};
+  };
+  struct CutJunction {
+    std::size_t cut = 0;
+    std::size_t edge = 0;
+    double s = 0.0;
+    Point2d uv{};
+  };
+  struct CutRewrite {
+    std::size_t cut = 0;
+    std::size_t vertex = 0;
+    Point2d uv{};
+  };
+  std::vector<std::vector<std::vector<ArcJunction>>> loop_junctions(loops.size());
+  for (std::size_t l = 0; l < loops.size(); ++l) {
+    loop_junctions[l].resize(loops[l].size());
+  }
+  std::vector<CutJunction> cut_junctions;
+  std::vector<CutRewrite> cut_rewrites;
+  std::vector<std::vector<Point3d>> cut_points3(cut_points.size());
+  for (std::size_t c = 0; c < cut_points.size(); ++c) {
+    cut_points3[c].reserve(cut_points[c].size());
+    for (const Point2d& point : cut_points[c]) {
+      cut_points3[c].push_back(detail::face_uv_eval(projection, point));
+    }
+  }
+  for (std::size_t l = 0; l < loops.size(); ++l) {
+    const std::size_t count = loops[l].size();
+    for (std::size_t i = 0; i < count; ++i) {
+      const std::size_t next = (i + 1) % count;
+      if (!loop_arcs[l][i] || !loop_arcs[l][next]) continue;
+      const CircleCurve3& circle = loop_arcs[l][i]->circle;
+      if (!detail::trim_face_same_circle(circle, loop_arcs[l][next]->circle,
+                                         tolerance)) {
+        continue;
+      }
+      double sweep = loop_arcs[l][next]->t - loop_arcs[l][i]->t;
+      sweep -= detail::kTrimFaceTwoPi *
+               std::round(sweep / detail::kTrimFaceTwoPi);
+      if (!(std::fabs(sweep) > 0.0)) continue;
+      const double direction = sweep > 0.0 ? 1.0 : -1.0;
+      const double length = std::fabs(sweep);
+      const double slack =
+          std::max(1e-12, tolerance / std::max(circle.radius, 1e-12));
+      for (std::size_t c = 0; c < cut_points.size(); ++c) {
+        for (std::size_t e = 0; e + 1 < cut_points[c].size(); ++e) {
+          const std::vector<detail::TrimFaceCircleHit> hits =
+              detail::trim_face_circle_hits(circle, cut_points3[c][e],
+                                            cut_points3[c][e + 1], tolerance);
+          for (const detail::TrimFaceCircleHit& hit : hits) {
+            double offset = hit.t - loop_arcs[l][i]->t;
+            offset -= detail::kTrimFaceTwoPi *
+                      std::round(offset / detail::kTrimFaceTwoPi);
+            const double along = offset * direction;
+            if (!(along >= 0.0) || !(along <= length)) continue;
+            if (along < slack || along > length - slack) {
+              // The contact lands on an existing boundary vertex; the ordinary
+              // endpoint snap already puts the cut exactly there.
+              continue;
+            }
+            const Result<Point2d> projected = detail::face_uv_project(
+                projection, hit.point, loops[l][i][0], true);
+            if (!projected) return projected.error();
+            Point2d point = projected.value();
+            if (projection.periodic_u()) {
+              point[0] += detail::kTrimFaceTwoPi *
+                          std::round((loops[l][i][0] - point[0]) /
+                                     detail::kTrimFaceTwoPi);
+            }
+            if (projection.periodic_v()) {
+              point[1] += detail::kTrimFaceTwoPi *
+                          std::round((loops[l][i][1] - point[1]) /
+                                     detail::kTrimFaceTwoPi);
+            }
+            const double t = loop_arcs[l][i]->t + direction * along;
+            loop_junctions[l][i].push_back(ArcJunction{along, t, point});
+            if (hit.s > 0.0 && hit.s < 1.0) {
+              cut_junctions.push_back(CutJunction{c, e, hit.s, point});
+            } else if (hit.s <= 0.0) {
+              cut_rewrites.push_back(CutRewrite{c, e, point});
+            } else {
+              cut_rewrites.push_back(CutRewrite{c, e + 1, point});
+            }
+          }
+        }
+      }
+    }
+  }
+  {
+    std::vector<std::vector<Point2d>> rebuilt_loops(loops.size());
+    std::vector<std::vector<std::optional<FaceUvArcRef>>> rebuilt_arcs(
+        loops.size());
+    for (std::size_t l = 0; l < loops.size(); ++l) {
+      for (std::size_t i = 0; i < loops[l].size(); ++i) {
+        rebuilt_loops[l].push_back(loops[l][i]);
+        rebuilt_arcs[l].push_back(loop_arcs[l][i]);
+        std::vector<ArcJunction>& junctions = loop_junctions[l][i];
+        std::sort(junctions.begin(), junctions.end(),
+                  [](const ArcJunction& lhs, const ArcJunction& rhs) {
+                    return lhs.along < rhs.along;
+                  });
+        for (const ArcJunction& junction : junctions) {
+          if (detail::trim_face_same_xy(rebuilt_loops[l].back(), junction.uv)) {
+            continue;
+          }
+          rebuilt_loops[l].push_back(junction.uv);
+          rebuilt_arcs[l].push_back(FaceUvArcRef{loop_arcs[l][i]->circle,
+                                                 junction.t});
+        }
+      }
+    }
+    loops.swap(rebuilt_loops);
+    loop_arcs.swap(rebuilt_arcs);
+  }
+  for (const CutRewrite& rewrite : cut_rewrites) {
+    if (rewrite.vertex < cut_points[rewrite.cut].size()) {
+      cut_points[rewrite.cut][rewrite.vertex] = rewrite.uv;
+    }
+  }
+  if (!cut_junctions.empty()) {
+    std::sort(cut_junctions.begin(), cut_junctions.end(),
+              [](const CutJunction& lhs, const CutJunction& rhs) {
+                if (lhs.cut != rhs.cut) return lhs.cut < rhs.cut;
+                if (lhs.edge != rhs.edge) return lhs.edge < rhs.edge;
+                return lhs.s < rhs.s;
+              });
+    for (std::size_t c = 0; c < cut_points.size(); ++c) {
+      const std::size_t begin = static_cast<std::size_t>(
+          std::lower_bound(cut_junctions.begin(), cut_junctions.end(), c,
+                           [](const CutJunction& lhs, std::size_t value) {
+                             return lhs.cut < value;
+                           }) -
+          cut_junctions.begin());
+      std::size_t next = begin;
+      if (next == cut_junctions.size() || cut_junctions[next].cut != c) {
+        continue;
+      }
+      std::vector<Point2d> rebuilt;
+      rebuilt.reserve(cut_points[c].size() + 8);
+      rebuilt.push_back(cut_points[c].front());
+      for (std::size_t e = 0; e + 1 < cut_points[c].size(); ++e) {
+        while (next < cut_junctions.size() && cut_junctions[next].cut == c &&
+               cut_junctions[next].edge == e) {
+          if (!detail::trim_face_same_xy(rebuilt.back(),
+                                         cut_junctions[next].uv)) {
+            rebuilt.push_back(cut_junctions[next].uv);
+          }
+          ++next;
+        }
+        if (!detail::trim_face_same_xy(rebuilt.back(), cut_points[c][e + 1])) {
+          rebuilt.push_back(cut_points[c][e + 1]);
+        }
+      }
+      if (cut_closed[c] != 0) rebuilt.back() = rebuilt.front();
+      cut_points[c].swap(rebuilt);
+    }
   }
 
   // Snap every open cut endpoint. A welded group of endpoints shares one exact
@@ -791,6 +1156,84 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     }
   }
 
+  // Map the arrangement rings back to the boundary loops. The arrangement
+  // copies input vertices bit for bit, so a vertex that came from a loop point
+  // compares exactly equal to it; a vertex that is still on an arc but is not
+  // one of its points means the junction insertion was missed.
+  std::vector<std::vector<Point3d>> loop_points3(loops.size());
+  for (std::size_t l = 0; l < loops.size(); ++l) {
+    loop_points3[l].reserve(loops[l].size());
+    for (const Point2d& uv : loops[l]) {
+      loop_points3[l].push_back(detail::face_uv_eval(projection, uv));
+    }
+  }
+  auto map_ring = [&](const std::vector<Point2d>& ring)
+      -> Result<std::vector<std::optional<detail::TrimFaceRingRef>>> {
+    std::vector<std::optional<detail::TrimFaceRingRef>> refs(ring.size());
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+      const Point3d point = detail::face_uv_eval(projection, ring[i]);
+      bool found = false;
+      for (std::size_t l = 0; l < loop_points3.size() && !found; ++l) {
+        for (std::size_t j = 0; j < loop_points3[l].size(); ++j) {
+          const Point3d& candidate = loop_points3[l][j];
+          if (candidate[0] == point[0] && candidate[1] == point[1] &&
+              candidate[2] == point[2]) {
+            refs[i] = detail::TrimFaceRingRef{l, j};
+            found = true;
+            break;
+          }
+        }
+      }
+      if (found) continue;
+      for (std::size_t l = 0; l < loops.size(); ++l) {
+        const std::size_t count = loops[l].size();
+        for (std::size_t j = 0; j < count; ++j) {
+          const auto& arc_a = loop_arcs[l][j];
+          const auto& arc_b = loop_arcs[l][(j + 1) % count];
+          if (!arc_a || !arc_b) continue;
+          const CircleCurve3& circle = arc_a->circle;
+          if (!detail::trim_face_same_circle(circle, arc_b->circle, tolerance)) {
+            continue;
+          }
+          double sweep = arc_b->t - arc_a->t;
+          sweep -= detail::kTrimFaceTwoPi *
+                   std::round(sweep / detail::kTrimFaceTwoPi);
+          if (!(std::fabs(sweep) > 0.0)) continue;
+          const double direction = sweep > 0.0 ? 1.0 : -1.0;
+          const double length = std::fabs(sweep);
+          const double eps =
+              std::max(tolerance, 1e-12 * std::max(1.0, circle.radius));
+          const Vec3d radial = point - circle.center;
+          const Vec3d normal = cross(circle.x_axis, circle.y_axis);
+          if (!(std::fabs(dot(radial, normal)) <= eps)) continue;
+          if (!(std::fabs(norm2(radial) - circle.radius) <= eps)) continue;
+          double offset = detail::face_uv_circle_angle(circle, point) - arc_a->t;
+          offset -= detail::kTrimFaceTwoPi *
+                    std::round(offset / detail::kTrimFaceTwoPi);
+          const double along = offset * direction;
+          const double slack =
+              std::max(1e-12, eps / std::max(circle.radius, 1e-12));
+          if (along > slack && along < length - slack) {
+            return Error{Errc::numeric_failure,
+                         "split_face_curved: fragment vertex left its loop",
+                         face.index(), 0u};
+          }
+        }
+      }
+    }
+    return refs;
+  };
+  auto span_ring = [&](const std::vector<std::optional<detail::TrimFaceRingRef>>&
+                           refs,
+                       std::size_t count) {
+    std::vector<std::optional<CurvedArcSpan>> spans(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      spans[i] = detail::trim_face_ring_span(refs, loops, loop_arcs, i,
+                                             tolerance);
+    }
+    return spans;
+  };
+
   std::vector<CurvedFragment> fragments;
   const double area_floor = tolerance * tolerance;
   for (const detail::TrimFaceCycle& record : cycles) {
@@ -799,30 +1242,42 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     CurvedFragment fragment;
     fragment.reversed = false;
     std::vector<Point2d> outer = record.ring;
-    detail::trim_face_normalize_ring(outer, true);
+    Result<std::vector<std::optional<detail::TrimFaceRingRef>>> outer_refs =
+        map_ring(outer);
+    if (!outer_refs) return outer_refs.error();
+    detail::trim_face_normalize_ring_refs(outer, outer_refs.value(), true);
     if (outer.size() < 3) continue;
     const double outer_area = std::fabs(signed_area2(outer));
     if (!(outer_area > 0.0)) continue;
     double area_uv = outer_area;
-    std::vector<std::vector<Point2d>> holes_uv;
-    holes_uv.reserve(record.children.size());
+    struct HolePiece {
+      std::vector<Point2d> ring;
+      std::vector<std::optional<detail::TrimFaceRingRef>> refs;
+    };
+    std::vector<HolePiece> holes;
+    holes.reserve(record.children.size());
     for (const std::size_t child : record.children) {
-      std::vector<Point2d> hole = cycles[child].ring;
-      detail::trim_face_normalize_ring(hole, false);
-      if (hole.size() < 3) continue;
-      const double hole_area = std::fabs(signed_area2(hole));
+      HolePiece hole;
+      hole.ring = cycles[child].ring;
+      Result<std::vector<std::optional<detail::TrimFaceRingRef>>> hole_refs =
+          map_ring(hole.ring);
+      if (!hole_refs) return hole_refs.error();
+      hole.refs = std::move(hole_refs.value());
+      detail::trim_face_normalize_ring_refs(hole.ring, hole.refs, false);
+      if (hole.ring.size() < 3) continue;
+      const double hole_area = std::fabs(signed_area2(hole.ring));
       if (!(hole_area > 0.0)) continue;
       area_uv -= hole_area;
-      holes_uv.push_back(std::move(hole));
+      holes.push_back(std::move(hole));
     }
     // Holes are ordered by area (descending) and then lexicographically.
-    std::sort(holes_uv.begin(), holes_uv.end(),
-              [](const std::vector<Point2d>& lhs,
-                 const std::vector<Point2d>& rhs) noexcept {
-                const double lhs_area = std::fabs(signed_area2(lhs));
-                const double rhs_area = std::fabs(signed_area2(rhs));
+    std::sort(holes.begin(), holes.end(),
+              [](const HolePiece& lhs, const HolePiece& rhs) noexcept {
+                const double lhs_area = std::fabs(signed_area2(lhs.ring));
+                const double rhs_area = std::fabs(signed_area2(rhs.ring));
                 if (lhs_area != rhs_area) return lhs_area > rhs_area;
-                return detail::trim_face_lex_less(lhs.front(), rhs.front());
+                return detail::trim_face_lex_less(lhs.ring.front(),
+                                                  rhs.ring.front());
               });
     if (!(area_uv > 0.0)) continue;
 
@@ -834,9 +1289,13 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     const double scale = detail::trim_face_metric_scale(projection, record.rep);
     if (!(area_uv * scale > area_floor)) continue;
 
+    const std::size_t outer_count = outer.size();
+    fragment.arc_spans.push_back(span_ring(outer_refs.value(), outer_count));
     fragment.loops_uv.push_back(std::move(outer));
-    for (std::vector<Point2d>& hole : holes_uv) {
-      fragment.loops_uv.push_back(std::move(hole));
+    for (HolePiece& hole : holes) {
+      const std::size_t hole_count = hole.ring.size();
+      fragment.arc_spans.push_back(span_ring(hole.refs, hole_count));
+      fragment.loops_uv.push_back(std::move(hole.ring));
     }
 
     bool duplicate = false;
