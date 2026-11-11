@@ -429,6 +429,7 @@ Algorithm:
 **Files**
 
 - Create: `include/geom/brep/split_solid.hpp`
+- Create: `include/geom/brep/detail/arc_heal.hpp`
 - Create: `tests/unit/brep_split_solid_test.cpp`
 - Modify: `tests/CMakeLists.txt`
 
@@ -449,14 +450,15 @@ Algorithm:
 2. Build the plane patch: frame from `make_plane_frame(plane)`, uv box covering the solid's bounding box corners projected into that frame.
 3. `ssi(face_patch, plane_patch, options)`. A `tangent_contact` or `coincident` issue returns `unsupported "split_solid_by_plane: plane is tangent or coincident with a face"`. Map each returned segment's `ua/va` to a `FaceCut` for that face.
 4. `split_face_curved` for every face; classify each fragment by `surface_eval` at its outer-loop representative point (first ear centroid, as in Task 4). Side = `dot(normal, p) - offset` sign.
-5. Build the cut cap: project every returned cut polyline onto the plane frame, weld and stitch the pieces into closed loops; reject an unclosed loop with `numeric_failure "split_solid_by_plane: cut loops do not close"`. Each side gets one planar cap face on the same plane with its own outward normal: `+n` for the negative side and `-n` for the positive side (so its plane offset flips sign too), with the loops projected into that normal's uv frame and kept with the outer loop CCW.
+4b. Heal co-circular cut chains into exact arcs (`detail::heal_circular_arcs` in `include/geom/brep/detail/arc_heal.hpp`). For every fragment loop, scan maximal runs of at least two consecutive segments that carry no arc provenance: fit a circle through three non-collinear vertices of the run, require every run vertex within `tolerance` of that circle and of its plane, and require the fitted radius not exceed `1e6 * max_chord` (a straight run is not an arc). Replace an accepted run by its two endpoint vertices plus one `CurvedArcSpan` (`CircleCurve3` with the fitted plane normal as axis, the start radial as `x_axis`, `t0/t1` from the endpoints, orientation following the loop). Runs that are straight or not circular stay polylines. SSI vertices are Newton-refined onto both surfaces, so for a cylinder cut perpendicular to its axis the fitted circle is the exact cut circle; this is what makes `pi*r^2*h/8` attainable. Sphere/torus cuts keep a chordal parameter-domain boundary (their uv image is not a straight line); their volume stays chord-limited and this is documented in ADR-0025.
+5. Build the cut cap: project every returned cut polyline onto the plane frame, weld and stitch the pieces into closed loops; reject an unclosed loop with `numeric_failure "split_solid_by_plane: cut loops do not close"`. Each side gets one planar cap face on the same plane with its own outward normal: `+n` for the negative side and `-n` for the positive side (so its plane offset flips sign too), with the loops projected into that normal's uv frame and kept with the outer loop CCW. Heal the cap loop with the same step-4b helper so the cap and the trimmed lateral face share identical exact arc edges.
 6. Faces with no cut are assigned whole to one side; the two cap faces are assigned one per side.
 7. Assemble each side with `assemble_curved_solid`.
 8. If either side has no faces inside the plane (no fragments and no cap area), return `degenerate "split_solid_by_plane: plane does not split the solid"`.
 
 **Steps**
 
-1. Test the quarter cylinder split at `z = 1`: two solids, `validate_topology` clean, each `detail::curved_solid_volume` equal to `pi * r^2 * h / 8` within `1e-9` (exact arcs, so the analytic half is attainable).
+1. Test the quarter cylinder split at `z = 1`: two solids, `validate_topology` clean, each `detail::curved_solid_volume` equal to `pi * r^2 * h / 8` within `1e-9` (exact arcs, so the analytic half is attainable). Across both results, the lateral/cap boundary on `z = 1` must consist of `CircleCurve3` edges (not polylines), each used exactly twice.
 2. Test a box split at `z = 0.5` (all-planar integration path), volumes 4 and 4 within `1e-12`.
 3. Test tangent plane at `z = 2` (touching the top face) -> `unsupported` with the documented message.
 4. RED; implement; Debug/Release.
