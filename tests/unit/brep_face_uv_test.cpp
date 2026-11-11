@@ -515,3 +515,124 @@ TEST_CASE("a cone lateral loop that reaches the apex is unsupported") {
   CHECK(cap_loops.value()[0].outer);
   CHECK(cap_loops.value()[0].points.size() == 32u);
 }
+
+TEST_CASE("an apex-free cone face exposes a partial u ring") {
+  const double half_angle = std::atan2(1.0, 2.0);
+  const double base_radius = 1.0;
+  const double tan_half_angle = std::tan(half_angle);  // 0.5
+  const double v_param = 1.0;
+  const double rho = base_radius - v_param * tan_half_angle;  // 0.5
+  REQUIRE(tan_half_angle == doctest::Approx(0.5));
+
+  geom::SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(
+      geom::Cone3{geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                  geom::Vec3d{1.0, 0.0, 0.0}, base_radius, half_angle});
+  const std::uint32_t curve =
+      editor.add_curve(geom::CircleCurve3{geom::Point3d{0.0, 0.0, v_param},
+                                          geom::Vec3d{1.0, 0.0, 0.0},
+                                          geom::Vec3d{0.0, 1.0, 0.0}, rho});
+  const geom::VertexId seam = editor.add_vertex(geom::Point3d{rho, 0.0, v_param}, 0.0).value();
+  const geom::EdgeId edge = editor.add_edge(seam, seam, curve, 0.0, kTwoPi, 0.0).value();
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 1> coedges{
+      geom::CoedgeSpec{edge, false, geom::kNoGeometry, 0.0}};
+  editor.add_loop(face, coedges, true).value();
+
+  const geom::Brep& brep = editor.brep();
+  const auto loops = geom::face_loops_uv(brep, face, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  CHECK(loops.value()[0].outer);
+  const std::vector<geom::Point2d>& points = loops.value()[0].points;
+  // 33 samples of the closed circle, minus the repeated closing point.
+  REQUIRE(points.size() == 32u);
+
+  const auto& cone = std::get<geom::Cone3>(brep.geometry().surfaces[brep.face(face).surface]);
+  const double step = kTwoPi / 32.0;
+  double min_u = points[0][0];
+  double max_u = points[0][0];
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    const geom::Point2d& point = points[i];
+    min_u = std::min(min_u, point[0]);
+    max_u = std::max(max_u, point[0]);
+    // The circle is a full turn, so every parameter pair sits at v = 1.
+    CHECK(point[1] == doctest::Approx(v_param).epsilon(1e-12));
+    // Cyclic step, including the closing last -> first pair.
+    const geom::Point2d& next = points[(i + 1u) % points.size()];
+    double delta = next[0] - point[0];
+    while (delta > kPi) delta -= kTwoPi;
+    while (delta < -kPi) delta += kTwoPi;
+    CHECK(std::fabs(delta) <= kPi);
+
+    const geom::Point3d reconstructed = cone.eval(point[0], point[1]);
+    const geom::Point3d expected{rho * std::cos(point[0]), rho * std::sin(point[0]), v_param};
+    CHECK(geom::norm2(reconstructed - expected) <= 1e-12);
+    const double implicit = std::hypot(reconstructed[0], reconstructed[1]) -
+                            (base_radius - tan_half_angle * reconstructed[2]);
+    CHECK(std::fabs(implicit) <= 1e-12);
+  }
+  // The ring stops one sample short of a full turn: 2*pi - 2*pi/32.
+  CHECK(max_u - min_u == doctest::Approx(kTwoPi - step).epsilon(1e-12));
+}
+
+TEST_CASE("two loops are reported outer first and keep their winding") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface =
+      editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+
+  const auto add_ring = [&](const std::array<geom::Point3d, 4>& corners, bool outer) {
+    std::array<geom::VertexId, 4> vertices{};
+    std::array<geom::CoedgeSpec, 4> coedges{};
+    for (std::size_t i = 0; i < corners.size(); ++i) {
+      vertices[i] = editor.add_vertex(corners[i], 0.0).value();
+    }
+    for (std::size_t i = 0; i < corners.size(); ++i) {
+      const geom::Point3d& from = corners[i];
+      const geom::Point3d& to = corners[(i + 1u) % corners.size()];
+      const std::uint32_t curve = editor.add_curve(
+          geom::LineCurve3{from, geom::Vec3d{to[0] - from[0], to[1] - from[1], to[2] - from[2]}});
+      const geom::EdgeId ring_edge =
+          editor.add_edge(vertices[i], vertices[(i + 1u) % corners.size()], curve, 0.0, 1.0, 0.0)
+              .value();
+      coedges[i] = geom::CoedgeSpec{ring_edge, false, geom::kNoGeometry, 0.0};
+    }
+    REQUIRE(editor.add_loop(face, coedges, outer).has_value());
+  };
+
+  // The inner ring is stored first and runs clockwise, the outer ring second and
+  // counter-clockwise, so only the outer-first ordering can put them in this
+  // order.
+  const std::array<geom::Point3d, 4> inner_corners{
+      geom::Point3d{0.75, 0.25, 0.0}, geom::Point3d{0.25, 0.25, 0.0},
+      geom::Point3d{0.25, 0.75, 0.0}, geom::Point3d{0.75, 0.75, 0.0}};
+  const std::array<geom::Point3d, 4> outer_corners{
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Point3d{1.0, 0.0, 0.0},
+      geom::Point3d{1.0, 1.0, 0.0}, geom::Point3d{0.0, 1.0, 0.0}};
+  add_ring(inner_corners, false);
+  add_ring(outer_corners, true);
+
+  const geom::Brep& brep = editor.brep();
+  const auto loops = geom::face_loops_uv(brep, face, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 2u);
+  CHECK(loops.value()[0].outer);
+  CHECK_FALSE(loops.value()[1].outer);
+
+  const auto signed_area = [](const std::vector<geom::Point2d>& ring) {
+    double sum = 0.0;
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+      const geom::Point2d& a = ring[i];
+      const geom::Point2d& b = ring[(i + 1u) % ring.size()];
+      sum += a[0] * b[1] - b[0] * a[1];
+    }
+    return 0.5 * sum;
+  };
+  const double outer_area = signed_area(loops.value()[0].points);
+  const double inner_area = signed_area(loops.value()[1].points);
+  CHECK(std::fabs(outer_area) == doctest::Approx(1.0));
+  CHECK(std::fabs(inner_area) == doctest::Approx(0.25));
+  // Opposite winding: a CCW island inside a CW hole (or the other way round).
+  CHECK(outer_area * inner_area < 0.0);
+}

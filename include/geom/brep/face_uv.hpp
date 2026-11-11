@@ -455,9 +455,10 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
 }  // namespace detail
 
 // Reads every boundary loop of `face` in the parameter domain of the face's
-// surface. Each ring is unwrapped so that consecutive parameters differ by less
-// than half a turn, including the wrap from the last point back to the first;
-// the closing point is not repeated. The outer loop is reported first.
+// surface. Consecutive parameters are unwrapped to differ by less than half a
+// turn, and the closing point is not repeated. A ring that wraps a full period
+// (for example the base circle of a cone) is legal: its last-to-first step is
+// then 2*pi rather than a small one. The outer loop is reported first.
 //
 // A coedge uses its stored pcurve when it has one and otherwise samples the
 // edge in 3D and projects the samples with the surface inverse. Parametric
