@@ -41,6 +41,7 @@ set(GEOM_TEST_SOURCES
   unit/brep_pcurve2d_test.cpp
   unit/brep_polyline_curve_test.cpp
   unit/brep_face_uv_test.cpp
+  unit/brep_trim_face_test.cpp
   unit/brep_box_test.cpp
   unit/brep_cylinder_test.cpp
   unit/brep_cone_sphere_test.cpp
