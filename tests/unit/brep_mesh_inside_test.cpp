@@ -68,10 +68,21 @@ TEST_CASE("point_in_tessellation falls back when a ray grazes a shared diagonal"
   REQUIRE(inside.has_value());
   CHECK(inside.value());
 
-  // A point outside whose +x ray also grazes the diagonal must stay outside.
-  const auto outside = point_in_tessellation(mesh, Point3d{1.5, 0.3, 0.3}, kTolerance);
+  // An outside point whose +x ray enters through the x = 0 diagonal is also
+  // ambiguous on that ray and must fall through to another direction.
+  const auto outside = point_in_tessellation(mesh, Point3d{-0.5, 0.3, 0.3}, kTolerance);
   REQUIRE(outside.has_value());
   CHECK_FALSE(outside.value());
+}
+
+TEST_CASE("mesh_inside_triangle_distance2 survives a degenerate triangle") {
+  using geom::v1::detail::mesh_inside_detail::mesh_inside_triangle_distance2;
+  const Point3d a{0.0, 0.0, 0.0};
+  const Point3d b{0.0, 0.0, 0.0};
+  const Point3d c{1.0, 0.0, 0.0};
+  const double d2 = mesh_inside_triangle_distance2(Point3d{0.5, 1.0, 0.0}, a, b, c);
+  CHECK(std::isfinite(d2));
+  CHECK(d2 == doctest::Approx(1.0));
 }
 
 TEST_CASE("point_in_tessellation rejects degenerate inputs") {

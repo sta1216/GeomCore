@@ -3,15 +3,15 @@
 // Point classification against a closed triangulation.
 //
 // The boolean driver classifies fragment representative points by ray parity.
-// A ray that grazes an edge or a vertex cannot prove inside/outside, so four
-// independent directions are tried; if all four are degenerate the query fails
+// A ray that grazes an edge or a vertex cannot prove inside/outside, so six
+// independent directions are tried; if all six are degenerate the query fails
 // instead of guessing. A point within `tolerance` of the mesh surface also
 // fails: classifying a point on the boundary is caller-ambiguous.
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
-#include <limits>
 #include <vector>
 
 #include <geom/brep/tessellate.hpp>
@@ -33,6 +33,18 @@ inline double mesh_inside_dot(const Vec3d& a, const Vec3d& b) noexcept {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
+inline double mesh_inside_segment_distance2(const Point3d& p, const Point3d& a, const Point3d& b) noexcept {
+  const Vec3d ab = b - a;
+  const Vec3d ap = p - a;
+  const double length2 = mesh_inside_dot(ab, ab);
+  double t = 0.0;
+  if (length2 > 0.0) t = mesh_inside_dot(ab, ap) / length2;
+  if (!(t > 0.0)) t = 0.0;
+  if (t > 1.0) t = 1.0;
+  const Vec3d r = ap - ab * t;
+  return mesh_inside_dot(r, r);
+}
+
 // Squared distance from p to the triangle (a, b, c). Ericson, Real-Time
 // Collision Detection, 5.1.5.
 inline double mesh_inside_triangle_distance2(const Point3d& p, const Point3d& a, const Point3d& b,
@@ -40,6 +52,12 @@ inline double mesh_inside_triangle_distance2(const Point3d& p, const Point3d& a,
   const Vec3d ab = b - a;
   const Vec3d ac = c - a;
   const Vec3d ap = p - a;
+  const Vec3d normal = mesh_inside_detail::mesh_inside_cross(ab, ac);
+  if (!(mesh_inside_dot(normal, normal) > 0.0)) {
+    return std::min(mesh_inside_segment_distance2(p, a, b),
+                    std::min(mesh_inside_segment_distance2(p, b, c),
+                             mesh_inside_segment_distance2(p, c, a)));
+  }
   const double d1 = mesh_inside_dot(ab, ap);
   const double d2 = mesh_inside_dot(ac, ap);
   if (d1 <= 0.0 && d2 <= 0.0) return mesh_inside_dot(ap, ap);
@@ -90,7 +108,7 @@ inline double mesh_inside_triangle_distance2(const Point3d& p, const Point3d& a,
 }  // namespace detail
 
 // Returns true when `p` is inside the closed mesh. Fails when `p` lies on the
-// surface within `tolerance`, when a probe ray grazes an edge/vertex in all four
+// surface within `tolerance`, when a probe ray grazes an edge/vertex in all six
 // directions, or when the input is invalid.
 inline Result<bool> point_in_tessellation(const TriMesh& mesh, const Point3d& p,
                                           double tolerance) {
@@ -151,9 +169,10 @@ inline Result<bool> point_in_tessellation(const TriMesh& mesh, const Point3d& p,
       const double t = detail::mesh_inside_detail::mesh_inside_dot(e2, qvec) * inv;
       if (!(t > 0.0)) continue;
 
-      const double scale = 1.0 / (std::sqrt(detail::mesh_inside_detail::mesh_inside_dot(e1, e1)) +
-                                  std::sqrt(detail::mesh_inside_detail::mesh_inside_dot(e2, e2)) +
-                                  std::sqrt(detail::mesh_inside_detail::mesh_inside_dot(c - b, c - b)));
+      const double scale =
+          1.0 / (std::sqrt(detail::mesh_inside_detail::mesh_inside_dot(e1, e1)) +
+                 std::sqrt(detail::mesh_inside_detail::mesh_inside_dot(e2, e2)) +
+                 std::sqrt(detail::mesh_inside_detail::mesh_inside_dot(c - b, c - b)));
       const double eps = tolerance * scale;
       if (u < -eps || v < -eps || u + v > 1.0 + eps) continue;
       if (u <= eps || v <= eps || u + v >= 1.0 - eps) {

@@ -483,7 +483,7 @@ Result<bool> point_in_tessellation(const TriMesh& mesh, const Point3d& p,
                                    double tolerance);
 ```
 
-Algorithm: four direction vectors (`+x`, `+y`, `+z`, normalized `(1,1,1)`). For each, count proper ray-triangle crossings with Moller-Trumbore; a hit with barycentric coordinate within `tolerance` of an edge/vertex marks the ray ambiguous and the next direction is tried. Odd/even parity decides. All four ambiguous -> `numeric_failure "point_in_tessellation: every probe ray is degenerate"`. Non-finite point, empty mesh, or non-positive tolerance -> `non_finite` / `degenerate` / `tolerance_violation`.
+Algorithm: six direction vectors (`+x`, `+y`, `+z` and three normalized asymmetric diagonals `(1,2,3)`, `(3,1,2)`, `(2,3,1)`). For each, count proper ray-triangle crossings with Moller-Trumbore; a hit with barycentric coordinate within `tolerance` of an edge/vertex marks the ray ambiguous and the next direction is tried. Odd/even parity decides. All six ambiguous -> `numeric_failure "point_in_tessellation: every probe ray is degenerate"`. Non-finite point, empty mesh, or non-positive tolerance -> `non_finite` / `degenerate` / `tolerance_violation`.
 
 **Steps**
 
