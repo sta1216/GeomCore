@@ -48,11 +48,11 @@ inline constexpr std::array<CurvedVolumeQuadraturePoint, 7> kCurvedVolumeQuadrat
     {0.101286507323456, 0.101286507323456, 0.797426985353087, 0.125939180544827},
 }};
 
-// A curved uv triangle is split into 2^level pieces per edge so that no piece
-// spans more than roughly kCurvedVolumeTargetEdge of parameter space. The cap
-// of eight levels (256 pieces per edge) keeps the cost bounded while still
-// resolving a full 2*pi turn to about 0.025, which converges the cylinder and
-// torus integrals to roughly 1e-9 relative.
+// A curved uv triangle is split into 2^level pieces per edge, aiming for pieces
+// no longer than roughly kCurvedVolumeTargetEdge. The level is fixed (there is
+// no adaptivity) and capped at eight, so once the cap binds pieces can be longer
+// than the target; measured relative error for cylinders and tori stays near
+// 1e-14 because their integrands are smooth and nearly linear per panel.
 inline constexpr double kCurvedVolumeTargetEdge = 0.025;
 
 inline int curved_volume_subdivision_level(double max_edge) noexcept {
@@ -66,15 +66,14 @@ inline int curved_volume_subdivision_level(double max_edge) noexcept {
 // Signed volume of a closed solid obtained by integrating
 // (1/3) S . (S_u x S_v) over every face's uv polygon.
 //
-// Scope: planar faces are integrated exactly by the seven-point rule. Cylinder
-// lateral faces and caps, and trimmed analytic patches in general, are
-// integrated on the exact surface with the smooth quadrature refined until it
-// converges. Sphere and cone seam and apex cases are not handled, and NURBS
-// surfaces are rejected. The result is the volume of the polygonal (chord)
-// B-rep that the sampled face boundaries describe, not the analytic ideal: the
-// curved faces are approximated by the chords and parameter-domain polygons
-// that face_loops_uv produces, so a cylinder with n cap chords comes out
-// slightly smaller than pi * r^2 * h.
+// Scope: a planar face uses its exact arc-aware area (see
+// curved_volume_planar_area), so a cylinder with circular cap provenance
+// integrates to exactly pi * r^2 * h. Cylinder lateral faces and trimmed
+// analytic patches in general are integrated on the exact surface with the
+// seven-point rule at a fixed subdivision level. Sphere and cone seam and apex
+// cases are not handled, and NURBS surfaces are rejected. Where a loop has no
+// circle provenance (for example a chorded test fixture), the planar area falls
+// back to the chord polygon and the result is that chord B-rep's volume.
 //
 // Conditioning: every uv polygon is translated by its first vertex before
 // triangulation and before the uv-area computation, and each sample is
