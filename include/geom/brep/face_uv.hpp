@@ -371,25 +371,19 @@ inline Result<void> face_uv_fill_arcs(const CircleCurve3* circle, FaceUvRun& run
     } else if (sweep < -kFaceUvPi) {
       sweep += 2.0 * kFaceUvPi;
     }
-    // Half a turn (or more) between two consecutive points has two equally short
-    // arcs, so without an intermediate point the direction is unknowable.
-    if (std::fabs(sweep) >= kFaceUvPi - 1e-9) {
+    // Half a turn (or closer than this band) between two consecutive points has
+    // two equally short arcs, so without an intermediate point the direction is
+    // unknowable. Genuine arcs produced by sampling a CircleCurve3 edge have
+    // many short segments; only a two-point pcurve lands in the band.
+    if (std::fabs(sweep) >= kFaceUvPi - 1e-6) {
       return Error{Errc::numeric_failure,
-                   "face_loops_uv: circular arc direction is ambiguous", 0u, 0u};
+                   "face_loops_uv: circular arc direction is ambiguous",
+                   static_cast<std::uint32_t>(i),
+                   static_cast<std::uint32_t>(run.positions.size())};
     }
-    const double middle = start + 0.5 * sweep;
-    const Vec3d chord = end_point - start_point;
-    const Vec3d tangent =
-        circle->x_axis * (-std::sin(middle)) + circle->y_axis * std::cos(middle);
-    // A short arc's chord is parallel to the tangent at its middle azimuth, so a
-    // vanishing projection means the two directions are indistinguishable (a
-    // half turn, for instance). The wrapped difference above already carries the
-    // direction, so it is not flipped here.
-    const double alignment = dot(chord, tangent);
-    if (std::fabs(alignment) <= 1e-9 * norm2(chord)) {
-      return Error{Errc::numeric_failure,
-                   "face_loops_uv: circular arc direction is ambiguous", 0u, 0u};
-    }
+    // Duplicate consecutive points carry no direction; leave the segment
+    // disengaged rather than inventing a zero-length arc.
+    if (!(std::fabs(sweep) > 0.0)) continue;
     run.segments[i] = FaceUvArcRef{*circle, start, start + sweep};
   }
   return Result<void>{};

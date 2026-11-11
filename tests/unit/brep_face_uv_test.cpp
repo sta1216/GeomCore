@@ -923,28 +923,37 @@ TEST_CASE("a stale pcurve off its circle edge is rejected") {
 }
 
 TEST_CASE("a two point semicircle pcurve has no resolvable arc direction") {
-  geom::SolidEditor editor;
-  const std::uint32_t surface =
-      editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
-  const std::uint32_t curve =
-      editor.add_curve(geom::CircleCurve3{geom::Point3d{0.0, 0.0, 0.0},
-                                          geom::Vec3d{1.0, 0.0, 0.0},
-                                          geom::Vec3d{0.0, 1.0, 0.0}, 1.0});
-  // Two pcurve points a half turn apart leave the traversal direction ambiguous:
-  // the chord and the tangent at the midpoint are orthogonal for both choices.
-  const std::uint32_t flat =
-      editor.add_pcurve(geom::Pcurve2d{geom::Point2d{1.0, 0.0}, geom::Point2d{-1.0, 0.0}});
-  const geom::VertexId start = editor.add_vertex(geom::Point3d{1.0, 0.0, 0.0}, 0.0).value();
-  const geom::VertexId end = editor.add_vertex(geom::Point3d{-1.0, 0.0, 0.0}, 0.0).value();
-  const geom::EdgeId edge = editor.add_edge(start, end, curve, 0.0, kPi, 0.0).value();
-  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
-  const std::array<geom::CoedgeSpec, 1> coedges{
-      geom::CoedgeSpec{edge, false, flat, 0.0}};
-  REQUIRE(editor.add_loop(face, coedges, true).has_value());
+  // The band around a half turn is 1e-6 wide: an exact half turn and an arc
+  // 1e-6 short of one both have two nearly equal candidates, so the direction
+  // is rejected rather than guessed.
+  for (const double end_angle : {kPi, kPi - 1e-6}) {
+    geom::SolidEditor editor;
+    const std::uint32_t surface =
+        editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+    const std::uint32_t curve =
+        editor.add_curve(geom::CircleCurve3{geom::Point3d{0.0, 0.0, 0.0},
+                                            geom::Vec3d{1.0, 0.0, 0.0},
+                                            geom::Vec3d{0.0, 1.0, 0.0}, 1.0});
+    const std::uint32_t flat = editor.add_pcurve(geom::Pcurve2d{
+        geom::Point2d{1.0, 0.0},
+        geom::Point2d{std::cos(end_angle), std::sin(end_angle)}});
+    const geom::VertexId start = editor.add_vertex(geom::Point3d{1.0, 0.0, 0.0}, 0.0).value();
+    const geom::VertexId end =
+        editor
+            .add_vertex(geom::Point3d{std::cos(end_angle), std::sin(end_angle), 0.0}, 0.0)
+            .value();
+    const geom::EdgeId edge = editor.add_edge(start, end, curve, 0.0, end_angle, 0.0).value();
+    const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+    const std::array<geom::CoedgeSpec, 1> coedges{
+        geom::CoedgeSpec{edge, false, flat, 0.0}};
+    REQUIRE(editor.add_loop(face, coedges, true).has_value());
 
-  const auto loops = geom::face_loops_uv(editor.brep(), face, kTolerance);
-  REQUIRE_FALSE(loops.has_value());
-  CHECK(loops.error().code == geom::Errc::numeric_failure);
-  CHECK(std::string_view(loops.error().message) ==
-        "face_loops_uv: circular arc direction is ambiguous");
+    const auto loops = geom::face_loops_uv(editor.brep(), face, kTolerance);
+    REQUIRE_FALSE(loops.has_value());
+    CHECK(loops.error().code == geom::Errc::numeric_failure);
+    CHECK(std::string_view(loops.error().message) ==
+          "face_loops_uv: circular arc direction is ambiguous");
+    CHECK(loops.error().context_a == 0u);
+    CHECK(loops.error().context_b == 2u);
+  }
 }

@@ -1269,3 +1269,27 @@ TEST_CASE("trim_face: a tangency between boundary vertices keeps the cap whole")
   CHECK(fragment_area(result.value()[0]) ==
         doctest::Approx(whole_area).epsilon(1e-12));
 }
+
+TEST_CASE("trim_face: circle hits accept a cut that penetrates past the tolerance") {
+  const geom::CircleCurve3 circle{Point3d{0, 0, 0}, Vec3d{1, 0, 0}, Vec3d{0, 1, 0}, 2.0};
+  // A chord 1e-7 inside the radius is a real penetration at tol 1e-9.
+  const auto inner = geom::detail::trim_face_circle_hits(
+      circle, Point3d{-1.5, 2.0 - 1e-7, 0.0}, Point3d{1.5, 2.0 - 1e-7, 0.0}, 1e-9);
+  REQUIRE(inner.size() == 2);
+  for (const geom::detail::TrimFaceCircleHit& hit : inner) {
+    CHECK(std::fabs(geom::norm2(hit.point - circle.center) - circle.radius) <= 1e-12);
+    CHECK(hit.s > 0.0);
+    CHECK(hit.s < 1.0);
+    CHECK(hit.point[1] == doctest::Approx(2.0 - 1e-7).epsilon(1e-12));
+  }
+  // 1e-10 inside is within the tolerance: a graze, not a cut.
+  CHECK(geom::detail::trim_face_circle_hits(
+            circle, Point3d{-1.5, 2.0 - 1e-10, 0.0}, Point3d{1.5, 2.0 - 1e-10, 0.0},
+            1e-9)
+            .empty());
+  // A chord outside the circle does not hit at all.
+  CHECK(geom::detail::trim_face_circle_hits(
+            circle, Point3d{-1.5, 2.0 + 1e-7, 0.0}, Point3d{1.5, 2.0 + 1e-7, 0.0},
+            1e-9)
+            .empty());
+}

@@ -46,9 +46,10 @@ struct FaceUvLoop {
 `CircleCurve3` (t = atan2 in the circle frame; the segment's directed sweep is
 taken from the coedge orientation) and leaves straight, NURBS and sampled
 segments disengaged. A loop whose size disagrees is `invalid_topology`; a
-segment whose sweep is ambiguous (a two-point semicircle pcurve, or a chord and
-tangent whose directions disagree) is `numeric_failure "face_loops_uv:
-circular arc direction is ambiguous"` rather than being guessed.
+segment whose sweep is ambiguous (within `1e-6` of a half turn, e.g. a two-point
+semicircle pcurve) is `numeric_failure "face_loops_uv: circular arc direction
+is ambiguous"` with the segment index and the loop's point count as
+`context_a`/`context_b`, rather than being guessed.
 
 Junction semantics: when a duplicate point is removed, its two neighbouring
 segments are spliced and the zero-length segment is dropped; the closing point
