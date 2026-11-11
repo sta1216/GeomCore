@@ -28,36 +28,42 @@ Files: `include/geom/brep/face_uv.hpp`, `tests/unit/brep_face_uv_test.cpp`.
 ```cpp
 struct FaceUvArcRef {
   CircleCurve3 circle;   // full circle the source edge lies on
-  double t = 0.0;        // angle of this point, [0, 2*pi)
+  double t0 = 0.0;       // directed start angle of the segment
+  double t1 = 0.0;       // directed end angle; sweep = t1 - t0 in (-pi, pi]
 };
 
 struct FaceUvLoop {
   std::vector<Point2d> points;
   bool outer = false;
-  // Same size as points; engaged for points sampled from a CircleCurve3 edge.
+  // Same size as points: arcs[i] describes points[i] -> points[(i+1) % n]
+  // (the last entry is the closing segment). Engaged only for segments that
+  // come from a CircleCurve3 coedge.
   std::vector<std::optional<FaceUvArcRef>> arcs;
 };
 ```
 
-`face_loops_uv` fills `arcs` for every coedge whose curve is a `CircleCurve3`
-(t = atan2 in the circle frame, normalized), and leaves it empty for lines,
-NURBS, and sampled approximations. A loop whose size disagrees is
-`invalid_topology`.
+`face_loops_uv` fills `arcs` per segment for coedges whose curve is a
+`CircleCurve3` (t = atan2 in the circle frame; the segment's directed sweep is
+taken from the coedge orientation) and leaves straight, NURBS and sampled
+segments disengaged. A loop whose size disagrees is `invalid_topology`; a
+segment whose sweep is ambiguous (a two-point semicircle pcurve, or a chord and
+tangent whose directions disagree) is `numeric_failure "face_loops_uv:
+circular arc direction is ambiguous"` rather than being guessed.
 
-Junction semantics (accepted in the Task 4c implementation): a junction keeps
-one ref; if only the incoming run knows its circle the surviving point inherits
-it, so a closed arc keeps both endpoints. Two legitimately different circles
+Junction semantics: when a duplicate point is removed, its two neighbouring
+segments are spliced and the zero-length segment is dropped; the closing point
+is popped but the closing segment is kept. Two legitimately different circles
 meeting at one point (the torus seam) are a **corner between arcs**, not an
-error: the surviving point keeps the earlier circle and the incoming arc starts
-one point later. Circle-mismatch detection therefore lives in the assembler
-(Task 5), not here.
+error; circle-mismatch detection lives in the assembler (Task 5), not here.
 
 Tests: a cylinder cap loop has engaged refs with radius/center equal to the
-edge and strictly increasing t; the cylinder lateral loop has engaged refs only
-on the bottom and top rim runs; a box face has none; a half-disk
-(`CircleCurve3` with negative `t0`) normalizes every t into [0, 2*pi) and matches
-`circle.eval(t)` within 1e-12; the quarter-cylinder fixture stores its arcs as
-16 `LineCurve3` chords, so its loop is entirely disengaged (regression).
+edge and increasing t; the cylinder lateral loop has engaged refs only on the
+bottom and top rim runs; a box face has none; the half-cylinder fixture reports
+17-point semicircle rims whose spans are exact half turns; a half-disk
+(`CircleCurve3` with negative `t0`) normalizes every t into `[0, 2*pi)` and its
+straight diameter segment stays disengaged; the quarter-cylinder fixture stores
+its arcs as 16 `LineCurve3` chords, so its loop is entirely disengaged
+(regression).
 
 ## Task 4d: exact arc spans in fragments
 
@@ -147,24 +153,24 @@ volume (no arc provenance).
 1. Both uses of an edge must agree: same circle within `tolerance`, spans equal
    up to reversal. Otherwise `invalid_topology "assemble_curved_solid: arc span
    mismatch"`.
-2. Build the edge curve as a rational quadratic NURBS arc
-   (`make_circle_arc_nurbs`): split the span into pieces of at most `pi/2`,
-   each piece is a quadratic Bezier with control points
-   `P0 = C + r*x(t0)`, `P2 = C + r*x(t1)`,
-   `P1 = C + (r / cos(theta/2)) * x((t0+t1)/2)` and weights
-   `{1, cos(theta/2), 1}`; concatenate pieces into one `NurbsCurve` (degree 2,
-   shared endpoints, knot multiplicity 2 at joins). Endpoints replace the
-   welded vertices' positions exactly.
+2. Build the edge curve as an exact `CircleCurve3` on the span's circle: `x_axis`
+   is the unit radial at the start angle and `y_axis = cross(plane_normal,
+   x_axis)`, with the edge's `t0/t1` chosen so increasing parameter follows the
+   run's signed sweep (`t1 > t0`; swap the axes and negate the angles when the
+   sweep is negative; a closed full rim keeps `t1 - t0 == 2*pi`). Storing the
+   exact circle rather than a NURBS approximation preserves `face_loops_uv` arc
+   provenance, so `curved_solid_volume` stays exact instead of falling back to
+   the sampled pcurve. Endpoints replace the welded vertices' positions exactly.
 3. Generate both pcurves by sampling the arc at
    `n = clamp(ceil(span / (2*acos(1 - min(tolerance, 1e-6)/r))), 32, 4096)`
-   points and projecting each into the adjacent face's surface with
-   `face_uv_project`; unwrap periodic u against the previous sample. The
-   resulting pcurve is dense enough that its chord error is <= 1e-6 for volume
-   quadrature.
+   angles from `t0` to `t1` and projecting each into the adjacent face's surface
+   with `face_uv_project`; unwrap periodic u against the previous sample. The
+   resulting pcurve is dense enough for parameter-domain trimming and area
+   estimation.
 4. All other edges keep `make_polyline_curve` and the existing uv polyline.
 
 Tests: a full cylinder split at `z = h/2` then assembled; every arc edge is a
-`NurbsCurve` with degree 2 and endpoints exactly on the original circle;
-`curved_solid_volume` of each half equals `pi*r^2*h/2` within 1e-9 relative
-(Task 4e makes the caps exact); a full-cylinder cap edge that is untouched
-stays `CircleCurve3`; a mismatched span pair is `invalid_topology`.
+`CircleCurve3` with `|t1 - t0|` equal to its span and endpoints exactly on the
+original circle; `curved_solid_volume` of each half equals `pi*r^2*h/2` within
+1e-9 relative (Task 4e makes the caps exact); a mismatched span pair is
+`invalid_topology`.
