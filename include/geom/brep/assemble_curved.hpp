@@ -43,6 +43,10 @@ struct CurvedAssembledFace {
   std::vector<std::vector<Point3d>> loops;      // outer first
   std::vector<std::vector<Point2d>> loops_uv;   // same sizes as loops
   std::vector<std::vector<std::optional<CurvedArcSpan>>> arc_spans;  // same shape; may be empty
+  // True when the fragments were taken from an operand whose material lies on
+  // the other side, so the face normal must be flipped relative to the surface.
+  // The boolean driver sets this for kept B-side fragments.
+  bool reversed = false;
 };
 
 namespace detail {
@@ -249,8 +253,24 @@ inline Result<assemble_curved_piece> assemble_curved_make_run(
     std::size_t start, std::size_t length, double tolerance) {
   const std::size_t size = points.size();
   const CircleCurve3& circle = spans[start].value().circle;
-  if (!(circle.radius > 0.0)) {
+  if (!(circle.radius > 0.0) || !circle.is_valid()) {
     return Error{Errc::invalid_topology, "assemble_curved_solid: arc run is inconsistent", 0u, 0u};
+  }
+  // Every vertex of the run must actually lie on the span circle: a caller that
+  // pairs a radius-2 span with radius-1 points would otherwise assemble a face
+  // whose edge does not pass through its own vertices.
+  const Vec3d normal = cross(circle.x_axis, circle.y_axis);
+  const double radial_slack = std::max(tolerance, 1e-9 * circle.radius);
+  for (std::size_t offset = 0; offset <= length; ++offset) {
+    const Point3d& point = points[(start + offset) % size];
+    const Vec3d offset_from_center = point - circle.center;
+    const double axial = dot(offset_from_center, normal);
+    const Vec3d in_plane = offset_from_center - normal * axial;
+    if (!(std::abs(axial) <= radial_slack) ||
+        !(std::abs(assemble_curved_length(in_plane) - circle.radius) <= radial_slack)) {
+      return Error{Errc::invalid_topology, "assemble_curved_solid: arc run is inconsistent", 0u,
+                   0u};
+    }
   }
   const double angle_tolerance =
       std::min(kFaceUvPi, std::max(1e-12, 2.0 * tolerance / circle.radius));
@@ -265,20 +285,11 @@ inline Result<assemble_curved_piece> assemble_curved_make_run(
                    0u};
     }
     if (width >= 2.0 * kFaceUvPi - angle_tolerance) {
-      // A single segment covering a whole turn: its endpoints coincide, so the
-      // direction is not recoverable from them. Restricting this to a closed
-      // piece keeps the assembler from inventing a direction for an open arc.
-      if (length != 1) {
-        return Error{Errc::invalid_topology, "assemble_curved_solid: arc run is inconsistent", 0u,
-                     0u};
-      }
-      assemble_curved_piece piece;
-      piece.arc = true;
-      piece.start = start;
-      piece.count = 1;
-      piece.sweep = 2.0 * kFaceUvPi;
-      piece.circle = circle;
-      return piece;
+      // A full turn has identical endpoints, so its traversal direction cannot
+      // be recovered from them; the two face uses would both be stored forward
+      // and validate_topology would reject the solid. Reject it up front.
+      return Error{Errc::unsupported, "assemble_curved_solid: a full-turn arc span is ambiguous",
+                   0u, 0u};
     }
     const double begin_angle = face_uv_circle_angle(circle, points[index]);
     const double end_angle = face_uv_circle_angle(circle, points[next]);
@@ -668,7 +679,7 @@ inline Result<Brep> assemble_curved_impl(std::span<const CurvedAssembledFace> fa
   std::vector<FaceId> face_ids;
   face_ids.reserve(faces.size());
   for (std::size_t f = 0; f < faces.size(); ++f) {
-    const Result<FaceId> face = editor.add_face(surface_ids[f], false, tolerance);
+    const Result<FaceId> face = editor.add_face(surface_ids[f], faces[f].reversed, tolerance);
     if (!face) return face.error();
     face_ids.push_back(face.value());
   }

@@ -270,3 +270,36 @@ TEST_CASE("assemble_curved_solid rejects an arc run whose points do not match th
   CHECK(std::string_view(result.error().message) ==
         "assemble_curved_solid: arc run is inconsistent");
 }
+
+TEST_CASE("assemble_curved_make_run rejects a full-turn arc span") {
+  const std::vector<geom::Point3d> points{geom::Point3d{2.0, 0.0, 0.0}};
+  geom::CurvedArcSpan span;
+  span.circle = geom::CircleCurve3{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, 2.0};
+  span.t0 = 0.0;
+  span.t1 = kTwoPi;
+  const std::vector<std::optional<geom::CurvedArcSpan>> spans{span};
+
+  const auto result = geom::detail::assemble_curved_detail::assemble_curved_make_run(
+      points, spans, 0u, 1u, kTolerance);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "assemble_curved_solid: a full-turn arc span is ambiguous");
+}
+
+TEST_CASE("assemble_curved_make_run rejects points off the span circle") {
+  const std::vector<geom::Point3d> points{geom::Point3d{1.0, 0.0, 0.0},
+                                         geom::Point3d{std::cos(0.5), std::sin(0.5), 0.0}};
+  geom::CurvedArcSpan span;
+  span.circle = geom::CircleCurve3{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, 2.0};
+  span.t0 = 0.0;
+  span.t1 = 0.5;
+  const std::vector<std::optional<geom::CurvedArcSpan>> spans{span};
+
+  const auto result = geom::detail::assemble_curved_detail::assemble_curved_make_run(
+      points, spans, 0u, 1u, kTolerance);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::invalid_topology);
+  CHECK(std::string_view(result.error().message) ==
+        "assemble_curved_solid: arc run is inconsistent");
+}
