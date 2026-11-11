@@ -124,8 +124,9 @@ The reviewer must attack these five areas first:
 
 - Modify: `include/geom/brep/topology.hpp`
 - Create: `include/geom/brep/pcurve2d.hpp`
-- Modify: `include/geom/brep/solid_editor.hpp` (`split_edge`, `merge_edges`)
+- Modify: `include/geom/brep/solid_editor.hpp` (`split_edge`, `join_vertex`)
 - Create: `tests/unit/brep_pcurve2d_test.cpp`
+- Modify: 	ests/unit/brep_euler_ops_test.cpp, 	ests/unit/brep_assemble_test.cpp (mechanical p0/p1 -> points.front()/points.back())
 - Modify: `tests/CMakeLists.txt`
 
 **Interfaces**
@@ -152,7 +153,7 @@ Semantics:
 
 - `pcurve_split` walks chord length; `t` is clamped to `[0, 1]`. The split point is inserted once on both sides, so `pcurve_merge(lower, upper)` drops the duplicate junction when the two ends are exactly equal.
 - A malformed pcurve (fewer than two points, non-finite coordinate) makes `pcurve_split` return `non_finite` / `degenerate`; `pcurve_length` returns 0 rather than NaN.
-- `SolidEditor::split_edge` splits every attached pcurve with `pcurve_split(source, t)`; `merge_edges` uses `pcurve_merge(lower, upper)`. A failed split aborts `split_edge` with that error and leaves the editor unchanged (the existing transaction guarantee).
+- `SolidEditor::split_edge` splits every attached pcurve with `pcurve_split(source, t)`; `join_vertex` rebuilds with `pcurve_merge(lower, upper)`. A failed split aborts `split_edge` with that error and leaves the editor unchanged (the existing transaction guarantee).
 
 **Steps**
 
