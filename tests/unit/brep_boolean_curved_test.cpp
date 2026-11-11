@@ -18,6 +18,7 @@
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/solid_editor.hpp>
 #include <geom/brep/split_solid.hpp>
+#include <geom/brep/tessellate.hpp>
 #include <geom/brep/validate.hpp>
 #include <geom/core/error.hpp>
 #include <geom/curves/analytic_curve.hpp>
@@ -271,6 +272,17 @@ geom::SolidId only_solid(const geom::Brep& brep) {
 
 std::string_view message_of(const geom::Error& error) { return std::string_view(error.message); }
 
+// Full analytic cylinder r = 1, h = 2 with its bottom cap at z = 0. Unlike the
+// quarter fixture above its lateral face carries the full periodic seam, so its
+// cuts have to land on the seam edges.
+geom::Brep make_test_cylinder(double tolerance) {
+  const geom::Result<geom::Brep> result =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                          tolerance);
+  REQUIRE(result.has_value());
+  return result.value();
+}
+
 }  // namespace
 
 TEST_CASE("brep: boolean_solid_curved subtracts a box from a quarter cylinder") {
@@ -471,3 +483,180 @@ TEST_CASE("brep: boolean_solid_curved heals the cut rim into exact arcs") {
   }
   CHECK(healed_cap);
 }
+
+TEST_CASE("brep: boolean_solid_curved defers sphere operands") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> sphere_result =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 2.0, tolerance);
+  REQUIRE(sphere_result.has_value());
+  const geom::Brep& sphere = sphere_result.value();
+  REQUIRE(geom::validate_topology(sphere).ok());
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-5.0, -5.0, -5.0}, geom::Point3d{5.0, 5.0, 5.0}, tolerance)
+          .value();
+
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      sphere, only_solid(sphere), box, only_solid(box), geom::SolidBooleanOp::union_,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE(!result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) == "boolean_solid_curved: sphere operands are deferred to M3c");
+}
+
+TEST_CASE("brep: boolean_solid_curved defers torus operands") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> torus_result =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 2.0, 0.5,
+                       tolerance);
+  REQUIRE(torus_result.has_value());
+  const geom::Brep& torus = torus_result.value();
+  REQUIRE(geom::validate_topology(torus).ok());
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-5.0, -5.0, -5.0}, geom::Point3d{5.0, 5.0, 5.0}, tolerance)
+          .value();
+
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::union_,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE(!result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) == "boolean_solid_curved: torus operands are deferred to M3c");
+}
+
+TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a box above its equator") {
+  const double tolerance = 1e-9;
+  const geom::Brep cylinder = make_test_cylinder(tolerance);
+  REQUIRE(geom::validate_topology(cylinder).ok());
+  // z >= 1 leaves the lower half (pi) inside the box and nothing else: the box
+  // volume is 4 * 4 * 9 = 144.
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 1.0}, geom::Point3d{2.0, 2.0, 10.0}, tolerance)
+          .value();
+  REQUIRE(geom::validate_topology(box).ok());
+
+  struct Case {
+    geom::SolidBooleanOp op;
+    double volume;
+  };
+  const Case cases[] = {
+      {geom::SolidBooleanOp::union_, 144.0 + kPi},
+      {geom::SolidBooleanOp::intersection, kPi},
+      {geom::SolidBooleanOp::difference, kPi},
+  };
+  for (const Case& item : cases) {
+    const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+        cylinder, only_solid(cylinder), box, only_solid(box), item.op,
+        geom::CurvedBooleanOptions{tolerance});
+    REQUIRE_MESSAGE(result.has_value(), "boolean_solid_curved failed: "
+                                            << message_of(result.error()));
+    const geom::Brep& brep = result.value().brep;
+    CHECK(geom::validate_topology(brep).ok());
+    CHECK(std::abs(volume_of(brep) - item.volume) <= 1e-6);
+    CHECK(result.value().report.kept ==
+          static_cast<std::uint32_t>(brep.face_ids().size()));
+  }
+}
+
+TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a vertical slab") {
+  const double tolerance = 1e-9;
+  const geom::Brep cylinder = make_test_cylinder(tolerance);
+  const geom::Brep slab =
+      geom::make_box(geom::Point3d{0.5, -2.0, -1.0}, geom::Point3d{2.0, 2.0, 10.0}, tolerance)
+          .value();
+  REQUIRE(geom::validate_topology(cylinder).ok());
+  REQUIRE(geom::validate_topology(slab).ok());
+
+  // The slab keeps x >= 0.5. One cap's area outside the slab is the circular
+  // segment (pi / 3 - sqrt(3) / 4); the cylinder is 2 tall.
+  const double segment = kPi / 3.0 - std::numbers::sqrt3_v<double> / 4.0;
+  const double intersection = 2.0 * segment;
+  const double difference = 2.0 * kPi - intersection;
+  const double slab_volume = 1.5 * 4.0 * 11.0;
+
+  const geom::Result<geom::CurvedBooleanResult> intersect = geom::boolean_solid_curved(
+      cylinder, only_solid(cylinder), slab, only_solid(slab), geom::SolidBooleanOp::intersection,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(intersect.has_value(),
+                  "boolean_solid_curved failed: " << message_of(intersect.error()));
+  CHECK(geom::validate_topology(intersect.value().brep).ok());
+  CHECK(std::abs(volume_of(intersect.value().brep) - intersection) <= 1e-6);
+
+  const geom::Result<geom::CurvedBooleanResult> take_away = geom::boolean_solid_curved(
+      cylinder, only_solid(cylinder), slab, only_solid(slab), geom::SolidBooleanOp::difference,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(take_away.has_value(),
+                  "boolean_solid_curved failed: " << message_of(take_away.error()));
+  CHECK(geom::validate_topology(take_away.value().brep).ok());
+  CHECK(std::abs(volume_of(take_away.value().brep) - difference) <= 1e-6);
+
+  const geom::Result<geom::CurvedBooleanResult> united = geom::boolean_solid_curved(
+      cylinder, only_solid(cylinder), slab, only_solid(slab), geom::SolidBooleanOp::union_,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(united.has_value(),
+                  "boolean_solid_curved failed: " << message_of(united.error()));
+  CHECK(geom::validate_topology(united.value().brep).ok());
+  CHECK(std::abs(volume_of(united.value().brep) - (slab_volume + difference)) <= 1e-6);
+}
+
+TEST_CASE("brep: boolean_solid_curved defers a symmetric difference that touches itself") {
+  const double tolerance = 1e-9;
+  const geom::Brep a =
+      geom::make_box(geom::Point3d{0.0, 0.0, 0.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance)
+          .value();
+  const geom::Brep b =
+      geom::make_box(geom::Point3d{1.0, 1.0, 1.0}, geom::Point3d{3.0, 3.0, 3.0}, tolerance)
+          .value();
+  REQUIRE(geom::validate_topology(a).ok());
+  REQUIRE(geom::validate_topology(b).ok());
+
+  // Both remnants keep the shared cut faces, so the result is non-manifold along
+  // their common edges: the assembler rejects it with invalid_topology, which the
+  // driver reports as deferred instead of leaking the internal message.
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      a, only_solid(a), b, only_solid(b), geom::SolidBooleanOp::symmetric_difference,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE(!result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) ==
+        "boolean_solid_curved: result touches itself along an edge");
+}
+
+TEST_CASE("brep: boolean_solid_curved classification mesh is watertight") {
+  const double tolerance = 1e-9;
+  const geom::Brep quarter = make_exact_quarter_cylinder(1.0, 2.0, tolerance);
+  REQUIRE(geom::validate_topology(quarter).ok());
+  // tessellate only accepts trimmed faces that are full primitives, so the
+  // quarter fixture with its open rim arcs exercises the uv fallback mesh.
+  const geom::Result<geom::TriMesh> tessellated =
+      geom::tessellate(quarter, geom::TessellationOptions{});
+  CHECK(!tessellated.has_value());
+
+  const auto mesh_of = [&tolerance](const geom::Brep& brep) {
+    std::vector<geom::detail::CurvedBooleanFaceInfo> infos;
+    for (const geom::FaceId id : brep.face_ids()) {
+      const geom::Result<geom::detail::CurvedBooleanFaceInfo> info =
+          geom::detail::curved_boolean_face_info(brep, id, tolerance);
+      REQUIRE(info.has_value());
+      infos.push_back(info.value());
+    }
+    const geom::Result<geom::TriMesh> mesh =
+        geom::detail::curved_boolean_solid_mesh(brep, infos, tolerance);
+    REQUIRE_MESSAGE(mesh.has_value(), "classification mesh failed: "
+                                          << message_of(mesh.error()));
+    return mesh.value();
+  };
+
+  const geom::detail::CurvedBooleanMeshClosure fallback =
+      geom::detail::curved_boolean_mesh_closure(mesh_of(quarter));
+  CHECK(fallback.edges > 0);
+  CHECK(fallback.used_once == 0);
+  CHECK(fallback.nonmanifold == 0);
+  CHECK(fallback.closed());
+
+  // A full primitive goes through tessellate instead; its mesh must be closed
+  // too, otherwise the driver would fall back to a mesh it cannot trust.
+  const geom::detail::CurvedBooleanMeshClosure full =
+      geom::detail::curved_boolean_mesh_closure(mesh_of(make_test_cylinder(tolerance)));
+  CHECK(full.closed());
+}
+

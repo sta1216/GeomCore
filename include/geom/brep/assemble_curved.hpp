@@ -533,6 +533,81 @@ inline Result<Brep> assemble_curved_impl(std::span<const CurvedAssembledFace> fa
     return Error{Errc::invalid_topology, "assemble_curved_solid: too many vertices", 0u, 0u};
   }
 
+  // Step 3b: split every arc run at the welded vertices lying inside it. A run
+  // becomes one edge between its two end vertices, so a vertex that another
+  // face uses in the middle of the run would leave that face's piece of the arc
+  // unpaired: the assembler pairs edges by endpoints only. Trimming cannot know
+  // about the other operand's vertices, so the split happens here where every
+  // vertex is known. It changes no geometry, only the edge subdivision.
+  {
+    const std::vector<Point3d>& vertices = welder.points();
+    const double angle_epsilon = 1e-12;
+    for (std::size_t f = 0; f < faces.size(); ++f) {
+      for (std::size_t l = 0; l < layouts[f].size(); ++l) {
+        std::vector<assemble_curved_piece> pieces = std::move(layouts[f][l]);
+        std::vector<assemble_curved_piece> split_pieces;
+        split_pieces.reserve(pieces.size());
+        for (const assemble_curved_piece& piece : pieces) {
+          const double span = std::abs(piece.sweep);
+          if (!piece.arc || !(span > angle_epsilon)) {
+            split_pieces.push_back(piece);
+            continue;
+          }
+          const double radius = piece.circle.radius;
+          const Vec3d normal = assemble_curved_unit(cross(piece.circle.x_axis,
+                                                          piece.circle.y_axis));
+          const double radial_slack = std::max(tolerance, 1e-9 * radius);
+          const double direction = piece.sweep > 0.0 ? 1.0 : -1.0;
+          const double start_angle = face_uv_circle_angle(piece.circle, vertices[piece.v0]);
+          const auto fold = [](double angle) {
+            const double turn = 2.0 * kFaceUvPi;
+            double value = std::fmod(angle, turn);
+            if (value < 0.0) value += turn;
+            return value;
+          };
+          std::vector<std::pair<double, std::uint32_t>> splits;
+          for (std::uint32_t v = 0; v < vertices.size(); ++v) {
+            if (v == piece.v0 || v == piece.v1) continue;
+            const Vec3d offset = vertices[v] - piece.circle.center;
+            if (!(std::abs(dot(offset, normal)) <= radial_slack)) continue;
+            const Vec3d in_plane = offset - normal * dot(offset, normal);
+            if (!(std::abs(assemble_curved_length(in_plane) - radius) <= radial_slack)) {
+              continue;
+            }
+            const double angle = face_uv_circle_angle(piece.circle, vertices[v]);
+            const double along =
+                fold(direction > 0.0 ? angle - start_angle : start_angle - angle);
+            if (along <= angle_epsilon || along >= span - angle_epsilon) continue;
+            splits.emplace_back(along, v);
+          }
+          if (splits.empty()) {
+            split_pieces.push_back(piece);
+            continue;
+          }
+          std::sort(splits.begin(), splits.end());
+          double previous = 0.0;
+          std::uint32_t previous_vertex = piece.v0;
+          for (const std::pair<double, std::uint32_t>& split : splits) {
+            if (!(split.first - previous > angle_epsilon)) continue;
+            assemble_curved_piece sub = piece;
+            sub.sweep = direction * (split.first - previous);
+            sub.v0 = previous_vertex;
+            sub.v1 = split.second;
+            split_pieces.push_back(sub);
+            previous = split.first;
+            previous_vertex = split.second;
+          }
+          assemble_curved_piece tail = piece;
+          tail.sweep = direction * (span - previous);
+          tail.v0 = previous_vertex;
+          tail.v1 = piece.v1;
+          split_pieces.push_back(tail);
+        }
+        layouts[f][l] = std::move(split_pieces);
+      }
+    }
+  }
+
   // Step 4: group the uses by undirected key and check that every edge is
   // shared by exactly two compatible pieces.
   std::vector<assemble_curved_use> uses;

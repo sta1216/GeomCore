@@ -95,4 +95,10 @@ target_link_libraries(geom_tests PRIVATE geom_core doctest::doctest)
 # CHECK on std::string_view (its operator<< needs the real <ostream>). Ask
 # doctest to include the standard headers instead of forward-declaring them.
 target_compile_definitions(geom_tests PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
+if(MSVC)
+  # The curved-boolean test translation unit instantiates enough geometry
+  # templates, plus doctest, to exceed the default object section limit in
+  # Debug builds.
+  target_compile_options(geom_tests PRIVATE /bigobj)
+endif()
 add_test(NAME geom_tests COMMAND geom_tests)

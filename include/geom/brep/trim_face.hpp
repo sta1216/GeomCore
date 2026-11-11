@@ -506,6 +506,142 @@ inline std::optional<CurvedArcSpan> trim_face_ring_span(
   return CurvedArcSpan{arc->circle, shifted, shifted + (high - low)};
 }
 
+// True when the uv point lies on the face boundary within `tolerance`.
+inline bool trim_face_uv_on_ring(const std::vector<std::vector<Point2d>>& loops,
+                                 const Point2d& point, double tolerance) noexcept {
+  for (const std::vector<Point2d>& ring : loops) {
+    const std::size_t count = ring.size();
+    if (count < 2) continue;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (face_query_point_segment_distance(point, ring[i], ring[(i + 1) % count]) <= tolerance) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// True when the uv point is on the face: on a ring counts as inside, otherwise
+// the ring parity decides (a hole ring flips it back to outside).
+inline bool trim_face_uv_inside(const std::vector<std::vector<Point2d>>& loops,
+                                const Point2d& point, double tolerance) noexcept {
+  if (trim_face_uv_on_ring(loops, point, tolerance)) return true;
+  bool inside = false;
+  for (const std::vector<Point2d>& ring : loops) {
+    if (face_query_point_in_ring(ring, point)) inside = !inside;
+  }
+  return inside;
+}
+
+// Closest point of the boundary to `point`.
+inline Point2d trim_face_nearest_ring_point(const std::vector<std::vector<Point2d>>& loops,
+                                            const Point2d& point) noexcept {
+  Point2d best = point;
+  double best_distance = std::numeric_limits<double>::infinity();
+  for (const std::vector<Point2d>& ring : loops) {
+    const std::size_t count = ring.size();
+    if (count < 2) continue;
+    for (std::size_t i = 0; i < count; ++i) {
+      const Point2d& a = ring[i];
+      const Point2d& b = ring[(i + 1) % count];
+      const double distance = face_query_point_segment_distance(point, a, b);
+      if (!(distance < best_distance)) continue;
+      best_distance = distance;
+      best = trim_face_project_on_edge(point, a, b);
+    }
+  }
+  return best;
+}
+
+// The point where the segment from an inside point to an outside point crosses
+// the boundary. Bisection converges on the ring, then the crossing is projected
+// onto the crossed ring segment so the caller gets an exact boundary point.
+inline Point2d trim_face_boundary_crossing(const std::vector<std::vector<Point2d>>& loops,
+                                           const Point2d& inside, const Point2d& outside,
+                                           double tolerance) noexcept {
+  double low = 0.0;
+  double high = 1.0;
+  for (int step = 0; step < 60; ++step) {
+    const double mid = 0.5 * (low + high);
+    const Point2d point{inside[0] + mid * (outside[0] - inside[0]),
+                        inside[1] + mid * (outside[1] - inside[1])};
+    if (trim_face_uv_inside(loops, point, tolerance)) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+  const Point2d point{inside[0] + low * (outside[0] - inside[0]),
+                      inside[1] + low * (outside[1] - inside[1])};
+  return trim_face_nearest_ring_point(loops, point);
+}
+
+// Clips one cut chain to the face. The intersector traces a curve over the whole
+// parameter patch, which for a trimmed face (a disk cap, say) reaches past the
+// real boundary. The arc junctions inserted before this point are exact boundary
+// points, so a chain that leaves the face and comes back keeps those exact
+// crossings and only the outside pieces are dropped here.
+inline std::vector<std::vector<Point2d>> trim_face_clip_cut(
+    const std::vector<std::vector<Point2d>>& loops, const std::vector<Point2d>& chain, bool closed,
+    double tolerance) {
+  const std::size_t count = chain.size();
+  if (count < 2) return {};
+  std::vector<char> flags(count, 0);
+  std::size_t inside_count = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    flags[i] = trim_face_uv_inside(loops, chain[i], tolerance) ? 1 : 0;
+    inside_count += flags[i] != 0 ? 1u : 0u;
+  }
+  if (inside_count == count) return {chain};
+  if (inside_count == 0) return {};
+
+  std::vector<Point2d> points = chain;
+  std::vector<char> state = flags;
+  if (closed) {
+    // Start at an outside point so an inside run never wraps the array end.
+    std::size_t start = 0;
+    while (start < points.size() && state[start] != 0) ++start;
+    if (start == points.size()) return {};
+    const auto offset = static_cast<std::ptrdiff_t>(start);
+    std::rotate(points.begin(), points.begin() + offset, points.end());
+    std::rotate(state.begin(), state.begin() + offset, state.end());
+  }
+
+  std::vector<std::vector<Point2d>> runs;
+  std::vector<Point2d> current;
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    if (state[i] != 0) {
+      if (current.empty() && i > 0) {
+        current.push_back(trim_face_boundary_crossing(loops, points[i], points[i - 1], tolerance));
+      }
+      current.push_back(points[i]);
+      continue;
+    }
+    if (current.empty()) continue;
+    current.push_back(trim_face_boundary_crossing(loops, points[i - 1], points[i], tolerance));
+    runs.push_back(std::move(current));
+    current.clear();
+  }
+  if (!current.empty()) runs.push_back(std::move(current));
+
+  std::vector<std::vector<Point2d>> clipped;
+  clipped.reserve(runs.size());
+  for (std::vector<Point2d>& run : runs) {
+    std::vector<Point2d> piece;
+    piece.reserve(run.size());
+    for (const Point2d& point : run) {
+      if (!piece.empty()) {
+        const double du = point[0] - piece.back()[0];
+        const double dv = point[1] - piece.back()[1];
+        if (du * du + dv * dv <= tolerance * tolerance) continue;
+      }
+      piece.push_back(point);
+    }
+    if (piece.size() >= 2) clipped.push_back(std::move(piece));
+  }
+  return clipped;
+}
+
 }  // namespace detail
 
 // Splits `face` along `cuts` and returns the resulting fragments in a
@@ -634,6 +770,25 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     if (closed) points.back() = points.front();
     cut_points.push_back(std::move(points));
     cut_closed.push_back(closed ? 1 : 0);
+  }
+  // A cut whose points all coincide carries no direction. Reject it before the
+  // clipping step below: clipping would drop it entirely and the face would be
+  // returned unsplit instead of reporting the degenerate input. The test is
+  // exact, matching the arrangement's duplicate-segment test, so a tiny but
+  // genuine closed island still reaches the small-fragment filter.
+  for (std::size_t c = 0; c < cut_points.size(); ++c) {
+    bool degenerate = true;
+    for (const Point2d& point : cut_points[c]) {
+      if (!detail::trim_face_same_xy(point, cut_points[c].front())) {
+        degenerate = false;
+        break;
+      }
+    }
+    if (degenerate) {
+      return Error{Errc::degenerate,
+                   "split_face_curved: cut collapses to a point", face.index(),
+                   static_cast<std::uint32_t>(c)};
+    }
   }
 
   // Exact arc junctions. A cut segment that meets a boundary arc is split at
@@ -817,6 +972,31 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     }
   }
 
+  // The intersector traces a cut over the whole parameter patch, which for a
+  // trimmed face reaches past the real boundary (a plane through a disk cap is
+  // the usual case). Keep only the part of each chain that lies on the face; the
+  // arc junctions inserted above are exact boundary points, so a chain that
+  // leaves through an arc keeps an exact crossing. Nothing changes for callers
+  // whose cuts already end on the boundary.
+  {
+    std::vector<std::vector<Point2d>> clipped_points;
+    std::vector<char> clipped_closed;
+    clipped_points.reserve(cut_points.size());
+    clipped_closed.reserve(cut_points.size());
+    for (std::size_t c = 0; c < cut_points.size(); ++c) {
+      std::vector<std::vector<Point2d>> pieces = detail::trim_face_clip_cut(
+          loops, cut_points[c], cut_closed[c] != 0, snap_radius);
+      for (std::vector<Point2d>& piece : pieces) {
+        const bool piece_closed =
+            piece.size() >= 3 && detail::trim_face_same_xy(piece.front(), piece.back());
+        clipped_points.push_back(std::move(piece));
+        clipped_closed.push_back(piece_closed ? 1 : 0);
+      }
+    }
+    cut_points.swap(clipped_points);
+    cut_closed.swap(clipped_closed);
+  }
+
   // Snap every open cut endpoint. A welded group of endpoints shares one exact
   // coordinate so touching cuts and the boundary meet exactly. A free endpoint
   // (not on the boundary and not welded to another cut) must T-junction onto
@@ -829,7 +1009,7 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     std::size_t cut = 0;
   };
   std::vector<Endpoint> endpoints;
-  for (std::size_t c = 0; c < cuts.size(); ++c) {
+  for (std::size_t c = 0; c < cut_points.size(); ++c) {
     if (cut_closed[c] != 0) continue;
     endpoints.push_back(Endpoint{cut_points[c].front(),
                                  detail::trim_face_find_snap(
@@ -901,7 +1081,7 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
         bool have_hit = false;
         double best_distance = 0.0;
         CutInsert best{};
-        for (std::size_t host = 0; host < cuts.size(); ++host) {
+        for (std::size_t host = 0; host < cut_points.size(); ++host) {
           if (host == sole_cut) continue;
           const std::vector<Point2d>& chain = cut_points[host];
           for (std::size_t e = 0; e + 1 < chain.size(); ++e) {
@@ -944,11 +1124,11 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
   // Insert T-junction projections into the host cut polylines at their original
   // segment positions. The endpoint and the host then share one exact vertex.
   if (!cut_inserts.empty()) {
-    std::vector<std::vector<CutInsert>> per_cut(cuts.size());
+    std::vector<std::vector<CutInsert>> per_cut(cut_points.size());
     for (const CutInsert& insert : cut_inserts) {
       per_cut[insert.cut].push_back(insert);
     }
-    for (std::size_t c = 0; c < cuts.size(); ++c) {
+    for (std::size_t c = 0; c < cut_points.size(); ++c) {
       if (per_cut[c].empty()) continue;
       std::stable_sort(per_cut[c].begin(), per_cut[c].end(),
                        [](const CutInsert& lhs, const CutInsert& rhs) noexcept {
@@ -1007,7 +1187,7 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
 
   // Rewrite the open cut chains with the welded endpoint coordinates.
   std::size_t endpoint_index = 0;
-  for (std::size_t c = 0; c < cuts.size(); ++c) {
+  for (std::size_t c = 0; c < cut_points.size(); ++c) {
     if (cut_closed[c] != 0) continue;
     cut_points[c].front() = endpoints[endpoint_index].final;
     cut_points[c].back() = endpoints[endpoint_index + 1].final;
@@ -1020,7 +1200,7 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
   // never dropped, however short: dropping one would silently disconnect the
   // chain into two open pieces, and the arrangement would see two free interior
   // endpoints instead of a cut crossing the face.
-  for (std::size_t c = 0; c < cuts.size(); ++c) {
+  for (std::size_t c = 0; c < cut_points.size(); ++c) {
     if (cut_closed[c] != 0) continue;
     std::vector<Point2d>& chain = cut_points[c];
     while (chain.size() > 2 &&
@@ -1042,7 +1222,7 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
   std::vector<ArrangementSegment> segments;
   std::size_t segment_total = 0;
   for (const std::vector<Point2d>& ring : rings) segment_total += ring.size();
-  segments.reserve(segment_total + cuts.size() * 8u);
+  segments.reserve(segment_total + cut_points.size() * 8u);
   for (std::size_t r = 0; r < rings.size(); ++r) {
     const std::vector<Point2d>& ring = rings[r];
     for (std::size_t i = 0; i < ring.size(); ++i) {
@@ -1052,7 +1232,7 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
       segments.push_back(ArrangementSegment{a, b, 0u});
     }
   }
-  for (std::size_t c = 0; c < cuts.size(); ++c) {
+  for (std::size_t c = 0; c < cut_points.size(); ++c) {
     const std::vector<Point2d>& chain = cut_points[c];
     std::size_t used = 0;
     for (std::size_t i = 0; i + 1 < chain.size(); ++i) {
