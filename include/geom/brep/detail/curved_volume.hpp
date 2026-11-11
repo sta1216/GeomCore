@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -19,6 +20,7 @@
 #include <geom/primitives/point.hpp>
 #include <geom/primitives/vec.hpp>
 #include <geom/surfaces/nurbs_surface.hpp>
+#include <geom/surfaces/plane.hpp>
 
 namespace geom {
 inline namespace v1 {
@@ -46,11 +48,42 @@ inline constexpr std::array<CurvedVolumeQuadraturePoint, 7> kCurvedVolumeQuadrat
     {0.101286507323456, 0.101286507323456, 0.797426985353087, 0.125939180544827},
 }};
 
+// A curved uv triangle is split into 2^level pieces per edge so that no piece
+// spans more than roughly kCurvedVolumeTargetEdge of parameter space. The cap
+// of eight levels (256 pieces per edge) keeps the cost bounded while still
+// resolving a full 2*pi turn to about 0.025, which converges the cylinder and
+// torus integrals to roughly 1e-9 relative.
+inline constexpr double kCurvedVolumeTargetEdge = 0.025;
+
+inline int curved_volume_subdivision_level(double max_edge) noexcept {
+  constexpr double kMaxPanels = 256.0;
+  if (!(max_edge > kCurvedVolumeTargetEdge)) return 0;
+  const double panels = max_edge / kCurvedVolumeTargetEdge;
+  if (!(panels < kMaxPanels)) return 8;
+  return std::min(8, static_cast<int>(std::ceil(std::log2(panels))));
+}
+
 // Signed volume of a closed solid obtained by integrating
-// (1/3) S . (S_u x S_v) over every face's exact uv polygon. Planar faces are
-// integrated exactly by the quadrature; curved faces use their analytic
-// parameterization evaluated at the same seven points, so a trimmed face is
-// handled without ever tessellating it in three dimensions.
+// (1/3) S . (S_u x S_v) over every face's uv polygon.
+//
+// Scope: planar faces are integrated exactly by the seven-point rule. Cylinder
+// lateral faces and caps, and trimmed analytic patches in general, are
+// integrated on the exact surface with the smooth quadrature refined until it
+// converges. Sphere and cone seam and apex cases are not handled, and NURBS
+// surfaces are rejected. The result is the volume of the polygonal (chord)
+// B-rep that the sampled face boundaries describe, not the analytic ideal: the
+// curved faces are approximated by the chords and parameter-domain polygons
+// that face_loops_uv produces, so a cylinder with n cap chords comes out
+// slightly smaller than pi * r^2 * h.
+//
+// Conditioning: every uv polygon is translated by its first vertex before
+// triangulation and before the uv-area computation, and each sample is
+// translated back before surface_eval(), so the parameterization is unchanged
+// while the shoelace sums stay well conditioned even when the face parameters
+// are of order 1e9. The divergence integrand is additionally measured from a
+// fixed point of the solid: a closed shell has zero normal flux, so this is an
+// exact change of origin, but it keeps a solid placed far from the world origin
+// from losing its volume to cancellation between the large face contributions.
 inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, double tolerance) {
   if (!std::isfinite(tolerance) || tolerance <= 0.0) {
     return Error{Errc::tolerance_violation,
@@ -97,6 +130,8 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
   }
 
   double total = 0.0;
+  bool has_reference = false;
+  Point3d reference{0.0, 0.0, 0.0};
   for (const ShellId shell_id : shells) {
     for (const FaceId face_id : brep.shell_faces(shell_id)) {
       const Face& face = brep.face(face_id);
@@ -134,6 +169,15 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
         if (i != outer_index) append_ring(loops[i]);
       }
 
+      // Translate the polygon so that its first vertex is the origin. The
+      // shoelace sums and the triangulation predicates then work on the small
+      // offsets instead of the absolute parameters, which may be of order 1e9.
+      const Point2d shift = polygon.vertices.front();
+      for (Point2d& point : polygon.vertices) {
+        point[0] -= shift[0];
+        point[1] -= shift[1];
+      }
+
       const Triangulation2 triangulation = triangulate_polygon2(polygon);
       if (!triangulation.ok) {
         return Error{Errc::degenerate, "curved_solid_volume: face triangulation failed",
@@ -141,7 +185,34 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
       }
 
       const SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
+      const bool planar = std::holds_alternative<Plane3>(surface);
       double face_volume = 0.0;
+
+      // Integrates the seven-point rule over one uv subtriangle. `area` is the
+      // subtriangle's parameter-domain area. The shift is added back only for
+      // the surface evaluation, so the parameterization is unchanged.
+      const auto integrate = [&](const Point2d& p0, const Point2d& p1, const Point2d& p2,
+                                 double area) -> Result<double> {
+        double sum = 0.0;
+        for (const CurvedVolumeQuadraturePoint& point : kCurvedVolumeQuadraturePoints) {
+          const double u = point.a * p0[0] + point.b * p1[0] + point.c * p2[0] + shift[0];
+          const double v = point.a * p0[1] + point.b * p1[1] + point.c * p2[1] + shift[1];
+          const Result<SurfacePoint> sample = surface_eval(surface, u, v);
+          if (!sample.has_value()) return sample.error();
+
+          const SurfacePoint& evaluated = sample.value();
+          if (!has_reference) {
+            reference = evaluated.p;
+            has_reference = true;
+          }
+          const Vec3d position{evaluated.p[0] - reference[0], evaluated.p[1] - reference[1],
+                               evaluated.p[2] - reference[2]};
+          const Vec3d normal = cross(evaluated.du, evaluated.dv);
+          sum += area * point.weight * dot(position, normal) / 3.0;
+        }
+        return sum;
+      };
+
       for (const std::array<std::uint32_t, 3>& triangle : triangulation.triangles) {
         const Point2d& a = polygon.vertices[triangle[0]];
         const Point2d& b = polygon.vertices[triangle[1]];
@@ -154,16 +225,47 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
         }
         const double area_uv = 0.5 * twice_area;
 
-        for (const CurvedVolumeQuadraturePoint& point : kCurvedVolumeQuadraturePoints) {
-          const double u = point.a * a[0] + point.b * b[0] + point.c * c[0];
-          const double v = point.a * a[1] + point.b * b[1] + point.c * c[1];
-          const Result<SurfacePoint> sample = surface_eval(surface, u, v);
-          if (!sample.has_value()) return sample.error();
+        const auto edge_length = [](const Point2d& p, const Point2d& q) {
+          return std::hypot(q[0] - p[0], q[1] - p[1]);
+        };
+        const int level =
+            planar ? 0
+                   : curved_volume_subdivision_level(std::max({edge_length(a, b),
+                                                               edge_length(b, c),
+                                                               edge_length(c, a)}));
+        if (level == 0) {
+          const Result<double> contribution = integrate(a, b, c, area_uv);
+          if (!contribution.has_value()) return contribution.error();
+          face_volume += contribution.value();
+          continue;
+        }
 
-          const SurfacePoint& evaluated = sample.value();
-          const Vec3d position{evaluated.p[0], evaluated.p[1], evaluated.p[2]};
-          const Vec3d normal = cross(evaluated.du, evaluated.dv);
-          face_volume += area_uv * point.weight * dot(position, normal) / 3.0;
+        // Barycentric grid with 2^level parts per edge. Each subtriangle has
+        // area_uv / parts^2 and the same orientation as its parent.
+        const int parts = 1 << level;
+        const double step = 1.0 / static_cast<double>(parts);
+        const double sub_area = area_uv * step * step;
+        const auto grid_point = [&](int i, int j) {
+          const double fi = static_cast<double>(i) * step;
+          const double fj = static_cast<double>(j) * step;
+          return Point2d{a[0] + fi * (b[0] - a[0]) + fj * (c[0] - a[0]),
+                         a[1] + fi * (b[1] - a[1]) + fj * (c[1] - a[1])};
+        };
+        for (int i = 0; i < parts; ++i) {
+          for (int j = 0; j < parts - i; ++j) {
+            const Point2d p00 = grid_point(i, j);
+            const Point2d p10 = grid_point(i + 1, j);
+            const Point2d p01 = grid_point(i, j + 1);
+            const Result<double> first = integrate(p00, p10, p01, sub_area);
+            if (!first.has_value()) return first.error();
+            face_volume += first.value();
+            if (i + j + 1 < parts) {
+              const Point2d p11 = grid_point(i + 1, j + 1);
+              const Result<double> second = integrate(p10, p11, p01, sub_area);
+              if (!second.has_value()) return second.error();
+              face_volume += second.value();
+            }
+          }
         }
       }
 
