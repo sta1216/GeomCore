@@ -883,5 +883,3 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
 
 }  // namespace v1
 }  // namespace geom
-
-

@@ -532,6 +532,28 @@ TEST_CASE("trim_face: an interior sub-tolerance step keeps the cut connected") {
   CHECK(std::max(first, second) == doctest::Approx(3.0).epsilon(1e-12));
 }
 
+TEST_CASE("trim_face: a sub-tolerance first step of an open cut is collapsed") {
+  const Brep box = make_box(Point3d{0, 0, 0}, Point3d{2, 2, 2}, kTol).value();
+  const FaceId top = plane_face(box, Vec3d{0, 0, 1}, 2.0);
+  REQUIRE_FALSE(top.is_null());
+
+  // The first step is 1.4e-9 long, below the 1e-6 tolerance. Collapsing it
+  // leaves the diagonal from the corner to (2,1), which splits the face into
+  // areas 1 and 3; keeping it would shift the split by ~5e-10 in area.
+  const std::vector<FaceCut> cuts{uv_cut(
+      box, top,
+      {Point3d{0, 0, 2}, Point3d{1e-9, 1e-9, 2}, Point3d{2, 1, 2}})};
+  const Result<std::vector<CurvedFragment>> fragments =
+      split_face_curved(box, top, cuts, 1e-6);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 2);
+  const double first = fragment_area(fragments.value()[0]);
+  const double second = fragment_area(fragments.value()[1]);
+  CHECK(first + second == doctest::Approx(4.0).epsilon(1e-12));
+  CHECK(std::min(first, second) == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(std::max(first, second) == doctest::Approx(3.0).epsilon(1e-12));
+}
+
 TEST_CASE("trim_face: a fragment's holes are ordered by descending area") {
   const std::array<Point3d, 4> outer{Point3d{0, 0, 0}, Point3d{4, 0, 0},
                                      Point3d{4, 4, 0}, Point3d{0, 4, 0}};
