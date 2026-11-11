@@ -31,8 +31,9 @@ struct FaceCut {
 
 // One piece of a boundary arc carried by a fragment ring: the circle and the
 // parameter interval the ring follows. t0 < t1 and t1 - t0 <= 2*pi; a segment
-// that closes a full circle has t1 - t0 == 2*pi. The interval is geometric, so
-// the ring may traverse it in either direction.
+// that closes a full circle has t1 - t0 == 2*pi. The interval is the geometric
+// extent of the fragment's signed arc reference, which records the traversal
+// direction, so the ring may follow the interval in either direction.
 struct CurvedArcSpan {
   CircleCurve3 circle;
   double t0 = 0.0;
@@ -344,21 +345,6 @@ inline bool trim_face_same_fragment(const CurvedFragment& lhs,
 
 inline constexpr double kTrimFaceTwoPi = 2.0 * kFaceUvPi;
 
-// Two arc references describe the same circle when their radii and frames agree
-// within `tolerance`.
-inline bool trim_face_same_circle(const CircleCurve3& lhs,
-                                  const CircleCurve3& rhs,
-                                  double tolerance) noexcept {
-  const double scale =
-      std::max({1.0, std::fabs(lhs.radius), std::fabs(rhs.radius)});
-  const double eps = std::max(tolerance, 1e-12 * scale);
-  if (!(std::fabs(lhs.radius - rhs.radius) <= eps)) return false;
-  if (!(norm2(lhs.center - rhs.center) <= eps)) return false;
-  if (!(norm2(lhs.x_axis - rhs.x_axis) <= eps)) return false;
-  if (!(norm2(lhs.y_axis - rhs.y_axis) <= eps)) return false;
-  return true;
-}
-
 // A point where a cut segment meets a boundary circle. `s` is the fraction along
 // the cut segment (0 or 1 when the hit is a cut endpoint).
 struct TrimFaceCircleHit {
@@ -483,13 +469,14 @@ inline void trim_face_normalize_ring_refs(
   }
 }
 
-// The arc span of ring segment i, when both of its ends are adjacent points of
-// the same boundary arc.
+// The arc span of ring segment i, when that segment is a boundary arc. The
+// fragment's signed arc reference names the segment (refs[i] is the loop index
+// the segment starts at) and the reference's own direction gives the interval.
 inline std::optional<CurvedArcSpan> trim_face_ring_span(
     const std::vector<std::optional<TrimFaceRingRef>>& refs,
     const std::vector<std::vector<Point2d>>& loops,
     const std::vector<std::vector<std::optional<FaceUvArcRef>>>& loop_arcs,
-    std::size_t i, double tolerance) {
+    std::size_t i) {
   if (refs.empty()) return std::nullopt;
   const std::size_t j = (i + 1) % refs.size();
   if (!refs[i] || !refs[j]) return std::nullopt;
@@ -503,23 +490,20 @@ inline std::optional<CurvedArcSpan> trim_face_ring_span(
         (b.second + 1) % count == a.second)) {
     return std::nullopt;
   }
-  if (a.second >= loop_arcs[a.first].size() ||
-      b.second >= loop_arcs[a.first].size()) {
-    return std::nullopt;
-  }
-  const std::optional<FaceUvArcRef>& arc_a = loop_arcs[a.first][a.second];
-  const std::optional<FaceUvArcRef>& arc_b = loop_arcs[a.first][b.second];
-  if (!arc_a || !arc_b) return std::nullopt;
-  if (!trim_face_same_circle(arc_a->circle, arc_b->circle, tolerance)) {
-    return std::nullopt;
-  }
-  double sweep = arc_b->t - arc_a->t;
-  sweep -= kTrimFaceTwoPi * std::round(sweep / kTrimFaceTwoPi);
-  if (sweep == 0.0) sweep = kTrimFaceTwoPi;
-  const double low = std::min(arc_a->t, arc_a->t + sweep);
-  const double high = std::max(arc_a->t, arc_a->t + sweep);
-  double shifted = low - kTrimFaceTwoPi * std::floor(low / kTrimFaceTwoPi);
-  return CurvedArcSpan{arc_a->circle, shifted, shifted + (high - low)};
+  // The ring may run either way around the loop, so the arc reference that
+  // describes this edge starts at whichever endpoint comes first in loop order.
+  const std::size_t start_index =
+      (b.second + 1) % count == a.second ? b.second : a.second;
+  if (start_index >= loop_arcs[a.first].size()) return std::nullopt;
+  const std::optional<FaceUvArcRef>& arc = loop_arcs[a.first][start_index];
+  if (!arc) return std::nullopt;
+  const double sweep = arc->t1 - arc->t0;
+  if (!(std::fabs(sweep) > 0.0)) return std::nullopt;
+  const double low = std::min(arc->t0, arc->t1);
+  const double high = std::max(arc->t0, arc->t1);
+  const double shifted =
+      low - kTrimFaceTwoPi * std::floor(low / kTrimFaceTwoPi);
+  return CurvedArcSpan{arc->circle, shifted, shifted + (high - low)};
 }
 
 }  // namespace detail
@@ -694,16 +678,9 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
   for (std::size_t l = 0; l < loops.size(); ++l) {
     const std::size_t count = loops[l].size();
     for (std::size_t i = 0; i < count; ++i) {
-      const std::size_t next = (i + 1) % count;
-      if (!loop_arcs[l][i] || !loop_arcs[l][next]) continue;
+      if (!loop_arcs[l][i]) continue;
       const CircleCurve3& circle = loop_arcs[l][i]->circle;
-      if (!detail::trim_face_same_circle(circle, loop_arcs[l][next]->circle,
-                                         tolerance)) {
-        continue;
-      }
-      double sweep = loop_arcs[l][next]->t - loop_arcs[l][i]->t;
-      sweep -= detail::kTrimFaceTwoPi *
-               std::round(sweep / detail::kTrimFaceTwoPi);
+      const double sweep = loop_arcs[l][i]->t1 - loop_arcs[l][i]->t0;
       if (!(std::fabs(sweep) > 0.0)) continue;
       const double direction = sweep > 0.0 ? 1.0 : -1.0;
       const double length = std::fabs(sweep);
@@ -715,9 +692,12 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
               detail::trim_face_circle_hits(circle, cut_points3[c][e],
                                             cut_points3[c][e + 1], tolerance);
           for (const detail::TrimFaceCircleHit& hit : hits) {
-            double offset = hit.t - loop_arcs[l][i]->t;
-            offset -= detail::kTrimFaceTwoPi *
-                      std::round(offset / detail::kTrimFaceTwoPi);
+            double offset = hit.t - loop_arcs[l][i]->t0;
+            if (offset > detail::kFaceUvPi) {
+              offset -= detail::kTrimFaceTwoPi;
+            } else if (offset < -detail::kFaceUvPi) {
+              offset += detail::kTrimFaceTwoPi;
+            }
             const double along = offset * direction;
             if (!(along >= 0.0) || !(along <= length)) continue;
             if (along < slack || along > length - slack) {
@@ -739,7 +719,7 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
                           std::round((loops[l][i][1] - point[1]) /
                                      detail::kTrimFaceTwoPi);
             }
-            const double t = loop_arcs[l][i]->t + direction * along;
+            const double t = loop_arcs[l][i]->t0 + direction * along;
             loop_junctions[l][i].push_back(ArcJunction{along, t, point});
             if (hit.s > 0.0 && hit.s < 1.0) {
               cut_junctions.push_back(CutJunction{c, e, hit.s, point});
@@ -760,19 +740,33 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     for (std::size_t l = 0; l < loops.size(); ++l) {
       for (std::size_t i = 0; i < loops[l].size(); ++i) {
         rebuilt_loops[l].push_back(loops[l][i]);
-        rebuilt_arcs[l].push_back(loop_arcs[l][i]);
         std::vector<ArcJunction>& junctions = loop_junctions[l][i];
         std::sort(junctions.begin(), junctions.end(),
                   [](const ArcJunction& lhs, const ArcJunction& rhs) {
                     return lhs.along < rhs.along;
                   });
+        // Each junction splits one segment reference into two; the traversal
+        // direction of every piece is carried by its own signed interval.
+        double start_t = loop_arcs[l][i] ? loop_arcs[l][i]->t0 : 0.0;
         for (const ArcJunction& junction : junctions) {
           if (detail::trim_face_same_xy(rebuilt_loops[l].back(), junction.uv)) {
             continue;
           }
+          if (loop_arcs[l][i]) {
+            rebuilt_arcs[l].push_back(FaceUvArcRef{loop_arcs[l][i]->circle,
+                                                   start_t, junction.t});
+          } else {
+            rebuilt_arcs[l].push_back(std::nullopt);
+          }
           rebuilt_loops[l].push_back(junction.uv);
+          start_t = junction.t;
+        }
+        if (loop_arcs[l][i]) {
           rebuilt_arcs[l].push_back(FaceUvArcRef{loop_arcs[l][i]->circle,
-                                                 junction.t});
+                                                 start_t,
+                                                 loop_arcs[l][i]->t1});
+        } else {
+          rebuilt_arcs[l].push_back(std::nullopt);
         }
       }
     }
@@ -1188,16 +1182,10 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
       for (std::size_t l = 0; l < loops.size(); ++l) {
         const std::size_t count = loops[l].size();
         for (std::size_t j = 0; j < count; ++j) {
-          const auto& arc_a = loop_arcs[l][j];
-          const auto& arc_b = loop_arcs[l][(j + 1) % count];
-          if (!arc_a || !arc_b) continue;
-          const CircleCurve3& circle = arc_a->circle;
-          if (!detail::trim_face_same_circle(circle, arc_b->circle, tolerance)) {
-            continue;
-          }
-          double sweep = arc_b->t - arc_a->t;
-          sweep -= detail::kTrimFaceTwoPi *
-                   std::round(sweep / detail::kTrimFaceTwoPi);
+          const auto& arc = loop_arcs[l][j];
+          if (!arc) continue;
+          const CircleCurve3& circle = arc->circle;
+          const double sweep = arc->t1 - arc->t0;
           if (!(std::fabs(sweep) > 0.0)) continue;
           const double direction = sweep > 0.0 ? 1.0 : -1.0;
           const double length = std::fabs(sweep);
@@ -1207,13 +1195,22 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
           const Vec3d normal = cross(circle.x_axis, circle.y_axis);
           if (!(std::fabs(dot(radial, normal)) <= eps)) continue;
           if (!(std::fabs(norm2(radial) - circle.radius) <= eps)) continue;
-          double offset = detail::face_uv_circle_angle(circle, point) - arc_a->t;
-          offset -= detail::kTrimFaceTwoPi *
-                    std::round(offset / detail::kTrimFaceTwoPi);
+          double offset =
+              detail::face_uv_circle_angle(circle, point) - arc->t0;
+          if (offset > detail::kFaceUvPi) {
+            offset -= detail::kTrimFaceTwoPi;
+          } else if (offset < -detail::kFaceUvPi) {
+            offset += detail::kTrimFaceTwoPi;
+          }
           const double along = offset * direction;
           const double slack =
               std::max(1e-12, eps / std::max(circle.radius, 1e-12));
           if (along > slack && along < length - slack) {
+            // Not covered by a regression test: firing this needs a ring vertex
+            // that sits strictly inside an arc segment yet is not bitwise equal
+            // to a loop point, which the current arrangement never produces
+            // (computed crossings that end up on the arc are inserted into the
+            // loop beforehand, so they map exactly).
             return Error{Errc::numeric_failure,
                          "split_face_curved: fragment vertex left its loop",
                          face.index(), 0u};
@@ -1228,8 +1225,7 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
                        std::size_t count) {
     std::vector<std::optional<CurvedArcSpan>> spans(count);
     for (std::size_t i = 0; i < count; ++i) {
-      spans[i] = detail::trim_face_ring_span(refs, loops, loop_arcs, i,
-                                             tolerance);
+      spans[i] = detail::trim_face_ring_span(refs, loops, loop_arcs, i);
     }
     return spans;
   };
@@ -1289,6 +1285,10 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     const double scale = detail::trim_face_metric_scale(projection, record.rep);
     if (!(area_uv * scale > area_floor)) continue;
 
+    // Hole rings get exactly the same span treatment as the outer ring. The
+    // current tests only use straight holes (no engaged arc), so an arc running
+    // along a hole boundary is supported by construction but not covered by a
+    // regression test.
     const std::size_t outer_count = outer.size();
     fragment.arc_spans.push_back(span_ring(outer_refs.value(), outer_count));
     fragment.loops_uv.push_back(std::move(outer));

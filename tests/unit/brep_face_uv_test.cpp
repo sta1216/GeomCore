@@ -667,10 +667,10 @@ TEST_CASE("cylinder cap and lateral loops carry circle provenance") {
     REQUIRE(loops.value().size() == 1u);
     const geom::FaceUvLoop& uv = loops.value()[0];
     REQUIRE(uv.points.size() == 32u);
+    // The provenance is per segment: entry i describes points[i] -> points[i+1].
     REQUIRE(uv.arcs.size() == uv.points.size());
 
     int direction = 0;
-    double previous_t = 0.0;
     for (std::size_t i = 0; i < uv.points.size(); ++i) {
       REQUIRE(uv.arcs[i].has_value());
       const geom::FaceUvArcRef& ref = *uv.arcs[i];
@@ -678,22 +678,20 @@ TEST_CASE("cylinder cap and lateral loops carry circle provenance") {
       CHECK(std::fabs(ref.circle.radius - edge_circle.radius) <= kTolerance);
       CHECK(geom::norm2(ref.circle.x_axis - edge_circle.x_axis) <= kTolerance);
       CHECK(geom::norm2(ref.circle.y_axis - edge_circle.y_axis) <= kTolerance);
-      CHECK(ref.t >= 0.0);
-      CHECK(ref.t < kTwoPi);
+      CHECK(ref.t0 >= 0.0);
+      CHECK(ref.t0 < kTwoPi);
 
-      const geom::Point3d point3d = geom::plane_frame_to_3d(frame, uv.points[i]);
-      CHECK(geom::norm2(ref.circle.eval(ref.t) - point3d) <= 1e-12);
+      const std::size_t next = (i + 1u) % uv.points.size();
+      const geom::Point3d start3d = geom::plane_frame_to_3d(frame, uv.points[i]);
+      const geom::Point3d end3d = geom::plane_frame_to_3d(frame, uv.points[next]);
+      CHECK(geom::norm2(ref.circle.eval(ref.t0) - start3d) <= 1e-12);
+      CHECK(geom::norm2(ref.circle.eval(ref.t1) - end3d) <= 1e-12);
 
-      if (i > 0u) {
-        double delta = ref.t - previous_t;
-        while (delta > kPi) delta -= kTwoPi;
-        while (delta < -kPi) delta += kTwoPi;
-        CHECK(std::fabs(delta) > 0.0);
-        const int sign = delta > 0.0 ? 1 : -1;
-        if (direction == 0) direction = sign;
-        CHECK(sign == direction);
-      }
-      previous_t = ref.t;
+      const double sweep = ref.t1 - ref.t0;
+      CHECK(std::fabs(std::fabs(sweep) - kTwoPi / 32.0) <= 1e-12);
+      const int sign = sweep > 0.0 ? 1 : -1;
+      if (direction == 0) direction = sign;
+      CHECK(sign == direction);
     }
   }
 
@@ -704,51 +702,57 @@ TEST_CASE("cylinder cap and lateral loops carry circle provenance") {
   REQUIRE(loops.value().size() == 1u);
   const geom::FaceUvLoop& uv = loops.value()[0];
   REQUIRE(uv.points.size() == 66u);
+  // Entry i describes points[i] -> points[i+1]; the two seam segments are lines.
   REQUIRE(uv.arcs.size() == uv.points.size());
 
   const auto& wall =
       std::get<geom::Cylinder3>(brep.geometry().surfaces[brep.face(lateral).surface]);
   std::size_t engaged = 0;
-  int direction = 0;
+  int bottom_direction = 0;
+  int top_direction = 0;
   for (std::size_t i = 0; i < uv.points.size(); ++i) {
     const geom::Point3d point3d = wall.eval(uv.points[i][0], uv.points[i][1]);
     // The seam contributes only its two endpoints, and both are shared with a
-    // rim, so every lateral sample lies on one of the two rim circles. The
-    // brief's "none on the two vertical lines" means no sample sits strictly
-    // between the rims.
+    // rim, so every lateral sample lies on one of the two rim circles.
     const bool on_rim = std::fabs(point3d[2]) <= kTolerance ||
                         std::fabs(point3d[2] - 3.0) <= kTolerance;
     CHECK(on_rim);
+    if (i == 32u || i == 65u) {
+      // Both vertical seam segments are straight lines, so they must stay
+      // disengaged even though their endpoints sit on a rim circle.
+      CHECK_FALSE(uv.arcs[i].has_value());
+      continue;
+    }
     REQUIRE(uv.arcs[i].has_value());
     ++engaged;
 
     const geom::FaceUvArcRef& ref = *uv.arcs[i];
+    const std::size_t next = (i + 1u) % uv.points.size();
+    const geom::Point3d end3d = wall.eval(uv.points[next][0], uv.points[next][1]);
     CHECK(std::fabs(ref.circle.radius - 2.0) <= 1e-12);
     CHECK(std::fabs(ref.circle.center[2] - point3d[2]) <= 1e-12);
-    CHECK(ref.t >= 0.0);
-    CHECK(ref.t < kTwoPi);
-    CHECK(geom::norm2(ref.circle.eval(ref.t) - point3d) <= 1e-12);
+    CHECK(ref.t0 >= 0.0);
+    CHECK(ref.t0 < kTwoPi);
+    CHECK(geom::norm2(ref.circle.eval(ref.t0) - point3d) <= 1e-12);
+    CHECK(geom::norm2(ref.circle.eval(ref.t1) - end3d) <= 1e-12);
 
-    if (i == 34u) direction = 0;  // index 33 joins the two rims
-    if (i > 0u && i != 33u) {
-      double delta = ref.t - uv.arcs[i - 1u]->t;
-      while (delta > kPi) delta -= kTwoPi;
-      while (delta < -kPi) delta += kTwoPi;
-      CHECK(std::fabs(delta) > 0.0);
-      const int sign = delta > 0.0 ? 1 : -1;
-      if (direction == 0) direction = sign;
-      CHECK(sign == direction);
-    }
+    const double sweep = ref.t1 - ref.t0;
+    CHECK(std::fabs(std::fabs(sweep) - kTwoPi / 32.0) <= 1e-12);
+    int& direction = i < 32u ? bottom_direction : top_direction;
+    const int sign = sweep > 0.0 ? 1 : -1;
+    if (direction == 0) direction = sign;
+    CHECK(sign == direction);
   }
-  CHECK(engaged == 66u);
+  CHECK(engaged == 64u);
+  CHECK(bottom_direction == 1);
+  CHECK(top_direction == -1);
 
-  // The surviving seam joint keeps the top rim's provenance, so the top arc
-  // starts and ends at t = 0 instead of losing its first sample.
+  // The seam joint is carried by the neighbouring segment, not duplicated on a
+  // point, so the top rim starts at t0 = 0 and runs backwards from there.
   CHECK(std::fabs(uv.points[33][1] - 3.0) <= 1e-12);
   REQUIRE(uv.arcs[33].has_value());
-  CHECK(std::fabs(uv.arcs[33]->circle.center[2] - 3.0) <= 1e-12);
-  CHECK(uv.arcs[33]->t <= 1e-12);
-  CHECK(uv.arcs[65]->t <= 1e-12);
+  CHECK(std::fabs(uv.arcs[33]->t0) <= 1e-12);
+  CHECK(uv.arcs[33]->t1 < 0.0);
 }
 
 TEST_CASE("box faces carry no circle provenance") {
@@ -801,16 +805,21 @@ TEST_CASE("a half disk reports normalized circle angles") {
   // removes again.
   REQUIRE(uv.points.size() == 33u);
   REQUIRE(uv.arcs.size() == uv.points.size());
-  for (std::size_t i = 0; i < uv.points.size(); ++i) {
+  for (std::size_t i = 0; i + 1u < uv.points.size(); ++i) {
     REQUIRE(uv.arcs[i].has_value());
     const geom::FaceUvArcRef& ref = *uv.arcs[i];
-    CHECK(ref.t >= 0.0);
-    CHECK(ref.t < kTwoPi);
-    const geom::Point3d point3d = geom::plane_frame_to_3d(frame, uv.points[i]);
-    CHECK(geom::norm2(ref.circle.eval(ref.t) - point3d) <= 1e-12);
+    CHECK(ref.t0 >= 0.0);
+    CHECK(ref.t0 < kTwoPi);
+    const geom::Point3d start3d = geom::plane_frame_to_3d(frame, uv.points[i]);
+    const geom::Point3d end3d = geom::plane_frame_to_3d(frame, uv.points[i + 1u]);
+    CHECK(geom::norm2(ref.circle.eval(ref.t0) - start3d) <= 1e-12);
+    CHECK(geom::norm2(ref.circle.eval(ref.t1) - end3d) <= 1e-12);
+    CHECK(std::fabs(std::fabs(ref.t1 - ref.t0) - kPi / 32.0) <= 1e-12);
   }
+  // The closing chord is a straight diameter, so it must stay disengaged.
+  CHECK_FALSE(uv.arcs[32].has_value());
   // The first sample sits at angle -pi/2 and must come back as 3*pi/2.
-  CHECK(uv.arcs.front()->t > kPi);
+  CHECK(uv.arcs.front()->t0 > kPi);
 }
 
 TEST_CASE("a chordal quarter cylinder carries no circle provenance") {
@@ -878,14 +887,13 @@ TEST_CASE("an arc corner between two circles keeps the earlier provenance") {
   REQUIRE(uv.points.size() == 64u);
   REQUIRE(uv.arcs.size() == uv.points.size());
 
-  // The shared point survives from the first arc and keeps its circle; the
-  // second arc's provenance starts one point later.
-  REQUIRE(uv.arcs[32].has_value());
-  CHECK(std::fabs(uv.arcs[32]->circle.radius - 1.0) <= 1e-12);
-  CHECK(geom::norm2(uv.arcs[32]->circle.center - geom::Point3d{0.0, 0.0, 0.0}) <= 1e-12);
-  REQUIRE(uv.arcs[33].has_value());
-  CHECK(std::fabs(uv.arcs[33]->circle.radius - half) <= 1e-12);
+  // The shared point survives from the first arc; the segment that leaves it
+  // belongs to the second arc and must carry the second circle.
   for (const auto& ref : uv.arcs) REQUIRE(ref.has_value());
+  CHECK(std::fabs(uv.arcs[31]->circle.radius - 1.0) <= 1e-12);
+  CHECK(geom::norm2(uv.arcs[31]->circle.center - geom::Point3d{0.0, 0.0, 0.0}) <= 1e-12);
+  CHECK(std::fabs(uv.arcs[32]->circle.radius - half) <= 1e-12);
+  CHECK(geom::norm2(uv.arcs[32]->circle.center - geom::Point3d{0.5, 0.5, 0.0}) <= 1e-12);
 }
 
 TEST_CASE("a stale pcurve off its circle edge is rejected") {
@@ -912,4 +920,31 @@ TEST_CASE("a stale pcurve off its circle edge is rejected") {
   CHECK(loops.error().code == geom::Errc::numeric_failure);
   CHECK(std::string_view(loops.error().message) ==
         "face_loops_uv: point is off its circle");
+}
+
+TEST_CASE("a two point semicircle pcurve has no resolvable arc direction") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface =
+      editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+  const std::uint32_t curve =
+      editor.add_curve(geom::CircleCurve3{geom::Point3d{0.0, 0.0, 0.0},
+                                          geom::Vec3d{1.0, 0.0, 0.0},
+                                          geom::Vec3d{0.0, 1.0, 0.0}, 1.0});
+  // Two pcurve points a half turn apart leave the traversal direction ambiguous:
+  // the chord and the tangent at the midpoint are orthogonal for both choices.
+  const std::uint32_t flat =
+      editor.add_pcurve(geom::Pcurve2d{geom::Point2d{1.0, 0.0}, geom::Point2d{-1.0, 0.0}});
+  const geom::VertexId start = editor.add_vertex(geom::Point3d{1.0, 0.0, 0.0}, 0.0).value();
+  const geom::VertexId end = editor.add_vertex(geom::Point3d{-1.0, 0.0, 0.0}, 0.0).value();
+  const geom::EdgeId edge = editor.add_edge(start, end, curve, 0.0, kPi, 0.0).value();
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 1> coedges{
+      geom::CoedgeSpec{edge, false, flat, 0.0}};
+  REQUIRE(editor.add_loop(face, coedges, true).has_value());
+
+  const auto loops = geom::face_loops_uv(editor.brep(), face, kTolerance);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::numeric_failure);
+  CHECK(std::string_view(loops.error().message) ==
+        "face_loops_uv: circular arc direction is ambiguous");
 }

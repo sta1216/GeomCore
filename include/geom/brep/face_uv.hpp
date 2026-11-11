@@ -29,12 +29,19 @@ inline namespace v1 {
 //
 // `outer` mirrors Loop::outer. face_loops_uv() reports the outer loop first.
 //
-// `arcs` is parallel to `points`: an entry is engaged exactly when the point
-// came from a coedge whose edge curve is a CircleCurve3, and carries that circle
-// plus the azimuth of the point around it, normalized to [0, 2*pi).
+// `arcs` is parallel to the loop's segments: entry i describes the segment from
+// points[i] to points[(i + 1) % points.size()], and the last entry is the
+// closing segment. An entry is engaged exactly when its segment is a true
+// circular arc from a coedge whose edge curve is a CircleCurve3; straight
+// segments (cut lines, diameters, line pcurves) stay disengaged even when both
+// endpoints lie on some circle.
+//
+// `t0` is the start azimuth in [0, 2*pi) and `t1` is `t0` plus the signed sweep
+// of the traversal, so `|t1 - t0| < pi` and `t1` may fall outside [0, 2*pi).
 struct FaceUvArcRef {
   CircleCurve3 circle;
-  double t = 0.0;
+  double t0 = 0.0;
+  double t1 = 0.0;
 };
 
 struct FaceUvLoop {
@@ -330,21 +337,66 @@ struct FaceUvRun {
   std::vector<Point2d> points;
   std::vector<Point3d> positions;
   bool from_pcurve = false;
-  std::vector<std::optional<FaceUvArcRef>> arcs;
+  // segments[i] describes points[i] -> points[i + 1].
+  std::vector<std::optional<FaceUvArcRef>> segments;
 };
 
-// Fills `run.arcs` in lockstep with `run.points`: one engaged entry per point
-// when the coedge's edge is a circle, all disengaged otherwise.
-inline void face_uv_fill_arcs(const CircleCurve3* circle, FaceUvRun& run) {
-  run.arcs.assign(run.points.size(), std::nullopt);
-  if (circle == nullptr) return;
-  for (std::size_t i = 0; i < run.positions.size(); ++i) {
-    run.arcs[i] = FaceUvArcRef{*circle, face_uv_circle_angle(*circle, run.positions[i])};
+// Fills `run.segments` for a coedge whose edge is a circle. Each segment is
+// engaged with the signed sweep of the traversal; a straight edge leaves every
+// segment disengaged. The direction comes from the chord against the tangent at
+// the middle azimuth, so a concave arc (travelled clockwise about its circle)
+// keeps its negative sweep.
+inline Result<void> face_uv_fill_arcs(const CircleCurve3* circle, FaceUvRun& run,
+                                      double tolerance) {
+  run.segments.assign(run.points.size() > 0u ? run.points.size() - 1u : 0u, std::nullopt);
+  if (circle == nullptr) return Result<void>{};
+  const double slack = std::max(tolerance, 1e-12 * std::max(1.0, circle->radius));
+  for (std::size_t i = 0; i + 1u < run.positions.size(); ++i) {
+    const Point3d& start_point = run.positions[i];
+    const Point3d& end_point = run.positions[i + 1u];
+    // A stale pcurve can leave the circle its edge lies on, which would make the
+    // provenance angle meaningless. The slack also covers the rounding of the 3D
+    // position that a pcurve evaluates to.
+    const double start_radial = face_uv_distance(start_point, circle->center);
+    const double end_radial = face_uv_distance(end_point, circle->center);
+    if (std::fabs(start_radial - circle->radius) > slack ||
+        std::fabs(end_radial - circle->radius) > slack) {
+      return Error{Errc::numeric_failure, "face_loops_uv: point is off its circle", 0u, 0u};
+    }
+    const double start = face_uv_circle_angle(*circle, start_point);
+    const double end = face_uv_circle_angle(*circle, end_point);
+    double sweep = end - start;
+    if (sweep > kFaceUvPi) {
+      sweep -= 2.0 * kFaceUvPi;
+    } else if (sweep < -kFaceUvPi) {
+      sweep += 2.0 * kFaceUvPi;
+    }
+    // Half a turn (or more) between two consecutive points has two equally short
+    // arcs, so without an intermediate point the direction is unknowable.
+    if (std::fabs(sweep) >= kFaceUvPi - 1e-9) {
+      return Error{Errc::numeric_failure,
+                   "face_loops_uv: circular arc direction is ambiguous", 0u, 0u};
+    }
+    const double middle = start + 0.5 * sweep;
+    const Vec3d chord = end_point - start_point;
+    const Vec3d tangent =
+        circle->x_axis * (-std::sin(middle)) + circle->y_axis * std::cos(middle);
+    // A short arc's chord is parallel to the tangent at its middle azimuth, so a
+    // vanishing projection means the two directions are indistinguishable (a
+    // half turn, for instance). The wrapped difference above already carries the
+    // direction, so it is not flipped here.
+    const double alignment = dot(chord, tangent);
+    if (std::fabs(alignment) <= 1e-9 * norm2(chord)) {
+      return Error{Errc::numeric_failure,
+                   "face_loops_uv: circular arc direction is ambiguous", 0u, 0u};
+    }
+    run.segments[i] = FaceUvArcRef{*circle, start, start + sweep};
   }
+  return Result<void>{};
 }
 
 inline Result<FaceUvRun> face_uv_coedge_run(const Brep& brep, const Coedge& coedge,
-                                            const FaceUvProjection& projection,
+                                            const FaceUvProjection& projection, double tolerance,
                                             double& previous_u, bool& has_previous_u) {
   const GeometryStore& geometry = brep.geometry();
   FaceUvRun run;
@@ -376,7 +428,8 @@ inline Result<FaceUvRun> face_uv_coedge_run(const Brep& brep, const Coedge& coed
       run.points.push_back(uv);
       run.positions.push_back(position);
     }
-    face_uv_fill_arcs(face_uv_coedge_circle(brep, coedge), run);
+    const Result<void> segments = face_uv_fill_arcs(face_uv_coedge_circle(brep, coedge), run, tolerance);
+    if (!segments.has_value()) return segments.error();
     previous_u = run.points.back()[0];
     has_previous_u = true;
     run.from_pcurve = true;
@@ -400,7 +453,8 @@ inline Result<FaceUvRun> face_uv_coedge_run(const Brep& brep, const Coedge& coed
     run.points.push_back(uv.value());
     run.positions.push_back(point);
   }
-  face_uv_fill_arcs(face_uv_coedge_circle(brep, coedge), run);
+  const Result<void> segments = face_uv_fill_arcs(face_uv_coedge_circle(brep, coedge), run, tolerance);
+  if (!segments.has_value()) return segments.error();
   return run;
 }
 
@@ -433,8 +487,8 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
                    "face_loops_uv: coedge belongs to a different loop or face",
                    current.index(), 0u};
     }
-    const Result<FaceUvRun> run_result =
-        face_uv_coedge_run(brep, coedge, projection, previous_u, has_previous_u);
+    const Result<FaceUvRun> run_result = face_uv_coedge_run(brep, coedge, projection, tolerance,
+                                                            previous_u, has_previous_u);
     if (!run_result.has_value()) return run_result.error();
     const FaceUvRun& run = run_result.value();
 
@@ -443,47 +497,27 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
       if (!face_uv_point2d_finite(uv) || !face_uv_point3d_finite(run.positions[i])) {
         return Error{Errc::non_finite, "face_loops_uv: loop point is not finite", 0u, 0u};
       }
-      const std::optional<FaceUvArcRef>& arc = run.arcs[i];
-      if (arc.has_value()) {
-        // A stale pcurve can leave the circle its edge lies on, which would make
-        // the provenance angle meaningless. The slack also covers the rounding
-        // of the 3D position that a pcurve evaluates to.
-        const double radial = face_uv_distance(run.positions[i], arc->circle.center);
-        const double slack = std::max(tolerance, 1e-12 * arc->circle.radius);
-        if (std::fabs(radial - arc->circle.radius) > slack) {
-          return Error{Errc::numeric_failure, "face_loops_uv: point is off its circle",
-                       current.index(), 0u};
-        }
-      }
       if (started) {
         const Point2d& previous = result.points.back();
         if (projection.periodic_u()) uv[0] = face_uv_unwrap(uv[0], previous[0]);
         if (projection.periodic_v()) uv[1] = face_uv_unwrap(uv[1], previous[1]);
         if (i == 0u) {
           // One point per junction: the coedges meet either at exactly the same
-          // parameter value (stored pcurves) or at the same 3D vertex.
+          // parameter value (stored pcurves) or at the same 3D vertex. The
+          // segment leaving the junction is appended with the next point, so
+          // dropping the duplicate point keeps the segment refs aligned.
           const bool uv_junction = previous_from_pcurve && run.from_pcurve &&
                                    uv[0] == previous[0] && uv[1] == previous[1];
           const bool position_junction =
               face_uv_distance(run.positions[i], last_position) <= tolerance;
-          if (uv_junction || position_junction) {
-            // One ref per junction. When only one side knows its circle the
-            // surviving point inherits it, so a closed arc keeps both endpoints
-            // instead of losing the one the adjacent line run drops. When both
-            // sides are engaged but the circles differ, this is a corner between
-            // two arcs (the torus seam is one), so the surviving point keeps the
-            // earlier circle and the incoming arc is left to start one point in.
-            if (arc.has_value() && !result.arcs.back().has_value()) {
-              result.arcs.back() = arc;
-            }
-            continue;
-          }
+          if (uv_junction || position_junction) continue;
           return Error{Errc::invalid_topology, "face_loops_uv: coedge chain is not continuous",
                        current.index(), 0u};
         }
       }
       result.points.push_back(uv);
-      result.arcs.push_back(arc);
+      // The segment ending at this point starts at the previous loop point.
+      if (i > 0u) result.arcs.push_back(run.segments[i - 1u]);
       if (!started) {
         first_position = run.positions[i];
         started = true;
@@ -519,8 +553,10 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
   if (face_uv_distance(last_position, first_position) > closure) {
     return Error{Errc::numeric_failure, "face_loops_uv: loop is not closed", loop_id.index(), 0u};
   }
+  // The last point repeats the first one; dropping it leaves the closing
+  // segment in `arcs`, which is the segment from the last point back to the
+  // first.
   result.points.pop_back();
-  result.arcs.pop_back();
   if (result.arcs.size() != result.points.size()) {
     return Error{Errc::invalid_topology, "face_loops_uv: arc provenance size mismatch",
                  loop_id.index(), 0u};

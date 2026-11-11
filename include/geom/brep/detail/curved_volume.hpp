@@ -83,65 +83,47 @@ inline int curved_volume_subdivision_level(double max_edge) noexcept {
 // fixed point of the solid: a closed shell has zero normal flux, so this is an
 // exact change of origin, but it keeps a solid placed far from the world origin
 // from losing its volume to cancellation between the large face contributions.
-// Signed area of one face loop using Green's theorem, with exact circular-arc
-// segments when the provenance is available. `frame` is the face's parameter
-// frame; `shift` keeps the sums well conditioned for large parameters.
-inline double curved_volume_arc_term(const Point2d& a, const Point2d& b,
-                                     const Point2d& center, double radius, double turn) {
+// Signed area contribution of one circular-arc segment. `sweep` is the signed
+// sweep carried by the segment's arc reference (|sweep| < pi) and `orientation`
+// is +1 when the circle normal agrees with the face normal and -1 when it is
+// opposed. The uv frame can rotate or mirror the circle's own (x_axis, y_axis)
+// frame, so the start azimuth comes from the shifted uv point and the signed
+// sweep is oriented into that frame. A concave arc (travelled clockwise about
+// its circle) therefore keeps its negative contribution instead of being forced
+// the long way around.
+inline double curved_volume_arc_term(const Point2d& a, const Point2d& center,
+                                     double radius, double sweep, double orientation) {
   const double ax = a[0] - center[0];
   const double ay = a[1] - center[1];
-  const double bx = b[0] - center[0];
-  const double by = b[1] - center[1];
   const double angle_a = std::atan2(ay, ax);
-  const double angle_b = std::atan2(by, bx);
-  double delta = angle_b - angle_a;
-  if (turn > 0.0) {
-    while (delta <= 0.0) delta += 2.0 * kFaceUvPi;
-  } else {
-    while (delta >= 0.0) delta -= 2.0 * kFaceUvPi;
-  }
+  const double delta = orientation * sweep;
+  const double angle_b = angle_a + delta;
   return 0.5 * (radius * radius * delta +
                 radius * (center[0] * (std::sin(angle_b) - std::sin(angle_a)) -
                           center[1] * (std::cos(angle_b) - std::cos(angle_a))));
 }
 
-inline bool curved_volume_same_circle(const FaceUvArcRef& a, const FaceUvArcRef& b,
-                                      double tolerance) {
-  const double slack = std::max(tolerance, 1e-12 * std::max(a.circle.radius, 1.0));
-  const double center_distance = std::hypot(
-      a.circle.center[0] - b.circle.center[0], a.circle.center[1] - b.circle.center[1],
-      a.circle.center[2] - b.circle.center[2]);
-  return center_distance <= slack && std::fabs(a.circle.radius - b.circle.radius) <= slack;
-}
-
-// Exact signed area of a planar face's loops in parameter space. Circle arcs
-// whose plane is parallel to the face plane contribute their circular-segment
-// area; everything else is a straight chord. This is what makes a cylinder cap
-// integrate to pi*r^2 rather than to the 32-gon polygon.
+// Exact signed area of a planar face's loops in parameter space. A segment with
+// an engaged per-segment arc reference whose circle is parallel and coplanar
+// with the face plane contributes its circular-segment area; everything else is
+// a straight chord. This is what makes a cylinder cap integrate to pi*r^2
+// rather than to the 32-gon polygon.
 inline Result<double> curved_volume_planar_area(const std::vector<FaceUvLoop>& loops,
                                                 const PlaneFrame& frame, double tolerance) {
   const Point2d shift = loops.front().points.front();
   double area = 0.0;
   for (const FaceUvLoop& loop : loops) {
     const std::size_t count = loop.points.size();
-    double twice_area = 0.0;
-    for (std::size_t i = 0; i < count; ++i) {
-      const Point2d& a = loop.points[i];
-      const Point2d& b = loop.points[(i + 1) % count];
-      twice_area += (a[0] - shift[0]) * (b[1] - shift[1]) -
-                    (b[0] - shift[0]) * (a[1] - shift[1]);
-    }
-    const double turn = twice_area >= 0.0 ? 1.0 : -1.0;
     for (std::size_t i = 0; i < count; ++i) {
       const std::size_t next = (i + 1) % count;
       const Point2d& a = loop.points[i];
       const Point2d& b = loop.points[next];
       bool arc = false;
       double radius = 0.0;
+      double sweep = 0.0;
+      double orientation = 1.0;
       Point2d center{0.0, 0.0};
-      if (loop.arcs.size() == count && loop.arcs[i].has_value() &&
-          loop.arcs[next].has_value() &&
-          curved_volume_same_circle(*loop.arcs[i], *loop.arcs[next], tolerance)) {
+      if (loop.arcs.size() == count && loop.arcs[i].has_value()) {
         const CircleCurve3& circle = loop.arcs[i]->circle;
         const Vec3d circle_normal = cross(circle.x_axis, circle.y_axis);
         const double circle_normal_length =
@@ -158,14 +140,15 @@ inline Result<double> curved_volume_planar_area(const std::vector<FaceUvLoop>& l
             center[0] = dot(offset, frame.u) - shift[0];
             center[1] = dot(offset, frame.v) - shift[1];
             radius = circle.radius;
-            arc = true;
+            sweep = loop.arcs[i]->t1 - loop.arcs[i]->t0;
+            orientation = dot(circle_normal, frame.normal) >= 0.0 ? 1.0 : -1.0;
+            arc = std::fabs(sweep) > 0.0;
           }
         }
       }
       if (arc) {
         area += curved_volume_arc_term(Point2d{a[0] - shift[0], a[1] - shift[1]},
-                                       Point2d{b[0] - shift[0], b[1] - shift[1]}, center,
-                                       radius, turn);
+                                       center, radius, sweep, orientation);
       } else {
         area += 0.5 * ((a[0] - shift[0]) * (b[1] - shift[1]) -
                        (b[0] - shift[0]) * (a[1] - shift[1]));
