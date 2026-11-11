@@ -21,7 +21,8 @@ inline namespace v1 {
 // its chord length and both halves carry the same computed junction point.
 // Degenerate input is rejected instead of silently producing a wrong split:
 // fewer than two points and zero total length are Errc::degenerate, non-finite
-// coordinates (or a non-finite fraction) are Errc::non_finite.
+// coordinates (or a non-finite fraction) are Errc::non_finite, and so is a chord
+// sum that overflows to infinity.
 
 // True when the polyline has at least two points and every coordinate is finite.
 // A pcurve with coincident consecutive points is still well formed; it merely
@@ -72,6 +73,11 @@ inline Result<std::pair<Pcurve2d, Pcurve2d>> pcurve_split_halves(const Pcurve2d&
 
   double total = 0.0;
   for (std::size_t i = 0; i + 1u < count; ++i) total += chord_length(pcurve, i);
+  // Every point is finite, but the chord sum can still overflow to +inf; the
+  // fraction would then be NaN and the halves silently wrong.
+  if (!std::isfinite(total)) {
+    return Error{Errc::non_finite, "pcurve_split: chord length is not finite", 0u, 0u};
+  }
   if (!(total > 0.0)) {
     return Error{Errc::degenerate, "pcurve2d: pcurve has zero length", 0u, 0u};
   }
@@ -130,8 +136,8 @@ inline Result<std::pair<Pcurve2d, Pcurve2d>> pcurve_split_halves(const Pcurve2d&
 
 }  // namespace detail
 
-// Total chord length of the polyline; 0 for a malformed pcurve. Allocation-free
-// and noexcept by contract.
+// Total chord length of the polyline; 0 for a malformed pcurve and +inf when the
+// chord sum overflows. Allocation-free and noexcept by contract.
 inline double pcurve_length(const Pcurve2d& pcurve) noexcept {
   if (!pcurve_well_formed(pcurve)) return 0.0;
   double length = 0.0;

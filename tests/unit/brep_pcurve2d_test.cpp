@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -106,6 +107,32 @@ TEST_CASE("pcurve split walks chord length and clamps the parameter") {
   CHECK(same_point(at_vertex.value().points.back(), pc.points[1]));
 }
 
+TEST_CASE("pcurve split at one keeps the endpoint bit identical") {
+  // The endpoint is not reachable by interpolating from the start: a + (b - a)
+  // rounds to a different double than b, so a split at t = 1 must snap to the
+  // existing vertex instead of interpolating.
+  const Pcurve2d pc{{0.90474681086128, 0.0}, {-0.950247999257524, 0.0}};
+  const auto split = pcurve_split(pc, 1.0);
+  REQUIRE(split.has_value());
+  REQUIRE(split.value().points.size() == 2u);
+  CHECK(split.value().points.back()[0] == pc.points.back()[0]);
+  CHECK(split.value().points.back()[1] == pc.points.back()[1]);
+}
+
+TEST_CASE("pcurve split rejects a non-finite total chord length") {
+  // Every coordinate is finite, but the chord overflows to +inf, so the split
+  // fraction would otherwise be NaN and produce wrong halves.
+  const Pcurve2d overflow{{-1e308, -1e308}, {1e308, 1e308}};
+  CHECK(pcurve_well_formed(overflow));
+  CHECK(std::isinf(pcurve_length(overflow)));
+  CHECK(pcurve_length(overflow) > 0.0);
+
+  const auto split = pcurve_split(overflow, 0.5);
+  REQUIRE_FALSE(split.has_value());
+  CHECK(split.error().code == Errc::non_finite);
+  CHECK(std::string_view(split.error().message) == "pcurve_split: chord length is not finite");
+}
+
 TEST_CASE("pcurve split rejects malformed input") {
   const auto no_points = pcurve_split(Pcurve2d{}, 0.5);
   REQUIRE_FALSE(no_points.has_value());
@@ -155,6 +182,20 @@ TEST_CASE("pcurve merge drops exactly one duplicate junction") {
   REQUIRE(joined.points.size() == 5u);
   CHECK(same_point(joined.points[2], Point2d{1.0, 0.5}));
   CHECK(same_point(joined.points[3], Point2d{1.0, 0.6}));
+}
+
+TEST_CASE("pcurve merge keeps a one ulp junction") {
+  const double x = 1.0;
+  const double next = std::nextafter(x, std::numeric_limits<double>::infinity());
+  REQUIRE(next != x);
+  const Pcurve2d lower{{0.0, 0.0}, {x, 1.0}};
+  const Pcurve2d upper{{next, 1.0}, {2.0, 0.0}};
+
+  // One ulp apart is not exactly equal, so both junction points are kept.
+  const Pcurve2d merged = pcurve_merge(lower, upper);
+  REQUIRE(merged.points.size() == lower.points.size() + upper.points.size());
+  CHECK(same_point(merged.points[1], Point2d{x, 1.0}));
+  CHECK(same_point(merged.points[2], Point2d{next, 1.0}));
 }
 
 TEST_CASE("split edge splits each pcurve polyline and join rebuilds it") {
