@@ -12,7 +12,7 @@ Turn the M3b-1 SSI engine into trimmed curved faces and a boolean of two analyti
 4. Fragments from both operands are welded into a validated `Brep` (`assemble_curved_solid`).
 5. A point-in-mesh classifier and the boolean driver (`boolean_solid_curved`) keep or drop fragments by the regularized membership rule.
 
-M3b-2 stops at analytic surfaces. NURBS faces return `unsupported`; coplanar face contact and results with more than one closed component are out of scope and must be diagnosed, never silently accepted.
+M3b-2 stops at analytic surfaces. NURBS faces return `unsupported`; cone operands are deferred because their lateral loops pass through the apex (see deviation 4); coplanar face contact and results with more than one closed component are out of scope and must be diagnosed, never silently accepted.
 
 ## Architecture
 
@@ -62,8 +62,9 @@ Deviations from a literal reading of the architecture that require review:
 1. **Closed edges are sampled, not preserved analytically.** A circular cap edge is sampled into a 64-segment polyline in the parameter domain; the resulting trimmed face has many short line edges instead of one analytic circle. This is exact within `tol` for trimming purposes but changes edge count. It is documented in the header and measured by the chord-error test.
 2. **No coplanar face merging.** A pair of coplanar face patches that overlap in area returns `unsupported "boolean_solid_curved: coplanar face contact is not supported yet"`; M3a's planar boolean still handles all-planar operands. This keeps M3b-2 from re-implementing M3a's coplanar splitter in parameter space.
 3. **Single connected result only.** A union whose result is disjoint, or a difference that creates a cavity, returns `unsupported "boolean_solid_curved: result is not a single connected component"`. M3a keeps its multi-solid support; M3b-2 defers it until assembly can prove component orientation for curved shells without tessellating masses.
+4. **Cone operands are deferred.** Every `make_cone` lateral face has a loop that runs through the apex, where the surface parameterization has no unique `u`; `face_loops_uv` returns `unsupported` for that loop and the boolean driver rejects `Cone3` before splitting. Apex-free cone patches are supported by `face_loops_uv` and tested; full cone booleans need a degenerate-vertex representation in the parameter domain and are left to M3c.
 
-These three deviations are also listed in ADR-0025.
+These four deviations are also listed in ADR-0025.
 
 ## Review Focus
 
@@ -252,6 +253,7 @@ Implementation:
 - Unwrap `u` by ±2π so consecutive values are within π; unwrap `v` the same way for a torus. Cylinder/cone/sphere `v` is not periodic.
 - Close the loop by checking the last point against the first within `max(tolerance, 1e-12 * loop_extent)`; otherwise `numeric_failure "face_loops_uv: loop is not closed"`.
 - Reject non-finite coordinates with `non_finite`; reject a face with no loop with `invalid_topology`.
+- Apex-touching cone loops: a `make_cone` lateral face is bounded by the base circle plus a seam that runs base -> apex -> base, so its final point has `rho = 0` and no unique `u`. Such a loop returns `unsupported "face_loops_uv: cone projection is undefined at or beyond the apex"`; `Cone3` is consequently outside the M3b-2 boolean operand set (see Task 8). An apex-free cone patch (a closed circle at `rho > 0`) is supported and tested.
 
 **Steps**
 
@@ -480,7 +482,7 @@ Result<CurvedBooleanResult> boolean_solid_curved(
 
 Algorithm:
 
-1. Validate both operands: exactly one solid each; closed shells; `validate_topology` clean; every surface is `Plane3`, `Cylinder3`, `Cone3`, `Sphere3` or `Torus3` (`unsupported "boolean_solid_curved: NURBS operands are not supported"` otherwise); tolerance finite and > 0.
+1. Validate both operands: exactly one solid each; closed shells; `validate_topology` clean; every surface is `Plane3`, `Cylinder3`, `Sphere3` or `Torus3`; `NurbsSurface` -> `unsupported "boolean_solid_curved: NURBS operands are not supported"`; `Cone3` -> `unsupported "boolean_solid_curved: cone operands are not supported (apex-touching loops are deferred)"`. Tolerance must be finite and > 0.
 2. Compute each face's 3D AABB by sampling its uv domain on a 5x5 grid. Pair faces whose AABBs overlap within `tolerance`.
 3. For each pair, build patches from the uv loops and call `ssi`. `coincident` -> `unsupported "boolean_solid_curved: coplanar face contact is not supported yet"`. `tangent_contact` -> `unsupported "boolean_solid_curved: tangent face contact is not supported yet"`. `degenerate_patch` -> skip the pair. `no_convergence` -> `numeric_failure "boolean_solid_curved: cut curve did not converge"`.
 4. Convert each returned segment into a cut for the A side (`ua/va`) and the B side (`ub/vb`); merge cuts per face and drop segments shorter than `tolerance`.
@@ -496,10 +498,11 @@ Algorithm:
 1. Test quarter-cylinder minus a half-space? Use `split_solid_by_plane` as the reference: `difference` of the quarter cylinder with a box occupying `z >= 1` must equal the lower half within `1e-6` volume and face count.
 2. Test union of two overlapping boxes via the curved driver (all-planar path) and compare volume with `boolean_solid`; assert same volume within `1e-9` and no `validate_topology` findings.
 3. Test NURBS operand -> `unsupported`.
-4. Test coplanar face contact: two boxes sharing a face -> `unsupported`.
-5. Test disjoint union -> `unsupported "not a single connected component"`.
-6. RED; implement; Debug/Release.
-7. Commit: `feat(m3b2): boolean analytic B-rep solids with trimmed faces`.
+4. Test cone operand (`make_cone`) -> `unsupported "boolean_solid_curved: cone operands are not supported (apex-touching loops are deferred)"`.
+5. Test coplanar face contact: two boxes sharing a face -> `unsupported`.
+6. Test disjoint union -> `unsupported "not a single connected component"`.
+7. RED; implement; Debug/Release.
+8. Commit: `feat(m3b2): boolean analytic B-rep solids with trimmed faces`.
 
 ## Task 9: QA, bench, docs
 
@@ -515,8 +518,8 @@ Algorithm:
 **Steps**
 
 1. Bench: a quarter-cylinder and a box with 5000 lateral samples; measure `boolean_solid_curved` union/intersection/difference with `tessellate`-based volume verification. Report min/median/max over 5 runs. Target: median <= 2 s per operation; record FAIL honestly. Exit non-zero on validation failure, not on slowness.
-2. QA corpus in `brep_boolean_curved_test.cpp`: twelve cases covering cylinder-box, sphere-box, cone-box, torus-box, seam cuts, boundary cuts, tangency rejection, coplanar rejection, NURBS rejection; each result must be either a validated solid with volume matching an independent tessellation sum within `1e-6` relative, or a diagnosed error.
-3. ADR-0025 records: analytic-only scope, sampled closed edges, no coplanar contact, single-component result, seam unwrapping, classification-tolerance policy.
+2. QA corpus in `brep_boolean_curved_test.cpp`: twelve cases covering cylinder-box, sphere-box, torus-box, seam cuts, boundary cuts, tangency rejection, coplanar rejection, NURBS rejection, and cone rejection (documented `unsupported`); each result must be either a validated solid with volume matching an independent tessellation sum within `1e-6` relative, or a diagnosed error.
+3. ADR-0025 records: analytic-only scope, sampled closed edges, no coplanar contact, cone operands deferred (apex-touching loops), single-component result, seam unwrapping, classification-tolerance policy.
 4. Update §16.3 with the M3b-2 status and the measured bench number; leave QA-8 and QA-9 unchanged and do not claim M3b-2 exit until the bench and QA corpus pass.
 5. Full suite Debug/Release, `ctest`, warnings clean.
 
