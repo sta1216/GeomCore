@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <string_view>
 #include <variant>
 #include <vector>
@@ -21,6 +22,8 @@
 #include <geom/surfaces/analytic.hpp>
 #include <geom/surfaces/nurbs_surface.hpp>
 #include <geom/surfaces/plane.hpp>
+
+#include "brep_curved_fixture.hpp"
 
 namespace {
 
@@ -637,4 +640,276 @@ TEST_CASE("two loops are reported outer first and keep their winding") {
   CHECK(std::fabs(inner_area) == doctest::Approx(0.25));
   // Opposite winding: a CCW island inside a CW hole (or the other way round).
   CHECK(outer_area * inner_area < 0.0);
+}
+
+TEST_CASE("cylinder cap and lateral loops carry circle provenance") {
+  const geom::Vec3d axis{0.0, 0.0, 1.0};
+  const auto cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, axis, 2.0, 3.0, kTolerance);
+  REQUIRE(cylinder.has_value());
+  const geom::Brep& brep = cylinder.value();
+
+  // Both planar caps are bounded by a rim circle, so every cap sample must carry
+  // the rim circle and the azimuth of its 3D point around it.
+  for (const bool bottom : {true, false}) {
+    const geom::FaceId cap = cap_facing(brep, axis, bottom);
+    REQUIRE_FALSE(cap.is_null());
+    const geom::Face& face = brep.face(cap);
+    const auto& plane = std::get<geom::Plane3>(brep.geometry().surfaces[face.surface]);
+    const geom::PlaneFrame frame = geom::make_plane_frame(plane).value();
+    const geom::EdgeId border = brep.coedge(brep.loop(face.first_loop).start).edge;
+    REQUIRE_FALSE(border.is_null());
+    const auto& edge_circle = std::get<geom::CircleCurve3>(
+        brep.geometry().curves[brep.edge(border).curve]);
+
+    const auto loops = geom::face_loops_uv(brep, cap, kTolerance);
+    REQUIRE(loops.has_value());
+    REQUIRE(loops.value().size() == 1u);
+    const geom::FaceUvLoop& uv = loops.value()[0];
+    REQUIRE(uv.points.size() == 32u);
+    REQUIRE(uv.arcs.size() == uv.points.size());
+
+    int direction = 0;
+    double previous_t = 0.0;
+    for (std::size_t i = 0; i < uv.points.size(); ++i) {
+      REQUIRE(uv.arcs[i].has_value());
+      const geom::FaceUvArcRef& ref = *uv.arcs[i];
+      CHECK(geom::norm2(ref.circle.center - edge_circle.center) <= kTolerance);
+      CHECK(std::fabs(ref.circle.radius - edge_circle.radius) <= kTolerance);
+      CHECK(geom::norm2(ref.circle.x_axis - edge_circle.x_axis) <= kTolerance);
+      CHECK(geom::norm2(ref.circle.y_axis - edge_circle.y_axis) <= kTolerance);
+      CHECK(ref.t >= 0.0);
+      CHECK(ref.t < kTwoPi);
+
+      const geom::Point3d point3d = geom::plane_frame_to_3d(frame, uv.points[i]);
+      CHECK(geom::norm2(ref.circle.eval(ref.t) - point3d) <= 1e-12);
+
+      if (i > 0u) {
+        double delta = ref.t - previous_t;
+        while (delta > kPi) delta -= kTwoPi;
+        while (delta < -kPi) delta += kTwoPi;
+        CHECK(std::fabs(delta) > 0.0);
+        const int sign = delta > 0.0 ? 1 : -1;
+        if (direction == 0) direction = sign;
+        CHECK(sign == direction);
+      }
+      previous_t = ref.t;
+    }
+  }
+
+  const geom::FaceId lateral = face_with_surface<geom::Cylinder3>(brep);
+  REQUIRE_FALSE(lateral.is_null());
+  const auto loops = geom::face_loops_uv(brep, lateral, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  const geom::FaceUvLoop& uv = loops.value()[0];
+  REQUIRE(uv.points.size() == 66u);
+  REQUIRE(uv.arcs.size() == uv.points.size());
+
+  const auto& wall =
+      std::get<geom::Cylinder3>(brep.geometry().surfaces[brep.face(lateral).surface]);
+  std::size_t engaged = 0;
+  int direction = 0;
+  for (std::size_t i = 0; i < uv.points.size(); ++i) {
+    const geom::Point3d point3d = wall.eval(uv.points[i][0], uv.points[i][1]);
+    // The seam contributes only its two endpoints, and both are shared with a
+    // rim, so every lateral sample lies on one of the two rim circles. The
+    // brief's "none on the two vertical lines" means no sample sits strictly
+    // between the rims.
+    const bool on_rim = std::fabs(point3d[2]) <= kTolerance ||
+                        std::fabs(point3d[2] - 3.0) <= kTolerance;
+    CHECK(on_rim);
+    REQUIRE(uv.arcs[i].has_value());
+    ++engaged;
+
+    const geom::FaceUvArcRef& ref = *uv.arcs[i];
+    CHECK(std::fabs(ref.circle.radius - 2.0) <= 1e-12);
+    CHECK(std::fabs(ref.circle.center[2] - point3d[2]) <= 1e-12);
+    CHECK(ref.t >= 0.0);
+    CHECK(ref.t < kTwoPi);
+    CHECK(geom::norm2(ref.circle.eval(ref.t) - point3d) <= 1e-12);
+
+    if (i == 34u) direction = 0;  // index 33 joins the two rims
+    if (i > 0u && i != 33u) {
+      double delta = ref.t - uv.arcs[i - 1u]->t;
+      while (delta > kPi) delta -= kTwoPi;
+      while (delta < -kPi) delta += kTwoPi;
+      CHECK(std::fabs(delta) > 0.0);
+      const int sign = delta > 0.0 ? 1 : -1;
+      if (direction == 0) direction = sign;
+      CHECK(sign == direction);
+    }
+  }
+  CHECK(engaged == 66u);
+
+  // The surviving seam joint keeps the top rim's provenance, so the top arc
+  // starts and ends at t = 0 instead of losing its first sample.
+  CHECK(std::fabs(uv.points[33][1] - 3.0) <= 1e-12);
+  REQUIRE(uv.arcs[33].has_value());
+  CHECK(std::fabs(uv.arcs[33]->circle.center[2] - 3.0) <= 1e-12);
+  CHECK(uv.arcs[33]->t <= 1e-12);
+  CHECK(uv.arcs[65]->t <= 1e-12);
+}
+
+TEST_CASE("box faces carry no circle provenance") {
+  const auto box =
+      geom::make_box(geom::Point3d{-1.0, -1.0, -1.0}, geom::Point3d{1.0, 1.0, 1.0}, kTolerance);
+  REQUIRE(box.has_value());
+  const geom::Brep& brep = box.value();
+  for (const geom::FaceId id : brep.face_ids()) {
+    const auto loops = geom::face_loops_uv(brep, id, kTolerance);
+    REQUIRE(loops.has_value());
+    for (const geom::FaceUvLoop& loop : loops.value()) {
+      REQUIRE(loop.arcs.size() == loop.points.size());
+      for (const auto& ref : loop.arcs) CHECK_FALSE(ref.has_value());
+    }
+  }
+}
+
+TEST_CASE("a half disk reports normalized circle angles") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface =
+      editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+  const std::uint32_t curve =
+      editor.add_curve(geom::CircleCurve3{geom::Point3d{0.0, 0.0, 0.0},
+                                          geom::Vec3d{1.0, 0.0, 0.0},
+                                          geom::Vec3d{0.0, 1.0, 0.0}, 1.0});
+  const geom::VertexId low = editor.add_vertex(geom::Point3d{0.0, -1.0, 0.0}, 0.0).value();
+  const geom::VertexId high = editor.add_vertex(geom::Point3d{0.0, 1.0, 0.0}, 0.0).value();
+  // The edge starts at angle -pi/2, so its parameter is negative while the
+  // stored provenance angle must be normalized to [0, 2*pi).
+  const geom::EdgeId arc =
+      editor.add_edge(low, high, curve, -kPi / 2.0, kPi / 2.0, 0.0).value();
+  const std::uint32_t chord = editor.add_curve(
+      geom::LineCurve3{geom::Point3d{0.0, 1.0, 0.0}, geom::Vec3d{0.0, -2.0, 0.0}});
+  const geom::EdgeId line = editor.add_edge(high, low, chord, 0.0, 1.0, 0.0).value();
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 2> coedges{geom::CoedgeSpec{arc, false, geom::kNoGeometry, 0.0},
+                                                geom::CoedgeSpec{line, false, geom::kNoGeometry,
+                                                                 0.0}};
+  REQUIRE(editor.add_loop(face, coedges, true).has_value());
+
+  const geom::Brep& brep = editor.brep();
+  const geom::Face& stored = brep.face(face);
+  const auto& plane = std::get<geom::Plane3>(brep.geometry().surfaces[stored.surface]);
+  const geom::PlaneFrame frame = geom::make_plane_frame(plane).value();
+  const auto loops = geom::face_loops_uv(brep, face, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  const geom::FaceUvLoop& uv = loops.value()[0];
+  // 33 arc samples; the chord only adds its far endpoint, which the closing pop
+  // removes again.
+  REQUIRE(uv.points.size() == 33u);
+  REQUIRE(uv.arcs.size() == uv.points.size());
+  for (std::size_t i = 0; i < uv.points.size(); ++i) {
+    REQUIRE(uv.arcs[i].has_value());
+    const geom::FaceUvArcRef& ref = *uv.arcs[i];
+    CHECK(ref.t >= 0.0);
+    CHECK(ref.t < kTwoPi);
+    const geom::Point3d point3d = geom::plane_frame_to_3d(frame, uv.points[i]);
+    CHECK(geom::norm2(ref.circle.eval(ref.t) - point3d) <= 1e-12);
+  }
+  // The first sample sits at angle -pi/2 and must come back as 3*pi/2.
+  CHECK(uv.arcs.front()->t > kPi);
+}
+
+TEST_CASE("a chordal quarter cylinder carries no circle provenance") {
+  const geom::Brep brep = geom::test::make_quarter_cylinder(1.0, 2.0, kTolerance);
+  const geom::FaceId lateral = geom::test::quarter_cylinder_lateral(brep);
+  REQUIRE_FALSE(lateral.is_null());
+
+  const auto loops = geom::face_loops_uv(brep, lateral, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  const geom::FaceUvLoop& uv = loops.value()[0];
+  REQUIRE(uv.points.size() == 34u);
+  REQUIRE(uv.arcs.size() == uv.points.size());
+  for (const auto& ref : uv.arcs) CHECK_FALSE(ref.has_value());
+
+  // The fixture approximates both quarter arcs with 16 line chords, so no coedge
+  // can engage. The brief's "engaged refs only on the two arcs" needs a fixture
+  // whose arc edges are real CircleCurve3 curves.
+  const geom::Loop& boundary = brep.loop(brep.face(lateral).first_loop);
+  geom::CoedgeId current = boundary.start;
+  std::size_t coedges = 0;
+  do {
+    const geom::Coedge& coedge = brep.coedge(current);
+    const geom::Edge& edge = brep.edge(coedge.edge);
+    CHECK(std::holds_alternative<geom::LineCurve3>(brep.geometry().curves[edge.curve]));
+    current = coedge.next;
+    ++coedges;
+  } while (current != boundary.start && coedges < 100u);
+  CHECK(coedges == 34u);
+}
+
+TEST_CASE("an arc corner between two circles keeps the earlier provenance") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface =
+      editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+  const double half = std::sqrt(0.5);
+  // Two arcs meet at (0, 1, 0) but run on different circles: a corner between
+  // two arcs, like the seam of a torus.
+  const std::uint32_t first_curve =
+      editor.add_curve(geom::CircleCurve3{geom::Point3d{0.0, 0.0, 0.0},
+                                          geom::Vec3d{1.0, 0.0, 0.0},
+                                          geom::Vec3d{0.0, 1.0, 0.0}, 1.0});
+  const std::uint32_t second_curve =
+      editor.add_curve(geom::CircleCurve3{geom::Point3d{0.5, 0.5, 0.0},
+                                          geom::Vec3d{1.0, 0.0, 0.0},
+                                          geom::Vec3d{0.0, 1.0, 0.0}, half});
+  const geom::VertexId right = editor.add_vertex(geom::Point3d{1.0, 0.0, 0.0}, 0.0).value();
+  const geom::VertexId top = editor.add_vertex(geom::Point3d{0.0, 1.0, 0.0}, 0.0).value();
+  const geom::EdgeId first =
+      editor.add_edge(right, top, first_curve, 0.0, kPi / 2.0, 0.0).value();
+  const geom::EdgeId second = editor.add_edge(top, right, second_curve, 3.0 * kPi / 4.0,
+                                              7.0 * kPi / 4.0, 0.0)
+                                  .value();
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 2> coedges{
+      geom::CoedgeSpec{first, false, geom::kNoGeometry, 0.0},
+      geom::CoedgeSpec{second, false, geom::kNoGeometry, 0.0}};
+  REQUIRE(editor.add_loop(face, coedges, true).has_value());
+
+  const auto loops = geom::face_loops_uv(editor.brep(), face, kTolerance);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  const geom::FaceUvLoop& uv = loops.value()[0];
+  // 33 samples from each arc, minus the shared junction and the closing pop.
+  REQUIRE(uv.points.size() == 64u);
+  REQUIRE(uv.arcs.size() == uv.points.size());
+
+  // The shared point survives from the first arc and keeps its circle; the
+  // second arc's provenance starts one point later.
+  REQUIRE(uv.arcs[32].has_value());
+  CHECK(std::fabs(uv.arcs[32]->circle.radius - 1.0) <= 1e-12);
+  CHECK(geom::norm2(uv.arcs[32]->circle.center - geom::Point3d{0.0, 0.0, 0.0}) <= 1e-12);
+  REQUIRE(uv.arcs[33].has_value());
+  CHECK(std::fabs(uv.arcs[33]->circle.radius - half) <= 1e-12);
+  for (const auto& ref : uv.arcs) REQUIRE(ref.has_value());
+}
+
+TEST_CASE("a stale pcurve off its circle edge is rejected") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface =
+      editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+  const std::uint32_t curve =
+      editor.add_curve(geom::CircleCurve3{geom::Point3d{0.0, 0.0, 0.0},
+                                          geom::Vec3d{1.0, 0.0, 0.0},
+                                          geom::Vec3d{0.0, 1.0, 0.0}, 1.0});
+  // The pcurve maps to 3D points at radius sqrt(2) instead of 1, like a stale
+  // parameterization left behind by an earlier edit.
+  const std::uint32_t stale =
+      editor.add_pcurve(geom::Pcurve2d{geom::Point2d{-1.0, -1.0}, geom::Point2d{1.0, 1.0}});
+  const geom::VertexId start = editor.add_vertex(geom::Point3d{1.0, 0.0, 0.0}, 0.0).value();
+  const geom::EdgeId edge = editor.add_edge(start, start, curve, 0.0, kTwoPi, 0.0).value();
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 1> coedges{
+      geom::CoedgeSpec{edge, false, stale, 0.0}};
+  REQUIRE(editor.add_loop(face, coedges, true).has_value());
+
+  const auto loops = geom::face_loops_uv(editor.brep(), face, kTolerance);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::numeric_failure);
+  CHECK(std::string_view(loops.error().message) ==
+        "face_loops_uv: point is off its circle");
 }

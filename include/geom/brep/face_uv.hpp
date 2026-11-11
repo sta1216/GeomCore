@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -27,9 +28,19 @@ inline namespace v1 {
 // implicitly closed, so the first point is not repeated at the end.
 //
 // `outer` mirrors Loop::outer. face_loops_uv() reports the outer loop first.
+//
+// `arcs` is parallel to `points`: an entry is engaged exactly when the point
+// came from a coedge whose edge curve is a CircleCurve3, and carries that circle
+// plus the azimuth of the point around it, normalized to [0, 2*pi).
+struct FaceUvArcRef {
+  CircleCurve3 circle;
+  double t = 0.0;
+};
+
 struct FaceUvLoop {
   std::vector<Point2d> points;
   bool outer = false;
+  std::vector<std::optional<FaceUvArcRef>> arcs;
 };
 
 namespace detail {
@@ -285,6 +296,33 @@ inline Result<std::vector<Point3d>> face_uv_edge_samples(const Brep& brep, const
   return samples;
 }
 
+// Azimuth of `point` around `circle`, normalized to [0, 2*pi). The angle is
+// measured from x_axis towards y_axis and is derived from the 3D position, not
+// from an edge parameter: pcurves may interpolate between the edge endpoints and
+// several edges may share the same circle with different parameter ranges.
+inline double face_uv_circle_angle(const CircleCurve3& circle, const Point3d& point) {
+  const Vec3d offset = point - circle.center;
+  double angle = std::atan2(dot(offset, circle.y_axis), dot(offset, circle.x_axis));
+  if (angle < 0.0) angle += 2.0 * kFaceUvPi;
+  // atan2 returns -0.0 for a point on the +x axis approached from below, and
+  // adding a full turn to that lands exactly on 2*pi; keep the range half-open.
+  if (angle >= 2.0 * kFaceUvPi) angle = 0.0;
+  return angle;
+}
+
+// The circle a coedge's edge lies on, or nullptr when the edge is a line, a
+// NURBS curve, or has no usable curve index.
+inline const CircleCurve3* face_uv_coedge_circle(const Brep& brep, const Coedge& coedge) {
+  if (!brep.edge_alive(coedge.edge)) return nullptr;
+  const GeometryStore& geometry = brep.geometry();
+  const Edge& edge = brep.edge(coedge.edge);
+  if (edge.curve == kNoGeometry ||
+      static_cast<std::size_t>(edge.curve) >= geometry.curves.size()) {
+    return nullptr;
+  }
+  return std::get_if<CircleCurve3>(&geometry.curves[edge.curve]);
+}
+
 // The parameter-domain polyline of one oriented coedge, together with the 3D
 // position of every point. `from_pcurve` records whether the points are the
 // stored pcurve (exact parameter values) or projections of 3D samples.
@@ -292,7 +330,18 @@ struct FaceUvRun {
   std::vector<Point2d> points;
   std::vector<Point3d> positions;
   bool from_pcurve = false;
+  std::vector<std::optional<FaceUvArcRef>> arcs;
 };
+
+// Fills `run.arcs` in lockstep with `run.points`: one engaged entry per point
+// when the coedge's edge is a circle, all disengaged otherwise.
+inline void face_uv_fill_arcs(const CircleCurve3* circle, FaceUvRun& run) {
+  run.arcs.assign(run.points.size(), std::nullopt);
+  if (circle == nullptr) return;
+  for (std::size_t i = 0; i < run.positions.size(); ++i) {
+    run.arcs[i] = FaceUvArcRef{*circle, face_uv_circle_angle(*circle, run.positions[i])};
+  }
+}
 
 inline Result<FaceUvRun> face_uv_coedge_run(const Brep& brep, const Coedge& coedge,
                                             const FaceUvProjection& projection,
@@ -327,6 +376,7 @@ inline Result<FaceUvRun> face_uv_coedge_run(const Brep& brep, const Coedge& coed
       run.points.push_back(uv);
       run.positions.push_back(position);
     }
+    face_uv_fill_arcs(face_uv_coedge_circle(brep, coedge), run);
     previous_u = run.points.back()[0];
     has_previous_u = true;
     run.from_pcurve = true;
@@ -350,6 +400,7 @@ inline Result<FaceUvRun> face_uv_coedge_run(const Brep& brep, const Coedge& coed
     run.points.push_back(uv.value());
     run.positions.push_back(point);
   }
+  face_uv_fill_arcs(face_uv_coedge_circle(brep, coedge), run);
   return run;
 }
 
@@ -392,6 +443,18 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
       if (!face_uv_point2d_finite(uv) || !face_uv_point3d_finite(run.positions[i])) {
         return Error{Errc::non_finite, "face_loops_uv: loop point is not finite", 0u, 0u};
       }
+      const std::optional<FaceUvArcRef>& arc = run.arcs[i];
+      if (arc.has_value()) {
+        // A stale pcurve can leave the circle its edge lies on, which would make
+        // the provenance angle meaningless. The slack also covers the rounding
+        // of the 3D position that a pcurve evaluates to.
+        const double radial = face_uv_distance(run.positions[i], arc->circle.center);
+        const double slack = std::max(tolerance, 1e-12 * arc->circle.radius);
+        if (std::fabs(radial - arc->circle.radius) > slack) {
+          return Error{Errc::numeric_failure, "face_loops_uv: point is off its circle",
+                       current.index(), 0u};
+        }
+      }
       if (started) {
         const Point2d& previous = result.points.back();
         if (projection.periodic_u()) uv[0] = face_uv_unwrap(uv[0], previous[0]);
@@ -403,12 +466,24 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
                                    uv[0] == previous[0] && uv[1] == previous[1];
           const bool position_junction =
               face_uv_distance(run.positions[i], last_position) <= tolerance;
-          if (uv_junction || position_junction) continue;
+          if (uv_junction || position_junction) {
+            // One ref per junction. When only one side knows its circle the
+            // surviving point inherits it, so a closed arc keeps both endpoints
+            // instead of losing the one the adjacent line run drops. When both
+            // sides are engaged but the circles differ, this is a corner between
+            // two arcs (the torus seam is one), so the surviving point keeps the
+            // earlier circle and the incoming arc is left to start one point in.
+            if (arc.has_value() && !result.arcs.back().has_value()) {
+              result.arcs.back() = arc;
+            }
+            continue;
+          }
           return Error{Errc::invalid_topology, "face_loops_uv: coedge chain is not continuous",
                        current.index(), 0u};
         }
       }
       result.points.push_back(uv);
+      result.arcs.push_back(arc);
       if (!started) {
         first_position = run.positions[i];
         started = true;
@@ -445,6 +520,11 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
     return Error{Errc::numeric_failure, "face_loops_uv: loop is not closed", loop_id.index(), 0u};
   }
   result.points.pop_back();
+  result.arcs.pop_back();
+  if (result.arcs.size() != result.points.size()) {
+    return Error{Errc::invalid_topology, "face_loops_uv: arc provenance size mismatch",
+                 loop_id.index(), 0u};
+  }
   if (result.points.size() < 3u) {
     return Error{Errc::invalid_topology, "face_loops_uv: loop has fewer than three points",
                  loop_id.index(), 0u};
