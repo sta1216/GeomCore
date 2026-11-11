@@ -44,10 +44,20 @@ struct FaceUvLoop {
 NURBS, and sampled approximations. A loop whose size disagrees is
 `invalid_topology`.
 
+Junction semantics (accepted in the Task 4c implementation): a junction keeps
+one ref; if only the incoming run knows its circle the surviving point inherits
+it, so a closed arc keeps both endpoints. Two legitimately different circles
+meeting at one point (the torus seam) are a **corner between arcs**, not an
+error: the surviving point keeps the earlier circle and the incoming arc starts
+one point later. Circle-mismatch detection therefore lives in the assembler
+(Task 5), not here.
+
 Tests: a cylinder cap loop has engaged refs with radius/center equal to the
-edge and strictly increasing t; a polyline edge has none; a mixed loop (arc +
-line) has engaged refs only on the arc run; t is normalized to [0, 2*pi) and
-matches the 3D point within 1e-12.
+edge and strictly increasing t; the cylinder lateral loop has engaged refs only
+on the bottom and top rim runs; a box face has none; a half-disk
+(`CircleCurve3` with negative `t0`) normalizes every t into [0, 2*pi) and matches
+`circle.eval(t)` within 1e-12; the quarter-cylinder fixture stores its arcs as
+16 `LineCurve3` chords, so its loop is entirely disengaged (regression).
 
 ## Task 4d: exact arc spans in fragments
 
@@ -94,10 +104,41 @@ Algorithm:
    2*pi; a full quarter-cylinder lateral loop split by a plane at z = h/2 has
    the bottom and top arcs engaged and the two cut lines not engaged.
 
-Tests: quarter-cylinder lateral face cut by `z = h/2` (arcs engaged, exact t
-ends at 0, pi/2); cap face cut by a chord (arc spans on both sides); a cut that
-touches an arc at one point (single inserted vertex); a polygonal face has no
-spans; mismatch of circle/tolerance is `invalid_topology` in the assembler.
+Tests: cylinder split by the plane `x = 0` (lateral halves keep two `pi` spans
+each, cap halves one `pi` span each, complementary); cylinder split at
+`z = h/2` (full-circle spans); cap disk cut by a chord (major/minor spans); a
+cut that touches an arc at one point (single inserted vertex); a polygonal face
+has no spans; the chordal quarter-cylinder fixture has no spans; mismatch of
+circle/tolerance is `invalid_topology` in the assembler.
+
+## Task 4e: arc-exact planar area for volume
+
+Files: `include/geom/brep/detail/curved_volume.hpp`,
+`tests/unit/brep_curved_volume_test.cpp`.
+
+The quadrature integrates over the chord polygon, so a planar face bounded by a
+circle loses the circular segments (a 32-gon cap is 0.64% small). For a face
+whose surface is `Plane3`, replace the triangle-sum area by the exact signed
+area of its loops using Green's theorem per segment:
+
+- line segment: `0.5 * cross(p_i, p_{i+1})` in uv;
+- circular arc (`arcs[i]`/`arcs[i+1]` engaged on the same circle **and** the
+  circle's plane is parallel to the face plane within `tolerance`): with the
+  circle center projected into uv and `delta = t1 - t0` (add `2*pi` once when
+  needed),
+  `0.5 * (r^2 * delta + r * (cx*(sin t1 - sin t0) - cy*(cos t1 - cos t0)))`.
+
+Sum the loop areas with their orientation (outer CCW positive, holes CW
+negative). `area_uv` becomes `|sum|` for the planar path; curved faces keep the
+existing subdivided quadrature. This makes cylinder caps exact while lateral
+rims (circle plane perpendicular to the face) stay line segments and are
+unaffected.
+
+Tests: `make_cylinder(2,3)` volume equals `pi*r^2*h` within 1e-9 relative; a
+half cylinder `x >= 0` built by splitting equals `pi*r^2*h/2` within 1e-9; box
+unchanged; a cap with a hole (two coaxial circle loops) equals
+`pi*(R^2-r^2)*h` within 1e-9; the chordal quarter fixture keeps its polygonal
+volume (no arc provenance).
 
 ## Task 5 revision: exact arcs in assembly
 
@@ -122,8 +163,8 @@ spans; mismatch of circle/tolerance is `invalid_topology` in the assembler.
    quadrature.
 4. All other edges keep `make_polyline_curve` and the existing uv polyline.
 
-Tests: quarter-cylinder fixture split at `z = h/2` then assembled; every arc
-edge is a `NurbsCurve` with degree 2 and endpoints exactly on the original
-circle; `curved_solid_volume` equals `pi*r^2*h/4` within `1e-9` relative (the
-32-chord fixture is healed); full-cylinder cap edges stay `CircleCurve3` when
-the whole edge is untouched; a mismatched span pair is `invalid_topology`.
+Tests: a full cylinder split at `z = h/2` then assembled; every arc edge is a
+`NurbsCurve` with degree 2 and endpoints exactly on the original circle;
+`curved_solid_volume` of each half equals `pi*r^2*h/2` within 1e-9 relative
+(Task 4e makes the caps exact); a full-cylinder cap edge that is untouched
+stays `CircleCurve3`; a mismatched span pair is `invalid_topology`.
