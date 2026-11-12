@@ -4,15 +4,16 @@
 //
 // `heal_brep` closes small gaps along the boundary of a solid: coincident
 // vertices are welded, boundary edges of neighbouring faces are sewn, and the
-// remaining open edges are reported. Repairing a pcurve resamples it against the
-// surface at `HealOptions::tolerance` resolution; gaps wider than
-// `HealOptions::max_gap` are left alone and reported as issues so a caller can
-// decide whether the tolerance is appropriate.
+// remaining open edges are reported. Repairing a pcurve projects the edge's two
+// endpoint vertices onto the surface at `HealOptions::tolerance` resolution;
+// gaps wider than `HealOptions::max_gap` are left alone and reported as issues
+// so a caller can decide whether the tolerance is appropriate.
 //
 // `HealReport` summarises what a run changed and how close it came to the
 // requested tolerances. `detail::heal_boundary_edges` exposes the boundary
 // discovery used by the first phase so it can be tested in isolation.
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -53,7 +54,8 @@ inline const char* to_string(HealIssueKind kind) noexcept {
 inline constexpr std::uint32_t kNoEntity = 0xFFFFFFFFu;
 
 struct HealOptions {
-  // uv-projection resolution used when repairing pcurves.
+  // Tolerance used when projecting an edge's endpoints onto their surface to
+  // repair a pcurve.
   double tolerance = 1e-9;
   // Gaps wider than this are reported and left open.
   double max_gap = 1e-6;
