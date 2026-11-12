@@ -373,11 +373,13 @@ TEST_CASE("heal: a cracked box becomes the unit box") {
   CHECK(SolidEditor(cracked.brep).commit().has_value());
 
   // 0.5 + 1e-6 is not representable in binary64: the rim vertices measure a
-  // 1.0000000000287557e-6 seam. Both gates sit just above that representable
-  // width while the report below still pins the closed gap to ~1e-6.
+  // 1.0000000000287557e-6 seam. The gates add one part in 1e9 of headroom for
+  // that representation error while the report below still pins the closed gap
+  // to ~1e-6.
+  const double gate = 1e-6 + 1e-15;
   const auto healed =
       heal_brep(cracked.brep, cracked.solid,
-                HealOptions{.tolerance = 1e-9, .max_gap = 2e-6, .max_tolerance = 2e-6});
+                HealOptions{.tolerance = 1e-9, .max_gap = gate, .max_tolerance = gate});
   REQUIRE(healed.has_value());
   const HealResult& result = healed.value();
   CHECK(result.report.changed);
