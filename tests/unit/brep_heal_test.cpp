@@ -1173,6 +1173,11 @@ TEST_CASE("heal: healing a closed result again is idempotent") {
   REQUIRE(second.has_value());
   CHECK_FALSE(second.value().report.changed);
   CHECK(second.value().report.issues.empty());
+  CHECK(second.value().report.welded_vertices == 0u);
+  CHECK(second.value().report.sewn_edges == 0u);
+  // Nothing is raised on a healed input, so the field stays zero even though
+  // the chain keeps its 1e-6 tolerances.
+  CHECK(second.value().report.max_tolerance == 0.0);
   CHECK(heal_fingerprint(second.value().brep) == fingerprint);
 }
 
