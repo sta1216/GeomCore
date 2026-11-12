@@ -182,14 +182,14 @@ inline TornSheet make_reversed_keep_sheet(double gap) {
   return fixture_detail::finish(editor, faces, 0.0);
 }
 
-// A 3-edge triangle and a 2-edge part of a second triangle. The nearest
-// candidates form A0-B0 and A1-B1; A2's nearest is B1 but B1 prefers A1, so
-// A2 is a one-sided preference and must not be sewn.
+// Two triangles whose nearest candidates form A0-B0 and A1-B2. A2's nearest
+// is B1, but B1 prefers A1, so A2 is a one-sided preference that must not be
+// sewn even though its traversal direction is compatible with B1's.
 struct AsymmetricPreference {
   Brep brep;
   SolidId solid{};
   std::array<EdgeId, 3> three{};
-  std::array<EdgeId, 2> two{};
+  std::array<EdgeId, 3> b_edges{};
 };
 
 inline AsymmetricPreference make_asymmetric_preference_sheet(double gap) {
@@ -214,12 +214,12 @@ inline AsymmetricPreference make_asymmetric_preference_sheet(double gap) {
   const auto be2 = editor.add_edge(b2, b0, kNoGeometry, 0, 1, 0).value();
   const auto b_face = editor.add_face(above, false, 0).value();
   const CoedgeSpec b_loop[] = {
-      {be0, false}, {be1, true}, {be2, true}};
+      {be0, false}, {be1, false}, {be2, false}};
   fixture_detail::require_ok(editor.add_loop(b_face, b_loop, true));
 
   const std::array<FaceId, 2> faces{a_face, b_face};
   const TornSheet sheet = fixture_detail::finish(editor, faces, 0.0);
-  return {sheet.brep, sheet.solid, {ae0, ae1, ae2}, {be0, be1}};
+  return {sheet.brep, sheet.solid, {ae0, ae1, ae2}, {be0, be1, be2}};
 }
 
 // Two triangles that meet only at the shared vertex s. Each returned edge is a
