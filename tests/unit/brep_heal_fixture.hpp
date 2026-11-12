@@ -260,9 +260,10 @@ inline SharedVertexSheets make_shared_vertex_sheets() {
 }
 
 // A unit box cut at z = 0.5. The lower half ends at z = 0.5 and the upper half
-// starts at z = 0.5 + gap, so the two four-edge rims are boundary loops of one
-// open shell; the eight rim edges are the only boundary edges. Volume before
-// healing is 1 - gap.
+// starts at the smallest representable z at or below z = 0.5 + gap, so the two
+// four-edge rims are boundary loops of one open shell and the seam never exceeds
+// gap; the eight rim edges are the only boundary edges. Volume before healing is
+// 1 minus the seam.
 struct CrackedBox {
   Brep brep;
   SolidId solid{};

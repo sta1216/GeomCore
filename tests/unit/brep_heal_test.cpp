@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
@@ -373,7 +374,7 @@ TEST_CASE("heal: a cracked box becomes the unit box") {
   CHECK(SolidEditor(cracked.brep).commit().has_value());
 
   // The fixture clamps the upper rim so the seam never exceeds 1e-6; the seam
-  // itself is 0.9999999999712443e-6 because 0.5 + 1e-6 is not representable.
+  // is just below 1e-6 because 0.5 + 1e-6 rounds up and is stepped down one ulp.
   const auto healed =
       heal_brep(cracked.brep, cracked.solid,
                 HealOptions{.tolerance = 1e-9, .max_gap = 1e-6, .max_tolerance = 1e-6});
@@ -413,7 +414,8 @@ TEST_CASE("heal: a cracked box becomes the unit box") {
     const Vertex& vertex = result.brep.vertex(id);
     if (vertex.tol > 0.0) {
       ++welded_vertices;
-      CHECK(vertex.tol >= result.report.max_closed_gap);
+      CHECK(std::abs(vertex.tol - result.report.max_closed_gap) <=
+            1e-12 * result.report.max_closed_gap);
     }
   }
   CHECK(welded_vertices == 4u);
