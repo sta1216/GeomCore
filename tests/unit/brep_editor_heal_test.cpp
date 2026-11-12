@@ -17,7 +17,8 @@ namespace {
 using namespace geom;
 
 // Four boundary edges of an axis-aligned unit quad on z = 0, running
-// counter-clockwise. The face and loop are created but no shell: the callers
+// counter-clockwise. add_quad_face_without_loop creates the face but not its
+// loop; add_quad_face adds the loop. Neither creates a shell: the callers
 // decide how the face joins a shell, which keeps the sewing fixtures small.
 struct QuadFace {
   std::array<VertexId, 4> vertices;
