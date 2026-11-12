@@ -37,7 +37,7 @@
 | 用例 | 输入 | 结果 | gap | welded / sewn | max tol | volume error | 拒绝位置 / 量值 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | QA-12 正例 | 裂盒，缝隙 1e-6，`max_gap=1e-6` | 闭合，`validate_topology` 通过 | 1e-6 | 4 / 4 | 1e-6 | 1.11e-16 | — |
-| 幂等 | 对上一结果再次 heal | `changed=false`，`issues.empty()`，指纹不变 | 0 | 0 / 0 | 1e-6（不变） | — | — |
+| 幂等 | 对上一结果再次 heal | `changed=false`，`issues.empty()`，指纹不变 | 0 | 0 / 0 | 0（未提升；链上仍为 1e-6） | — | — |
 | QA-12 反例 | 裂盒，缝隙 1e-3，`max_gap=1e-6` | 拒绝，`changed=false`，指纹不变 | 0.001 | 0 / 0 | 0 | — | `(0, 0, 0.5005)` / 0.001，边 16 与 20 |
 
 正例闭合后边界边从 8 变为 0，壳 `closed=true`，顶点/边/面计数为 12/20/10；
@@ -59,7 +59,7 @@
 ```powershell
 cmake --build build --config Release
 build\tests\Release\geom_tests.exe --test-case="heal*" --no-skip
-build\tests\Release\geom_tests.exe --test-case="heal: QA-12*" --no-skip
+build\tests\Release\geom_tests.exe --test-case="heal: *" --no-skip
 build\tests\Release\geom_tests.exe --count=true
 ```
 
