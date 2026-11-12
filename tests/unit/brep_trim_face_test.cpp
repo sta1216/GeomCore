@@ -66,6 +66,33 @@ FaceId plane_face(const Brep& brep, Vec3d want_normal, double want_offset) {
   return FaceId{};
 }
 
+// The plane face whose uv window is exactly extent x extent: the face of a box
+// built from the origin to (extent, extent, extent) that the junction fixtures
+// below cut in a 10 x 10 parameter plane.
+FaceId box_plane_face(const Brep& brep, double extent) {
+  for (const FaceId id : brep.face_ids()) {
+    const auto& variant = brep.geometry().surfaces[brep.face(id).surface];
+    if (!std::holds_alternative<Plane3>(variant)) continue;
+    const Result<std::vector<FaceUvLoop>> uv = face_loops_uv(brep, id, 1e-9);
+    if (!uv.has_value() || uv.value().empty()) continue;
+    double umin = 1e300;
+    double umax = -1e300;
+    double vmin = 1e300;
+    double vmax = -1e300;
+    for (const Point2d& p : uv.value().front().points) {
+      umin = std::min(umin, p[0]);
+      umax = std::max(umax, p[0]);
+      vmin = std::min(vmin, p[1]);
+      vmax = std::max(vmax, p[1]);
+    }
+    if (std::fabs(umax - umin - extent) <= 1e-9 &&
+        std::fabs(vmax - vmin - extent) <= 1e-9) {
+      return id;
+    }
+  }
+  return FaceId{};
+}
+
 double ring_area(std::span<const Point2d> ring) {
   return std::fabs(signed_area2(ring));
 }
@@ -1292,4 +1319,173 @@ TEST_CASE("trim_face: circle hits accept a cut that penetrates past the toleranc
             circle, Point3d{-1.5, 2.0 + 1e-7, 0.0}, Point3d{1.5, 2.0 + 1e-7, 0.0},
             1e-9)
             .empty());
+}
+
+TEST_CASE("trim_face: two cuts weld at one exact interior corner") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep box =
+      make_box(Point3d{0, 0, 0}, Point3d{10, 10, 10}, kSplitTol).value();
+  const FaceId face = box_plane_face(box, 10.0);
+  REQUIRE_FALSE(face.is_null());
+
+  // Two cuts end 5e-5 apart with different slopes. Welding onto either raw end
+  // would drag the other cut off its line, so the corner is the intersection of
+  // the two end segments.
+  const double d = 5e-5;
+  std::vector<FaceCut> cuts(2);
+  cuts[0].uv = {Point2d{2.0, 0.0}, Point2d{5.0, 4.0}};
+  cuts[1].uv = {Point2d{8.0, 0.0}, Point2d{5.0 + d, 4.0 + d}};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(box, face, cuts, kSplitTol);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 2);
+
+  std::vector<double> areas;
+  areas.reserve(2);
+  for (const CurvedFragment& fragment : result.value()) {
+    areas.push_back(fragment_area(fragment));
+  }
+  std::sort(areas.begin(), areas.end());
+  CHECK(areas[0] == doctest::Approx(12.000175000).epsilon(1e-9));
+  CHECK(areas[1] == doctest::Approx(87.999825000).epsilon(1e-9));
+  CHECK(areas[0] + areas[1] == doctest::Approx(100.0).epsilon(1e-12));
+
+  // Both fragments carry the same corner, and it is the exact intersection of
+  // the two end segments.
+  const Point2d expected{5.000043750, 4.000058333};
+  const double junction_tol =
+      std::max(64.0 * kSplitTol, 1e-5 * std::hypot(10.0, 10.0));
+  std::vector<Point2d> corners;
+  for (const CurvedFragment& fragment : result.value()) {
+    Point2d nearest{};
+    double best = std::numeric_limits<double>::max();
+    for (const Point2d& p : fragment.loops_uv.front()) {
+      const double distance = std::hypot(p[0] - 5.0, p[1] - 4.0);
+      if (distance < best) {
+        best = distance;
+        nearest = p;
+      }
+    }
+    REQUIRE(best <= 1e-3);
+    CHECK(std::hypot(nearest[0] - expected[0], nearest[1] - expected[1]) <=
+          1e-9);
+    // The welded corner stays a uv displacement inside the junction tolerance
+    // (a bound on the raw end-segment parameter would allow 4x more here).
+    CHECK(best <= 2.0 * junction_tol);
+    corners.push_back(nearest);
+  }
+  CHECK(geom::detail::trim_face_same_xy(corners[0], corners[1]));
+}
+
+TEST_CASE("trim_face: a near-parallel digon collapses without a corner") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep box =
+      make_box(Point3d{0, 0, 0}, Point3d{10, 10, 10}, kSplitTol).value();
+  const FaceId face = box_plane_face(box, 10.0);
+  REQUIRE_FALSE(face.is_null());
+
+  // The two end segments are nearly parallel: their lines meet far outside the
+  // face, so the corner recompute must fall back instead of producing a point.
+  const double d = 5e-5;
+  std::vector<FaceCut> cuts(2);
+  cuts[0].uv = {Point2d{3.0, 3.0}, Point2d{7.0, 3.0}};
+  cuts[1].uv = {Point2d{7.0 + d, 3.0 + d}, Point2d{3.0 - d, 3.0 - d}};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(box, face, cuts, kSplitTol);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 1);
+  const double area = fragment_area(result.value().front());
+  CHECK(std::isfinite(area));
+  CHECK(area == doctest::Approx(100.0).epsilon(1e-9));
+}
+
+TEST_CASE("trim_face: cut ends on a boundary edge weld onto one vertex") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep box =
+      make_box(Point3d{0, 0, 0}, Point3d{10, 10, 10}, kSplitTol).value();
+  const FaceId face = box_plane_face(box, 10.0);
+  REQUIRE_FALSE(face.is_null());
+
+  // A closed triangle network whose two cut ends land 5e-5 apart on the same
+  // straight boundary edge: both ends must weld onto the one boundary point.
+  std::vector<FaceCut> cuts(3);
+  cuts[0].uv = {Point2d{2.0, 2.0}, Point2d{5.0, 0.0}};
+  cuts[1].uv = {Point2d{5.00005, 0.0}, Point2d{8.0, 2.0}};
+  cuts[2].uv = {Point2d{8.0, 2.0}, Point2d{2.0, 2.0}};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(box, face, cuts, kSplitTol);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 2);
+
+  std::vector<double> areas;
+  areas.reserve(2);
+  for (const CurvedFragment& fragment : result.value()) {
+    areas.push_back(fragment_area(fragment));
+  }
+  std::sort(areas.begin(), areas.end());
+  CHECK(areas[0] == doctest::Approx(6.0).epsilon(1e-9));
+  CHECK(areas[1] == doctest::Approx(94.0).epsilon(1e-9));
+
+  // The outer ring passes through the single welded point; no vertex is left in
+  // the 5e-5 gap between the two raw ends.
+  std::vector<Point2d> welded;
+  for (const CurvedFragment& fragment : result.value()) {
+    const std::vector<Point2d>& ring = fragment.loops_uv.front();
+    for (const Point2d& p : ring) {
+      const double distance = std::hypot(p[0] - 5.0, p[1]);
+      if (distance <= 1e-12) {
+        bool seen = false;
+        for (const Point2d& q : welded) {
+          if (geom::detail::trim_face_same_xy(q, p)) seen = true;
+        }
+        if (!seen) welded.push_back(p);
+      }
+      const bool in_gap = distance > 1e-12 && distance <= 1e-6;
+      CHECK_FALSE(in_gap);
+    }
+  }
+  REQUIRE(welded.size() == 1);
+  CHECK(std::hypot(welded[0][0] - 5.0, welded[0][1]) <= 1e-12);
+}
+
+TEST_CASE("trim_face: an endpoint just inside a rim arc snaps onto the circle") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep cylinder =
+      make_cylinder(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kSplitTol)
+          .value();
+  const FaceId lateral = face_with_surface<Cylinder3>(cylinder);
+  REQUIRE_FALSE(lateral.is_null());
+
+  // The endpoint stops 5e-5 short of the rim, midway between two rim samples
+  // (u = 1.5 rad). It must be projected radially onto the rim circle, not
+  // dropped onto the chord, so the cut reaches the arc exactly.
+  FaceCut cut;
+  cut.uv = {Point2d{0.0, 1.0}, Point2d{1.5, 5e-5}};
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(cylinder, lateral, cuts, kSplitTol);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 2);
+
+  std::vector<double> areas;
+  areas.reserve(2);
+  for (const CurvedFragment& fragment : result.value()) {
+    areas.push_back(fragment_area(fragment));
+  }
+  std::sort(areas.begin(), areas.end());
+  CHECK(areas[0] == doctest::Approx(0.75).epsilon(1e-9));
+  CHECK(areas[1] == doctest::Approx(4.0 * kPi - 0.75).epsilon(1e-9));
+
+  // The welded vertex is the exact circle point at u = 1.5; the raw endpoint
+  // 5e-5 inside is gone.
+  bool on_rim = false;
+  for (const CurvedFragment& fragment : result.value()) {
+    for (const Point2d& p : fragment.loops_uv.front()) {
+      const double to_rim = std::hypot(p[0] - 1.5, p[1]);
+      if (to_rim <= 1e-12) on_rim = true;
+      const bool in_gap = to_rim > 1e-12 && to_rim <= 1e-6;
+      CHECK_FALSE(in_gap);
+    }
+  }
+  CHECK(on_rim);
 }

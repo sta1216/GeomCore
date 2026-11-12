@@ -668,10 +668,11 @@ TEST_CASE("brep: boolean_solid_curved classification mesh is watertight") {
 TEST_CASE("brep: boolean_solid_curved cuts an offset cap box from a full cylinder") {
   const double tolerance = 1e-9;
   const geom::Brep cylinder = make_test_cylinder(tolerance);
-  // The box shares the equator: it removes the slab y in [-0.5, 0.5] above
-  // z = 0.5. Its four side planes meet the lateral face along the vertical
-  // lines u = +-30 degrees (y = +-0.5) and u = +-60 degrees (x = 0.5), so the
-  // cut corners are exact circle points shared by both operands.
+  // The box removes the slab x in [0.5, 2], y in [-0.5, 0.5], z in [0.5, 1.5]
+  // from above the z = 0.5 plane. The u = +-60 degree vertical lines (x = 0.5)
+  // lie outside |y| <= 0.5 and are not cuts; the slab sides meet the lateral
+  // face along the vertical lines u = +-30 degrees (y = +-0.5), so the cut
+  // corners are the exact circle points at u = +-30 degrees, z = 0.5.
   const geom::Brep box =
       geom::make_box(geom::Point3d{0.5, -0.5, 0.5}, geom::Point3d{2.0, 0.5, 1.5}, tolerance)
           .value();

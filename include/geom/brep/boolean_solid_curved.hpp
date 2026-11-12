@@ -1066,7 +1066,8 @@ inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
   for (std::size_t i = 0; i < count; ++i) {
     const bool own = trim_face_uv_inside(loops, chain[i], tolerance);
     bool foreign = false;
-    const Result<Point2d> project = face_uv_project(other.projection, points[i], other_u_hint, true);
+    const Result<Point2d> project =
+        face_uv_project(other.projection, points[i], other_u_hint, true);
     if (project.has_value()) {
       other_u_hint = project.value()[0];
       Point2d foreign_uv = project.value();
@@ -1099,13 +1100,16 @@ inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
     const Result<Point3d> hit =
         curved_boolean_boundary_crossing(face, points[from], points[to], curve, nullptr, tolerance);
     if (hit.has_value()) {
-      const Result<Point2d> uv = face_uv_project(face.projection, hit.value(), chain[from][0], true);
+      const Result<Point2d> uv =
+          face_uv_project(face.projection, hit.value(), chain[from][0], true);
       if (uv.has_value()) return uv.value();
     }
     const Result<Point3d> other_hit =
-        curved_boolean_boundary_crossing(other, points[from], points[to], curve, nullptr, tolerance);
+        curved_boolean_boundary_crossing(other, points[from], points[to], curve,
+                                         nullptr, tolerance);
     if (other_hit.has_value()) {
-      const Result<Point2d> uv = face_uv_project(face.projection, other_hit.value(), chain[from][0], true);
+      const Result<Point2d> uv =
+          face_uv_project(face.projection, other_hit.value(), chain[from][0], true);
       if (uv.has_value()) return uv.value();
     }
     return Point2d{(chain[from][0] + chain[to][0]) * 0.5, (chain[from][1] + chain[to][1]) * 0.5};
@@ -1144,7 +1148,8 @@ inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
   const double diagonal_u = face.u[1] - face.u[0];
   const double diagonal_v = face.v[1] - face.v[0];
   const double junction_tol =
-      std::max(64.0 * tolerance, 1e-5 * std::sqrt(diagonal_u * diagonal_u + diagonal_v * diagonal_v));
+      std::max(64.0 * tolerance,
+               1e-5 * std::sqrt(diagonal_u * diagonal_u + diagonal_v * diagonal_v));
   for (std::vector<Point2d>& piece : pieces) {
     if (piece.size() < 2) continue;
     for (const int end : {0, 1}) {
@@ -1614,7 +1619,8 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
           const auto& plain_face = periodic_a ? face_b : face_a;
           std::vector<Point2d>& other_chain = periodic_a ? chains_b.front() : chains_a.front();
           const Result<Point3d> rim_start = detail::face_uv_eval(
-              seam_face.projection, periodic_a ? chains_a.front().front() : chains_b.front().front());
+              seam_face.projection,
+              periodic_a ? chains_a.front().front() : chains_b.front().front());
           if (rim_start.has_value()) {
             (void)detail::curved_boolean_rebase_closed_chain(other_chain, rim_start.value(),
                                                              plain_face.projection, tolerance);

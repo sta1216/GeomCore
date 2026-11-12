@@ -237,6 +237,102 @@ inline void trim_face_apply_inserts(std::vector<std::vector<Point2d>>& rings,
   }
 }
 
+// Inserts snapped boundary points into a ring and splits the arc reference of
+// every segment a point lands on. An endpoint snapped onto an arc must become a
+// loop point of its circle: the fragment mapping matches ring vertices against
+// the loop points exactly, and a ring vertex left inside an arc segment is a
+// hard error, while the arc spans are read per segment, so the segment a point
+// splits has to carry two exact references.
+inline void trim_face_apply_inserts_with_arcs(
+    const FaceUvProjection& projection, std::vector<Point2d>& ring,
+    std::vector<std::optional<FaceUvArcRef>>& arcs,
+    std::vector<TrimFaceInsert> inserts) {
+  if (inserts.empty()) return;
+  std::sort(inserts.begin(), inserts.end(),
+            [](const TrimFaceInsert& lhs, const TrimFaceInsert& rhs) noexcept {
+              if (lhs.edge != rhs.edge) return lhs.edge < rhs.edge;
+              return trim_face_lex_less(lhs.point, rhs.point);
+            });
+  inserts.erase(std::unique(inserts.begin(), inserts.end(),
+                            [](const TrimFaceInsert& lhs,
+                               const TrimFaceInsert& rhs) noexcept {
+                              return lhs.edge == rhs.edge &&
+                                     trim_face_same_xy(lhs.point, rhs.point);
+                            }),
+                inserts.end());
+
+  const std::size_t count = ring.size();
+  std::vector<std::vector<std::pair<double, Point2d>>> extra(count);
+  for (const TrimFaceInsert& insert : inserts) {
+    if (insert.edge >= count) continue;
+    const Point2d& a = ring[insert.edge];
+    const Point2d& b = ring[(insert.edge + 1) % count];
+    const Vec2d edge_vector = b - a;
+    const double length2 = dot(edge_vector, edge_vector);
+    const double t =
+        length2 > 0.0 ? dot(insert.point - a, edge_vector) / length2 : 0.0;
+    extra[insert.edge].emplace_back(t, insert.point);
+  }
+  for (std::vector<std::pair<double, Point2d>>& edge_extra : extra) {
+    std::sort(edge_extra.begin(), edge_extra.end(),
+              [](const std::pair<double, Point2d>& lhs,
+                 const std::pair<double, Point2d>& rhs) noexcept {
+                if (lhs.first != rhs.first) return lhs.first < rhs.first;
+                return trim_face_lex_less(lhs.second, rhs.second);
+              });
+  }
+
+  // Splits the reference of the segment starting at ring[i] at the arc angle of
+  // an inserted point. The point was projected onto this circle, so its angle
+  // lies within the segment's sweep; when it does not, the segment keeps its
+  // reference and the inserted point stays an un-referenced vertex.
+  const auto split_angle = [&projection](const FaceUvArcRef& ref,
+                                         const Point2d& point,
+                                         double& angle) {
+    const Result<Point3d> lifted = face_uv_eval(projection, point);
+    if (!lifted.has_value()) return false;
+    const double sweep = ref.t1 - ref.t0;
+    if (!(std::fabs(sweep) > 0.0)) return false;
+    double offset = face_uv_circle_angle(ref.circle, lifted.value()) - ref.t0;
+    if (offset > kFaceUvPi) {
+      offset -= 2.0 * kFaceUvPi;
+    } else if (offset < -kFaceUvPi) {
+      offset += 2.0 * kFaceUvPi;
+    }
+    angle = ref.t0 + offset;
+    if (sweep > 0.0) return angle > ref.t0 && angle < ref.t1;
+    return angle < ref.t0 && angle > ref.t1;
+  };
+
+  std::vector<Point2d> rebuilt;
+  std::vector<std::optional<FaceUvArcRef>> rebuilt_arcs;
+  rebuilt.reserve(count + inserts.size());
+  rebuilt_arcs.reserve(count + inserts.size());
+  for (std::size_t i = 0; i < count; ++i) {
+    const std::optional<FaceUvArcRef> source =
+        i < arcs.size() ? arcs[i] : std::nullopt;
+    double start_t = source ? source->t0 : 0.0;
+    rebuilt.push_back(ring[i]);
+    for (const std::pair<double, Point2d>& entry : extra[i]) {
+      double angle = start_t;
+      if (source && split_angle(*source, entry.second, angle)) {
+        rebuilt_arcs.push_back(FaceUvArcRef{source->circle, start_t, angle});
+        start_t = angle;
+      } else {
+        rebuilt_arcs.push_back(std::nullopt);
+      }
+      rebuilt.push_back(entry.second);
+    }
+    if (source) {
+      rebuilt_arcs.push_back(FaceUvArcRef{source->circle, start_t, source->t1});
+    } else {
+      rebuilt_arcs.push_back(std::nullopt);
+    }
+  }
+  ring = std::move(rebuilt);
+  arcs = std::move(rebuilt_arcs);
+}
+
 // Walks the single boundary cycle owned by an arrangement face.
 inline bool trim_face_walk_cycle(const Arrangement2& arrangement,
                                  std::uint32_t face,
@@ -1025,15 +1121,54 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     for (const bool front : {true, false}) {
       const Point2d& raw = front ? cut_points[c].front() : cut_points[c].back();
       detail::TrimFaceSnap snap = detail::trim_face_find_snap(loops, raw, junction_tol);
-      // A boundary projection is exact only on a straight boundary segment: the
-      // chord of an arc would pull the vertex off the true circle and the arc
-      // healing would then have to treat the chord as the boundary. An endpoint
-      // that stops just short of an arc boundary keeps its own position and is
-      // reconciled against the other cuts below.
+      // A chord projection onto an arc boundary is not exact: the chord lies
+      // inside the arc by its sagitta, and the arrangement only accepts boundary
+      // vertices that are loop points or exact circle points. Project the raw
+      // endpoint onto the arc circle itself instead, keeping the angle of the
+      // trace (radial projection), and fall back to reconciling the endpoint
+      // against the other cuts when it does not land on the arc's span.
       if (snap.boundary && !snap.vertex && snap.ring < loop_arcs.size() &&
           snap.edge < loop_arcs[snap.ring].size() && loop_arcs[snap.ring][snap.edge]) {
-        snap.boundary = false;
-        snap.point = raw;
+        bool projected = false;
+        const FaceUvArcRef& arc = *loop_arcs[snap.ring][snap.edge];
+        const CircleCurve3& circle = arc.circle;
+        const double sweep = arc.t1 - arc.t0;
+        const Result<Point3d> lifted = detail::face_uv_eval(projection, raw);
+        if (lifted.has_value() && std::fabs(sweep) > 0.0) {
+          const Vec3d normal = cross(circle.x_axis, circle.y_axis);
+          const Vec3d radial = lifted.value() - circle.center;
+          const double height = dot(radial, normal);
+          const Vec3d in_plane{radial[0] - normal[0] * height,
+                               radial[1] - normal[1] * height,
+                               radial[2] - normal[2] * height};
+          const double length = std::sqrt(norm2(in_plane));
+          if (length > 0.0) {
+            const Point3d on_arc{
+                circle.center[0] + in_plane[0] * (circle.radius / length),
+                circle.center[1] + in_plane[1] * (circle.radius / length),
+                circle.center[2] + in_plane[2] * (circle.radius / length)};
+            double offset =
+                detail::face_uv_circle_angle(circle, on_arc) - arc.t0;
+            if (offset > detail::kFaceUvPi) {
+              offset -= detail::kTrimFaceTwoPi;
+            } else if (offset < -detail::kFaceUvPi) {
+              offset += detail::kTrimFaceTwoPi;
+            }
+            const double along = sweep > 0.0 ? offset : -offset;
+            if (along >= 0.0 && along <= std::fabs(sweep)) {
+              const Result<Point2d> uv = detail::face_uv_project(
+                  projection, on_arc, raw[0], true);
+              if (uv.has_value()) {
+                snap.point = uv.value();
+                projected = true;
+              }
+            }
+          }
+        }
+        if (!projected) {
+          snap.boundary = false;
+          snap.point = raw;
+        }
       }
       endpoints.push_back(Endpoint{raw, snap, Point2d{}, c, front});
     }
@@ -1171,19 +1306,31 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
           const Vec2d rhs_edge = end_direction(rhs);
           const double lhs_length = std::hypot(lhs_edge[0], lhs_edge[1]);
           const double rhs_length = std::hypot(rhs_edge[0], rhs_edge[1]);
-          const double determinant =
-              lhs_edge[0] * rhs_edge[1] - lhs_edge[1] * rhs_edge[0];
-          if (lhs_length > 0.0 && rhs_length > 0.0 &&
-              std::fabs(determinant) > 1e-12 * lhs_length * rhs_length) {
-            const Vec2d delta{rhs.raw[0] - lhs.raw[0], rhs.raw[1] - lhs.raw[1]};
-            const double along_lhs =
-                (delta[0] * rhs_edge[1] - delta[1] * rhs_edge[0]) / determinant;
-            const double along_rhs =
-                (delta[0] * lhs_edge[1] - delta[1] * lhs_edge[0]) / determinant;
-            if (std::fabs(along_lhs) <= 2.0 * junction_tol &&
-                std::fabs(along_rhs) <= 2.0 * junction_tol) {
-              final = Point2d{lhs.raw[0] + along_lhs * lhs_edge[0],
-                              lhs.raw[1] + along_lhs * lhs_edge[1]};
+          // The acceptance bound below is a uv displacement, so the end
+          // directions are normalised first: a bound on the raw parameter would
+          // scale with the (arbitrary) length of the end segment and let a long
+          // final segment move the corner further than junction_tol.
+          if (lhs_length > 0.0 && rhs_length > 0.0) {
+            const Vec2d lhs_unit{lhs_edge[0] / lhs_length,
+                                 lhs_edge[1] / lhs_length};
+            const Vec2d rhs_unit{rhs_edge[0] / rhs_length,
+                                 rhs_edge[1] / rhs_length};
+            const double determinant =
+                lhs_unit[0] * rhs_unit[1] - lhs_unit[1] * rhs_unit[0];
+            if (std::fabs(determinant) > 1e-12) {
+              const Vec2d delta{rhs.raw[0] - lhs.raw[0],
+                                rhs.raw[1] - lhs.raw[1]};
+              const double along_lhs =
+                  (delta[0] * rhs_unit[1] - delta[1] * rhs_unit[0]) /
+                  determinant;
+              const double along_rhs =
+                  (delta[0] * lhs_unit[1] - delta[1] * lhs_unit[0]) /
+                  determinant;
+              if (std::fabs(along_lhs) <= 2.0 * junction_tol &&
+                  std::fabs(along_rhs) <= 2.0 * junction_tol) {
+                final = Point2d{lhs.raw[0] + along_lhs * lhs_unit[0],
+                                lhs.raw[1] + along_lhs * lhs_unit[1]};
+              }
             }
           }
         }
@@ -1237,9 +1384,11 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
   }
 
   // Insert segment snaps into the boundary rings so the cut endpoint and the
-  // ring share one exact vertex.
-  std::vector<std::vector<Point2d>> rings = loops;
-  std::vector<detail::TrimFaceInsert> inserts;
+  // ring share one exact vertex. The inserts are applied to the loop rings
+  // themselves (not a copy): a snapped point that lands on an arc segment has
+  // to become a loop point of its circle, or the fragment mapping, which
+  // matches ring vertices against the loop points exactly, rejects the vertex.
+  std::vector<std::vector<detail::TrimFaceInsert>> per_ring(loops.size());
   std::vector<char> inserted(endpoint_count, 0);
   for (std::size_t i = 0; i < endpoint_count; ++i) {
     const std::size_t root = detail::trim_face_find_root(parent, i);
@@ -1248,17 +1397,22 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
     const detail::TrimFaceSnap& snap = canonical[root];
     if (!snap.boundary || snap.vertex) continue;
     bool already_present = false;
-    for (const Point2d& vertex : rings[snap.ring]) {
+    for (const Point2d& vertex : loops[snap.ring]) {
       if (detail::trim_face_same_xy(vertex, snap.point)) {
         already_present = true;
         break;
       }
     }
     if (!already_present) {
-      inserts.push_back({snap.ring, snap.edge, snap.point});
+      per_ring[snap.ring].push_back({snap.ring, snap.edge, snap.point});
     }
   }
-  detail::trim_face_apply_inserts(rings, std::move(inserts));
+  for (std::size_t l = 0; l < loops.size(); ++l) {
+    if (per_ring[l].empty()) continue;
+    detail::trim_face_apply_inserts_with_arcs(projection, loops[l], loop_arcs[l],
+                                              std::move(per_ring[l]));
+  }
+  std::vector<std::vector<Point2d>> rings = loops;
 
   // Rewrite the open cut chains with the welded endpoint coordinates.
   std::size_t endpoint_index = 0;
