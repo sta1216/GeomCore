@@ -70,7 +70,7 @@ ctest --test-dir build -C Release --output-on-failure
 ```
 
 Debug 配置把 `Release` 换成 `Debug` 即可；两种配置当前均为 859 个用例、
-623,973 条断言全绿，`/W4 /WX /utf-8` 零警告。
+623,976 条断言全绿，`/W4 /WX /utf-8` 零警告。
 
 ## 范围与限制
 
