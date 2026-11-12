@@ -2,10 +2,15 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
+#include <sstream>
+#include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include <doctest/doctest.h>
+#include <geom/brep/detail/curved_volume.hpp>
 #include <geom/brep/heal.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/solid_editor.hpp>
@@ -40,6 +45,75 @@ SolidId add_open_sheet(SolidEditor& editor, std::uint32_t surface,
   REQUIRE(editor.add_loop(face, loop, true).has_value());
   const auto shell = editor.add_shell(std::array<FaceId, 1>{face}, false).value();
   return editor.add_solid(std::array<ShellId, 1>{shell}, 0).value();
+}
+
+// A stable rendering of everything heal_brep must leave alone: pool counts,
+// every live entity's stored fields, the vertex coordinates and the geometry
+// store. The source Brep is passed by const reference, so comparing this
+// before and after a heal pins that the input is never mutated.
+std::string input_fingerprint(const Brep& brep) {
+  std::ostringstream out;
+  out << std::setprecision(17);
+  out << "counts " << brep.vertex_count() << ' ' << brep.edge_count() << ' '
+      << brep.coedge_count() << ' ' << brep.loop_count() << ' ' << brep.face_count()
+      << ' ' << brep.shell_count() << ' ' << brep.solid_count() << '\n';
+  for (const VertexId id : brep.vertex_ids()) {
+    const Vertex& vertex = brep.vertex(id);
+    out << "v " << id.index() << '.' << static_cast<unsigned>(id.generation()) << ' '
+        << vertex.point[0] << ' ' << vertex.point[1] << ' ' << vertex.point[2] << ' '
+        << vertex.tol << '\n';
+  }
+  for (const EdgeId id : brep.edge_ids()) {
+    const Edge& edge = brep.edge(id);
+    out << "e " << id.index() << ' ' << edge.curve << ' ' << edge.t0 << ' ' << edge.t1
+        << ' ' << edge.v0.index() << ' ' << edge.v1.index() << ' ' << edge.tol << '\n';
+  }
+  for (const CoedgeId id : brep.coedge_ids()) {
+    const Coedge& coedge = brep.coedge(id);
+    out << "c " << id.index() << ' ' << coedge.edge.index() << ' '
+        << coedge.face.index() << ' ' << coedge.loop.index() << ' '
+        << coedge.next.index() << ' ' << coedge.prev.index() << ' ' << coedge.pcurve
+        << ' ' << coedge.reversed << ' ' << coedge.tol << '\n';
+  }
+  for (const LoopId id : brep.loop_ids()) {
+    const Loop& loop = brep.loop(id);
+    out << "l " << id.index() << ' ' << loop.face.index() << ' ' << loop.start.index()
+        << ' ' << loop.next.index() << ' ' << loop.outer << '\n';
+  }
+  for (const FaceId id : brep.face_ids()) {
+    const Face& face = brep.face(id);
+    out << "f " << id.index() << ' ' << face.surface << ' ' << face.first_loop.index()
+        << ' ' << face.reversed << ' ' << face.tol << '\n';
+  }
+  for (const ShellId id : brep.shell_ids()) {
+    const Shell& shell = brep.shell(id);
+    out << "s " << id.index() << ' ' << shell.first_face << ' ' << shell.face_count
+        << ' ' << shell.closed << '\n';
+  }
+  for (const SolidId id : brep.solid_ids()) {
+    const SolidEntity& solid = brep.solid(id);
+    out << "d " << id.index() << ' ' << solid.first_shell << ' '
+        << solid.shell_count << ' ' << solid.tol << '\n';
+  }
+  const GeometryStore& geometry = brep.geometry();
+  out << "geometry " << geometry.curves.size() << ' ' << geometry.surfaces.size() << ' '
+      << geometry.pcurves.size() << '\n';
+  for (const SurfaceGeometry& surface : geometry.surfaces) {
+    out << "surface " << surface.index();
+    if (const auto* plane = std::get_if<Plane3>(&surface)) {
+      out << ' ' << plane->normal[0] << ' ' << plane->normal[1] << ' '
+          << plane->normal[2] << ' ' << plane->offset;
+    }
+    out << '\n';
+  }
+  for (const Pcurve2d& pcurve : geometry.pcurves) {
+    out << "pcurve";
+    for (const Point2d& point : pcurve.points) {
+      out << ' ' << point[0] << ' ' << point[1];
+    }
+    out << '\n';
+  }
+  return out.str();
 }
 
 }  // namespace
@@ -278,6 +352,91 @@ TEST_CASE("heal: a torn sheet becomes a closed shell") {
   REQUIRE(shells.size() == 1u);
   CHECK(result.brep.shell(shells.front()).closed);
   CHECK(validate_topology(result.brep).ok());
+}
+
+TEST_CASE("heal: a cracked box becomes the unit box") {
+  const test::CrackedBox cracked = test::make_cracked_box(1e-6);
+  const std::string fingerprint = input_fingerprint(cracked.brep);
+
+  REQUIRE(validate_topology(cracked.brep).ok());
+  CHECK(cracked.brep.vertex_count() == 16u);
+  CHECK(cracked.brep.edge_count() == 24u);
+  CHECK(cracked.brep.coedge_count() == 40u);
+  CHECK(cracked.brep.face_count() == 10u);
+  const auto cracked_shells = cracked.brep.solid_shells(cracked.solid);
+  REQUIRE(cracked_shells.size() == 1u);
+  CHECK_FALSE(cracked.brep.shell(cracked_shells.front()).closed);
+  CHECK(detail::heal_boundary_edges(cracked.brep, cracked.solid).size() == 8u);
+  CHECK(euler_characteristic(cracked.brep, cracked.solid) == 2);
+  // The fixture must be committable on its own: the healer is not asked to
+  // repair tolerances that were already invalid.
+  CHECK(SolidEditor(cracked.brep).commit().has_value());
+
+  // 0.5 + 1e-6 is not representable in binary64: the rim vertices measure a
+  // 1.0000000000287557e-6 seam. Both gates sit just above that representable
+  // width while the report below still pins the closed gap to ~1e-6.
+  const auto healed =
+      heal_brep(cracked.brep, cracked.solid,
+                HealOptions{.tolerance = 1e-9, .max_gap = 2e-6, .max_tolerance = 2e-6});
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK(result.report.changed);
+  CHECK(result.report.boundary_edges == 8u);
+  CHECK(result.report.welded_vertices == 4u);
+  CHECK(result.report.sewn_edges == 4u);
+  CHECK(result.report.issues.empty());
+  CHECK(result.report.max_closed_gap == doctest::Approx(1e-6).epsilon(1e-6));
+  CHECK(result.report.max_tolerance == doctest::Approx(1e-6).epsilon(1e-6));
+
+  CHECK(result.brep.vertex_count() == 12u);
+  CHECK(result.brep.edge_count() == 20u);
+  CHECK(result.brep.coedge_count() == 40u);
+  CHECK(result.brep.face_count() == 10u);
+  CHECK(detail::heal_boundary_edges(result.brep, cracked.solid).empty());
+  CHECK(euler_characteristic(result.brep, cracked.solid) == 2);
+  CHECK(validate_topology(result.brep).ok());
+  CHECK(validate_tolerances(result.brep).ok());
+
+  const auto shells = result.brep.solid_shells(cracked.solid);
+  REQUIRE(shells.size() == 1u);
+  CHECK(result.brep.shell(shells.front()).closed);
+
+  // The rims are sewn at z = 0.5, so the two halves enclose the unit box.
+  const auto volume = detail::curved_solid_volume(result.brep, cracked.solid, 1e-9);
+  REQUIRE(volume.has_value());
+  CHECK(volume.value() == doctest::Approx(1.0).epsilon(1e-9));
+
+  // The healed tolerance chain must satisfy the nesting rules the validator
+  // enforces: vertex <= edge <= face <= solid, with the four welded rim
+  // vertices lifted to at least the closed gap.
+  std::size_t welded_vertices = 0;
+  for (const VertexId id : result.brep.vertex_ids()) {
+    const Vertex& vertex = result.brep.vertex(id);
+    if (vertex.tol > 0.0) {
+      ++welded_vertices;
+      CHECK(vertex.tol >= 1e-6);
+    }
+  }
+  CHECK(welded_vertices == 4u);
+  for (const EdgeId id : result.brep.edge_ids()) {
+    const Edge& edge = result.brep.edge(id);
+    CHECK(edge.tol >= result.brep.vertex(edge.v0).tol);
+    CHECK(edge.tol >= result.brep.vertex(edge.v1).tol);
+  }
+  for (const CoedgeId id : result.brep.coedge_ids()) {
+    const Coedge& coedge = result.brep.coedge(id);
+    const Face& face = result.brep.face(coedge.face);
+    CHECK(face.tol >= result.brep.edge(coedge.edge).tol);
+    CHECK(face.tol >= coedge.tol);
+  }
+  const SolidEntity& solid = result.brep.solid(cracked.solid);
+  for (const ShellId shell : shells) {
+    for (const FaceId face : result.brep.shell_faces(shell)) {
+      CHECK(solid.tol >= result.brep.face(face).tol);
+    }
+  }
+
+  CHECK(input_fingerprint(cracked.brep) == fingerprint);
 }
 
 TEST_CASE("heal: a closed box is returned unchanged") {

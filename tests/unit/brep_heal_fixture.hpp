@@ -6,8 +6,11 @@
 
 #include <array>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
+#include <vector>
 
+#include <geom/brep/face_uv.hpp>
 #include <geom/brep/solid_editor.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/core/result.hpp>
@@ -253,6 +256,167 @@ inline SharedVertexSheets make_shared_vertex_sheets() {
   const std::array<FaceId, 2> faces{a_face, b_face};
   const TornSheet sheet = fixture_detail::finish(editor, faces, 0.0);
   return {sheet.brep, sheet.solid, ae0, be0};
+}
+
+// A unit box cut at z = 0.5. The lower half ends at z = 0.5 and the upper half
+// starts at z = 0.5 + gap, so the two four-edge rims are boundary loops of one
+// open shell; the eight rim edges are the only boundary edges. Volume before
+// healing is 1 - gap.
+struct CrackedBox {
+  Brep brep;
+  SolidId solid{};
+};
+
+namespace fixture_detail {
+
+// One coedge of a fixture face, in the order the loop walks it.
+struct CoedgeUse {
+  EdgeId edge{};
+  bool reversed = false;
+};
+
+// Adds `plane` as a face with one outer loop over `uses` and a two-point
+// pcurve on every coedge. A pcurve runs along its edge from t0 to t1, so the
+// stored points are the projections of the edge's start and end vertices; a
+// coedge with `reversed` reads them backwards.
+inline FaceId add_pcurved_face(SolidEditor& editor, const Plane3& plane, double tol,
+                               std::span<const CoedgeUse> uses) {
+  const std::uint32_t surface = editor.add_surface(plane);
+  const FaceId face = editor.add_face(surface, false, tol).value();
+  using Projection = detail::FaceUvProjection;
+  const Result<Projection> projection =
+      detail::face_uv_projection(editor.brep(), editor.brep().face(face), tol);
+  require_ok(projection);
+
+  std::vector<CoedgeSpec> loop;
+  loop.reserve(uses.size());
+  for (const CoedgeUse& use : uses) {
+    const Edge& edge = editor.brep().edge(use.edge);
+    const auto project = [&](VertexId id) {
+      const Result<Point2d> uv = detail::face_uv_project(
+          projection.value(), editor.brep().vertex(id).point, 0.0, false);
+      require_ok(uv);
+      return uv.value();
+    };
+    const std::uint32_t pcurve =
+        editor.add_pcurve(Pcurve2d{{project(edge.v0), project(edge.v1)}});
+    loop.push_back(CoedgeSpec{use.edge, use.reversed, pcurve, 0.0});
+  }
+  require_ok(editor.add_loop(face, loop, true));
+  return face;
+}
+
+}  // namespace fixture_detail
+
+// Builds the cracked box described above. `chain_tol` is written to every edge,
+// every face and the solid; every vertex keeps tolerance 0. Every face is a
+// plane with an outward normal and a loop that is counter-clockwise seen from
+// outside, which is what detail::curved_solid_volume reads.
+inline CrackedBox make_cracked_box(double gap, double chain_tol = 0.0) {
+  SolidEditor editor;
+
+  // Bottom corners, lower rim, upper rim, top corners.
+  const VertexId b00 = editor.add_vertex({0.0, 0.0, 0.0}, 0).value();
+  const VertexId b10 = editor.add_vertex({1.0, 0.0, 0.0}, 0).value();
+  const VertexId b11 = editor.add_vertex({1.0, 1.0, 0.0}, 0).value();
+  const VertexId b01 = editor.add_vertex({0.0, 1.0, 0.0}, 0).value();
+  const VertexId l00 = editor.add_vertex({0.0, 0.0, 0.5}, 0).value();
+  const VertexId l10 = editor.add_vertex({1.0, 0.0, 0.5}, 0).value();
+  const VertexId l11 = editor.add_vertex({1.0, 1.0, 0.5}, 0).value();
+  const VertexId l01 = editor.add_vertex({0.0, 1.0, 0.5}, 0).value();
+  const VertexId u00 = editor.add_vertex({0.0, 0.0, 0.5 + gap}, 0).value();
+  const VertexId u10 = editor.add_vertex({1.0, 0.0, 0.5 + gap}, 0).value();
+  const VertexId u11 = editor.add_vertex({1.0, 1.0, 0.5 + gap}, 0).value();
+  const VertexId u01 = editor.add_vertex({0.0, 1.0, 0.5 + gap}, 0).value();
+  const VertexId t00 = editor.add_vertex({0.0, 0.0, 1.0}, 0).value();
+  const VertexId t10 = editor.add_vertex({1.0, 0.0, 1.0}, 0).value();
+  const VertexId t11 = editor.add_vertex({1.0, 1.0, 1.0}, 0).value();
+  const VertexId t01 = editor.add_vertex({0.0, 1.0, 1.0}, 0).value();
+
+  // Shared edges are created once and used by both adjacent faces.
+  const VertexId b_ring[] = {b00, b10, b11, b01};
+  const VertexId l_ring[] = {l00, l10, l11, l01};
+  const VertexId u_ring[] = {u00, u10, u11, u01};
+  const VertexId t_ring[] = {t00, t10, t11, t01};
+
+  const EdgeId b0 = editor.add_edge(b_ring[0], b_ring[1], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId b1 = editor.add_edge(b_ring[1], b_ring[2], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId b2 = editor.add_edge(b_ring[2], b_ring[3], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId b3 = editor.add_edge(b_ring[3], b_ring[0], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId t0 = editor.add_edge(t_ring[0], t_ring[1], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId t1 = editor.add_edge(t_ring[1], t_ring[2], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId t2 = editor.add_edge(t_ring[2], t_ring[3], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId t3 = editor.add_edge(t_ring[3], t_ring[0], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId lv0 = editor.add_edge(b_ring[0], l_ring[0], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId lv1 = editor.add_edge(b_ring[1], l_ring[1], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId lv2 = editor.add_edge(b_ring[2], l_ring[2], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId lv3 = editor.add_edge(b_ring[3], l_ring[3], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId uv0 = editor.add_edge(u_ring[0], t_ring[0], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId uv1 = editor.add_edge(u_ring[1], t_ring[1], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId uv2 = editor.add_edge(u_ring[2], t_ring[2], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId uv3 = editor.add_edge(u_ring[3], t_ring[3], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId lr0 = editor.add_edge(l_ring[0], l_ring[1], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId lr1 = editor.add_edge(l_ring[1], l_ring[2], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId lr2 = editor.add_edge(l_ring[2], l_ring[3], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId lr3 = editor.add_edge(l_ring[3], l_ring[0], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId ur0 = editor.add_edge(u_ring[0], u_ring[1], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId ur1 = editor.add_edge(u_ring[1], u_ring[2], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId ur2 = editor.add_edge(u_ring[2], u_ring[3], kNoGeometry, 0, 1, chain_tol).value();
+  const EdgeId ur3 = editor.add_edge(u_ring[3], u_ring[0], kNoGeometry, 0, 1, chain_tol).value();
+
+  // Each loop below is counter-clockwise seen from outside the box. The rim
+  // edges (lr*, ur*) are used once each and are therefore the boundary.
+  const std::array<fixture_detail::CoedgeUse, 4> bottom_loop{{
+      {b3, true}, {b2, true}, {b1, true}, {b0, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> top_loop{{
+      {t0, false}, {t1, false}, {t2, false}, {t3, false}}};
+  const std::array<fixture_detail::CoedgeUse, 4> lower_south_loop{{
+      {b0, false}, {lv1, false}, {lr0, true}, {lv0, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> lower_east_loop{{
+      {b1, false}, {lv2, false}, {lr1, true}, {lv1, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> lower_north_loop{{
+      {b2, false}, {lv3, false}, {lr2, true}, {lv2, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> lower_west_loop{{
+      {b3, false}, {lv0, false}, {lr3, true}, {lv3, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> upper_south_loop{{
+      {ur0, false}, {uv1, false}, {t0, true}, {uv0, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> upper_east_loop{{
+      {ur1, false}, {uv2, false}, {t1, true}, {uv1, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> upper_north_loop{{
+      {ur2, false}, {uv3, false}, {t2, true}, {uv2, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> upper_west_loop{{
+      {ur3, false}, {uv0, false}, {t3, true}, {uv3, true}}};
+
+  const FaceId bottom = fixture_detail::add_pcurved_face(
+      editor, Plane3{{0.0, 0.0, -1.0}, 0.0}, chain_tol, bottom_loop);
+  const FaceId top = fixture_detail::add_pcurved_face(
+      editor, Plane3{{0.0, 0.0, 1.0}, 1.0}, chain_tol, top_loop);
+  const FaceId lower_south = fixture_detail::add_pcurved_face(
+      editor, Plane3{{0.0, -1.0, 0.0}, 0.0}, chain_tol, lower_south_loop);
+  const FaceId lower_east = fixture_detail::add_pcurved_face(
+      editor, Plane3{{1.0, 0.0, 0.0}, 1.0}, chain_tol, lower_east_loop);
+  const FaceId lower_north = fixture_detail::add_pcurved_face(
+      editor, Plane3{{0.0, 1.0, 0.0}, 1.0}, chain_tol, lower_north_loop);
+  const FaceId lower_west = fixture_detail::add_pcurved_face(
+      editor, Plane3{{-1.0, 0.0, 0.0}, 0.0}, chain_tol, lower_west_loop);
+  const FaceId upper_south = fixture_detail::add_pcurved_face(
+      editor, Plane3{{0.0, -1.0, 0.0}, 0.0}, chain_tol, upper_south_loop);
+  const FaceId upper_east = fixture_detail::add_pcurved_face(
+      editor, Plane3{{1.0, 0.0, 0.0}, 1.0}, chain_tol, upper_east_loop);
+  const FaceId upper_north = fixture_detail::add_pcurved_face(
+      editor, Plane3{{0.0, 1.0, 0.0}, 1.0}, chain_tol, upper_north_loop);
+  const FaceId upper_west = fixture_detail::add_pcurved_face(
+      editor, Plane3{{-1.0, 0.0, 0.0}, 0.0}, chain_tol, upper_west_loop);
+
+  // Both components live in one open shell, so the shell has Euler
+  // characteristic 2 before healing.
+  const std::array<FaceId, 10> faces{bottom, top,      lower_south, lower_east,
+                                     lower_north, lower_west, upper_south, upper_east,
+                                     upper_north, upper_west};
+  const ShellId shell = editor.add_shell(faces, false).value();
+  const std::array<ShellId, 1> shells{shell};
+  const SolidId solid = editor.add_solid(shells, chain_tol).value();
+  return {editor.commit().value(), solid};
 }
 
 }  // namespace geom::test
