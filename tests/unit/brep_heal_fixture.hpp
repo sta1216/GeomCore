@@ -5,6 +5,7 @@
 // healed by heal_brep.
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <span>
 #include <stdexcept>
@@ -324,10 +325,14 @@ inline CrackedBox make_cracked_box(double gap, double chain_tol = 0.0) {
   const VertexId l10 = editor.add_vertex({1.0, 0.0, 0.5}, 0).value();
   const VertexId l11 = editor.add_vertex({1.0, 1.0, 0.5}, 0).value();
   const VertexId l01 = editor.add_vertex({0.0, 1.0, 0.5}, 0).value();
-  const VertexId u00 = editor.add_vertex({0.0, 0.0, 0.5 + gap}, 0).value();
-  const VertexId u10 = editor.add_vertex({1.0, 0.0, 0.5 + gap}, 0).value();
-  const VertexId u11 = editor.add_vertex({1.0, 1.0, 0.5 + gap}, 0).value();
-  const VertexId u01 = editor.add_vertex({0.0, 1.0, 0.5 + gap}, 0).value();
+  // 0.5 + gap rounds up for many gaps; step down one ulp so the seam never
+  // exceeds the requested gap and the documented max_gap contract holds.
+  double upper_z = 0.5 + gap;
+  if (upper_z - 0.5 > gap) upper_z = std::nextafter(upper_z, 0.0);
+  const VertexId u00 = editor.add_vertex({0.0, 0.0, upper_z}, 0).value();
+  const VertexId u10 = editor.add_vertex({1.0, 0.0, upper_z}, 0).value();
+  const VertexId u11 = editor.add_vertex({1.0, 1.0, upper_z}, 0).value();
+  const VertexId u01 = editor.add_vertex({0.0, 1.0, upper_z}, 0).value();
   const VertexId t00 = editor.add_vertex({0.0, 0.0, 1.0}, 0).value();
   const VertexId t10 = editor.add_vertex({1.0, 0.0, 1.0}, 0).value();
   const VertexId t11 = editor.add_vertex({1.0, 1.0, 1.0}, 0).value();

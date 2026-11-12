@@ -372,14 +372,11 @@ TEST_CASE("heal: a cracked box becomes the unit box") {
   // repair tolerances that were already invalid.
   CHECK(SolidEditor(cracked.brep).commit().has_value());
 
-  // 0.5 + 1e-6 is not representable in binary64: the rim vertices measure a
-  // 1.0000000000287557e-6 seam. The gates add one part in 1e9 of headroom for
-  // that representation error while the report below still pins the closed gap
-  // to ~1e-6.
-  const double gate = 1e-6 + 1e-15;
+  // The fixture clamps the upper rim so the seam never exceeds 1e-6; the seam
+  // itself is 0.9999999999712443e-6 because 0.5 + 1e-6 is not representable.
   const auto healed =
       heal_brep(cracked.brep, cracked.solid,
-                HealOptions{.tolerance = 1e-9, .max_gap = gate, .max_tolerance = gate});
+                HealOptions{.tolerance = 1e-9, .max_gap = 1e-6, .max_tolerance = 1e-6});
   REQUIRE(healed.has_value());
   const HealResult& result = healed.value();
   CHECK(result.report.changed);
@@ -410,13 +407,13 @@ TEST_CASE("heal: a cracked box becomes the unit box") {
 
   // The healed tolerance chain must satisfy the nesting rules the validator
   // enforces: vertex <= edge <= face <= solid, with the four welded rim
-  // vertices lifted to at least the closed gap.
+  // vertices lifted to at least the closed seam.
   std::size_t welded_vertices = 0;
   for (const VertexId id : result.brep.vertex_ids()) {
     const Vertex& vertex = result.brep.vertex(id);
     if (vertex.tol > 0.0) {
       ++welded_vertices;
-      CHECK(vertex.tol >= 1e-6);
+      CHECK(vertex.tol >= result.report.max_closed_gap);
     }
   }
   CHECK(welded_vertices == 4u);
@@ -454,6 +451,24 @@ TEST_CASE("heal: a closed box is returned unchanged") {
   CHECK(result.report.issues.empty());
   CHECK(result.brep.vertex_count() == box.vertex_count());
   CHECK(result.brep.edge_count() == box.edge_count());
+}
+
+TEST_CASE("heal: a seam past max_gap is rejected") {
+  const test::CrackedBox cracked = test::make_cracked_box(1.5e-6);
+  const std::string fingerprint = input_fingerprint(cracked.brep);
+
+  const auto healed =
+      heal_brep(cracked.brep, cracked.solid,
+                HealOptions{.tolerance = 1e-9, .max_gap = 1e-6, .max_tolerance = 1e-6});
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK_FALSE(result.report.changed);
+  CHECK(result.report.welded_vertices == 0u);
+  CHECK(result.report.sewn_edges == 0u);
+  REQUIRE(result.report.issues.size() == 1u);
+  CHECK(result.report.issues.front().kind == HealIssueKind::gap_too_large);
+  CHECK(result.report.issues.front().gap == doctest::Approx(1.5e-6).epsilon(1e-6));
+  CHECK(input_fingerprint(result.brep) == fingerprint);
 }
 
 TEST_CASE("heal: a zero-length boundary edge is invalid topology") {
