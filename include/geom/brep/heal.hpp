@@ -628,9 +628,9 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
   const std::vector<EdgeId> boundary = detail::heal_boundary_edges(brep, solid);
 
   // A boundary edge is only safe to stitch when both of its uses belong to the
-  // target solid. If the other use is on another solid, the edge is shared and
-  // heal_plan would otherwise pair the target's face with a face it must not
-  // modify.
+  // target solid. A shared edge would let heal_plan read the foreign coedge for
+  // the traversal direction, and solid-local closure counts would then describe
+  // the wrong shell.
   std::vector<char> solid_faces(brep.faces().size(), 0);
   for (const ShellId shell : brep.solid_shells(solid)) {
     if (!brep.shell_alive(shell)) continue;
