@@ -1124,7 +1124,7 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
 
 依赖关系：M1 依赖 M0 的谓词、曲线曲面与测试设施；M2 依赖 M1 的 arrangement/CDT/索引；M3 强依赖 M2 的拓扑、网格化与容差模型；M4 在 M3 之上；M5 依赖前五者的 API 稳定。
 
-### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2 出口状态（2026-11-12）
+### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3 出口状态（2026-11-13）
 
 **M0 地基：已满足。** 谓词以独立整数/Fraction oracle 对拍（1e6 随机 + 共线、1 ulp、
 抵消、1e±200、次正规语料），NURBS 求值与导数对解析解校验，三平台 CI 矩阵已配置；
@@ -1197,7 +1197,7 @@ Debug 与 Release 各 673 个用例、549,443 条断言全绿，`/W4 /WX /utf-8`
 **验收状态（2026-11-11 实测，见 `docs/benchmarks/m3b-ssi.md`）**：QA-9 基准 FAIL，
 单位球-平面 1000 次横截调用中位数 15.91 ms/对（min 9.39 ms、max 24.48 ms），目标
 100 µs/对，约 159 倍；正确性通过（1000 次调用各 1 条曲线，共 31,000 段，最大残差
-6.44e-10，门禁 1e-9）。M3b-2 见下一段；M3b-3（healing）未交付；QA-8 仍是 M3a 的
+6.44e-10，门禁 1e-9）。M3b-2 见下一段；M3b-3（healing）见再下一段；QA-8 仍是 M3a 的
 性能 FAIL，不因本任务改变。因此
 **M3b-1 的 SSI 功能与 QA-9 语料达成，QA-9 性能验收未达成**；不得据 §16.2 的
 M3 行声称 M3 里程碑已完全达成。
@@ -1225,7 +1225,26 @@ ADR-0025）。范围是解析曲面：操作数面只允许 `Plane3`/`Cylinder3`
 带稳定消息的 `unsupported`，每例两次运行结果一致；基准 PASS，圆柱-盒体并/交/差
 中位数 156.9 / 156.3 / 152.2 ms（目标 2000 ms/操作；分类网格为默认 1e-3 弦高，
 整圆 71 段，142 顶点/280 三角形）。因此 **M3b-2 的功能与性能门禁均达成**；
-M3b-3（healing）仍未交付，QA-8/QA-9 的既有 FAIL 不因本任务改变。
+M3b-3（healing）见下一段，QA-8/QA-9 的既有 FAIL 不因本任务改变。
+
+**M3b-3（healing 初版：代码、测试与 QA-12 证据完成）**：`heal_brep` 与
+`detail::heal_plan`/weld 辅助函数已实现（实现取舍见 ADR-0026）：只处理目标
+实体的平面面与直线边，先测量全部边界边候选，再以 `max_gap` 作为 §8.12 的
+“容差带相交”判据；只有双方都首选彼此的互近邻边才缝合，竞争配对报
+`ambiguous_gap`，方向不一致报 `inconsistent_orientation`，不静默猜测。焊点
+容差取 `max(keep.tol, drop.tol, gap)`，边/面/实体按 §4.6 单调提升，并由
+`raise_tolerances(max_tolerance)` 统一封顶；`max_tolerance` 预检查覆盖“输入链
+已高于 cap”的情况，任何超限都拒绝。所有修改在 `SolidEditor` staged 副本上
+完成，`commit()` 校验失败、壳仍未闭合或 Euler 特征变化时返回原输入，绝不发布
+部分缝合结果；pcurve 为所有与焊后存活顶点相邻的边重建。**验收状态
+（2026-11-13 实测，见 `docs/benchmarks/m3b3-healing.md`）**：QA-12 正例
+1e-6 缝隙裂盒闭合成通过 `validate_topology` 的实体，4 个唯一焊点、4 条缝合边，
+`max_closed_gap=1e-6`、`max_tolerance=1e-6`，体积 1（误差 1.11e-16，门禁
+1e-9）；1e-3 缝隙被拒绝，`gap=0.001`、位置 `(0,0,0.5005)`，输入指纹不变；
+对已闭合结果再次 heal 为幂等。Debug 与 Release 各 859 个用例、623,973 条断言
+全绿，`/W4 /WX /utf-8` 零警告。M3b-3 只交付初始焊接 + 缝合 + 容差提升；
+小边/小面移除、曲面重拟合、多实体缝合与曲面缝隙桥接仍留给 M4，容差逐次
+provenance 也延后（ADR-0026 记录了该 §4.6 偏差）。
 
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外
