@@ -1124,7 +1124,7 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
 
 依赖关系：M1 依赖 M0 的谓词、曲线曲面与测试设施；M2 依赖 M1 的 arrangement/CDT/索引；M3 强依赖 M2 的拓扑、网格化与容差模型；M4 在 M3 之上；M5 依赖前五者的 API 稳定。
 
-### 16.3 M0/M1/M2/M3a/M3b-1 出口状态（2026-11-11）
+### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2 出口状态（2026-11-12）
 
 **M0 地基：已满足。** 谓词以独立整数/Fraction oracle 对拍（1e6 随机 + 共线、1 ulp、
 抵消、1e±200、次正规语料），NURBS 求值与导数对解析解校验，三平台 CI 矩阵已配置；
@@ -1197,10 +1197,35 @@ Debug 与 Release 各 673 个用例、549,443 条断言全绿，`/W4 /WX /utf-8`
 **验收状态（2026-11-11 实测，见 `docs/benchmarks/m3b-ssi.md`）**：QA-9 基准 FAIL，
 单位球-平面 1000 次横截调用中位数 15.91 ms/对（min 9.39 ms、max 24.48 ms），目标
 100 µs/对，约 159 倍；正确性通过（1000 次调用各 1 条曲线，共 31,000 段，最大残差
-6.44e-10，门禁 1e-9）。M3b-2（曲面布尔、多段 pcurve、混合尺度重复曲线残差）与
-M3b-3（healing）未交付；QA-8 仍是 M3a 的性能 FAIL，不因本任务改变。因此
+6.44e-10，门禁 1e-9）。M3b-2 见下一段；M3b-3（healing）未交付；QA-8 仍是 M3a 的
+性能 FAIL，不因本任务改变。因此
 **M3b-1 的 SSI 功能与 QA-9 语料达成，QA-9 性能验收未达成**；不得据 §16.2 的
 M3 行声称 M3 里程碑已完全达成。
+
+**M3b-2（曲面布尔：代码与测试完成；QA 语料 12/12、基准 PASS）**：
+`boolean_solid_curved` 及其 `split_face_curved`、`assemble_curved_solid`、
+`split_solid_by_plane` 的曲面切分与 `detail/curved_volume.hpp` 已实现（实现取舍见
+ADR-0025）。范围是解析曲面：操作数面只允许 `Plane3`/`Cylinder3`；球、圆环、锥
+在入口返回 `unsupported`（前两者延后到 M3c，锥因侧面环穿过顶点延后），NURBS
+面同样返回 `unsupported`。SSI 交线在面 uv 域切面：周期缝片段重新 wrap 进
+`[u₀, u₀+2π]` 并在 `u = 0`/`u = 2π` 两条缝边上精确落点，闭合一整圈的交线旋转到
+缝上；端点接合容差为 `max(64·tolerance, 1e-5·uv 对角线)`，共享角点由两条端段
+直线的交点重建（`2·junction_tol` 的 uv 位移上界），落在圆弧边界上的端点径向
+投影回精确圆点，圆弧台阶阈值 0.5 rad 区分圆弧段与边界弦。片段按正则化成员
+关系保留/丢弃，单连通装配；共面接触、相切接触、翻转曲面片段、多连通结果与
+边相接触结果全部映射为带稳定消息的 `unsupported`。分类网格优先用 `tessellate`
+的网格（完整基本体），修剪操作数回退到 uv 三角化 + 容差焊接 + 边界共形扇 +
+闭合校验，回退网格不闭合时返回 `numeric_failure`。修剪后的曲面面仍不能
+`tessellate`/`mass_properties`（体积走 `detail::curved_solid_volume` 的参数域积分），
+修剪网格化与质量属性留给 M3c。Debug 与 Release 各 797 个用例、623,289 条断言
+全绿，`/W4 /WX /utf-8` 零警告。**验收状态（2026-11-12 实测，见
+`docs/benchmarks/m3b2-curved-boolean.md`）**：QA 语料 12/12 通过——六个正例
+（偏移帽盒并/交/差、缝上盒并、x ≥ 0.5 平板交、贯穿帽盒交）体积相对误差 ≤ 1e-6
+且 `validate_topology` 干净，六个反例（球、圆环、锥、NURBS、相切、共面）全部是
+带稳定消息的 `unsupported`，每例两次运行结果一致；基准 PASS，圆柱-盒体并/交/差
+中位数 156.9 / 156.3 / 152.2 ms（目标 2000 ms/操作；分类网格为默认 1e-3 弦高，
+整圆 71 段，142 顶点/280 三角形）。因此 **M3b-2 的功能与性能门禁均达成**；
+M3b-3（healing）仍未交付，QA-8/QA-9 的既有 FAIL 不因本任务改变。
 
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外

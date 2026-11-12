@@ -570,17 +570,32 @@ Algorithm:
 4. Update §16.3 with the M3b-2 status and the measured bench number; leave QA-8 and QA-9 unchanged and do not claim M3b-2 exit until the bench and QA corpus pass.
 5. Full suite Debug/Release, `ctest`, warnings clean.
 
+**状态（2026-11-12，HEAD `fba2de2` + 本任务工作树）：步骤 1–5 完成。**
+
+- 基准 `bench/bench_boolean_curved.cpp` → `geom_bench_m3b2`（`-DGEOM_BUILD_BENCH=ON`）：
+  5 次采样，并/交/差中位数 156.9 / 156.3 / 152.2 ms（目标 2000 ms/操作），
+  面数 8/7/8；分类网格为默认 1e-3 弦高、整圆 71 段（142 顶点 / 280 三角形），
+  每次结果均 `validate_topology` 干净且体积与解析值相对误差 ≤ 1e-9，PASS。
+- QA 语料 12/12 通过（`tests/unit/brep_boolean_curved_test.cpp` 的
+  `brep: boolean_solid_curved QA corpus`）：六个正例体积相对误差 ≤ 1e-6 且
+  `validate_topology` 干净；六个反例（球/圆环/锥/NURBS/相切/共面）全部是带稳定
+  消息的 `unsupported`，逐例两次运行结果一致（体积完全相同，或 (code, message)
+  完全相同）。
+- ADR-0025、`docs/benchmarks/m3b2-curved-boolean.md`、架构 §16.3 已更新；
+  全套 Debug/Release 各 797 个用例、623,289 条断言全绿，`ctest` 通过，
+  `/W4 /WX /utf-8` 零警告。
+
 ## M3b-2 exit criteria
 
-- `Pcurve2d` is a polyline everywhere; `split_edge`/`join_vertex` preserve multi-segment pcurves.
-- `face_loops_uv` unrolls periodic seams and samples edges without pcurves.
-- `split_face_curved` produces outer+holes fragments with correct nesting; cuts touching a boundary never create a sliver.
-- `assemble_curved_solid` produces a `validate_topology`-clean `Brep` from curved fragments with pcurves in edge direction.
-- `split_solid_by_plane` splits a quarter cylinder and a box with parameter-space quadrature volumes.
-- Trimmed curved faces remain outside `tessellate`/`mass_properties`; the limitation and the `curved_solid_volume` substitute are documented in ADR-0025 and §16.3.
-- `boolean_solid_curved` passes the twelve-case corpus with diagnosed unsupported configurations.
-- Bench and QA recorded in `docs/benchmarks/m3b2-curved-boolean.md`; FAILs are reported as FAILs.
-- No regression: full Debug/Release suites green, 0 warnings.
+- [x] `Pcurve2d` is a polyline everywhere; `split_edge`/`join_vertex` preserve multi-segment pcurves.
+- [x] `face_loops_uv` unrolls periodic seams and samples edges without pcurves.
+- [x] `split_face_curved` produces outer+holes fragments with correct nesting; cuts touching a boundary never create a sliver.
+- [x] `assemble_curved_solid` produces a `validate_topology`-clean `Brep` from curved fragments with pcurves in edge direction.
+- [x] `split_solid_by_plane` splits a quarter cylinder and a box with parameter-space quadrature volumes.
+- [x] Trimmed curved faces remain outside `tessellate`/`mass_properties`; the limitation and the `curved_solid_volume` substitute are documented in ADR-0025 and §16.3.
+- [x] `boolean_solid_curved` passes the twelve-case corpus with diagnosed unsupported configurations.
+- [x] Bench and QA recorded in `docs/benchmarks/m3b2-curved-boolean.md`; FAILs are reported as FAILs.
+- [x] No regression: full Debug/Release suites green, 0 warnings.
 
 ## Self-review checklist (to run before hand-off)
 

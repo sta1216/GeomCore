@@ -283,6 +283,44 @@ geom::Brep make_test_cylinder(double tolerance) {
   return result.value();
 }
 
+// QA corpus helpers. A positive case must produce a validated single solid whose
+// volume matches the analytic value, and a repeated call must reproduce that
+// volume bit for bit. A rejection must reproduce the same code and message.
+void check_qa_volume(const char* name, const geom::Brep& a, const geom::Brep& b,
+                     geom::SolidBooleanOp op, double expected) {
+  INFO(name);
+  const geom::Result<geom::CurvedBooleanResult> first = geom::boolean_solid_curved(
+      a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
+  REQUIRE_MESSAGE(first.has_value(), name << ": " << message_of(first.error()));
+  CHECK_MESSAGE(geom::validate_topology(first.value().brep).ok(), name << ": invalid topology");
+  const double volume = volume_of(first.value().brep);
+  CHECK_MESSAGE(std::abs(volume - expected) <= 1e-6 * std::abs(expected),
+                name << ": volume " << volume << " expected " << expected);
+
+  const geom::Result<geom::CurvedBooleanResult> again = geom::boolean_solid_curved(
+      a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
+  REQUIRE_MESSAGE(again.has_value(), name << ": the repeated call failed");
+  CHECK_MESSAGE(volume_of(again.value().brep) == volume, name << ": volume is not deterministic");
+}
+
+void check_qa_rejection(const char* name, const geom::Brep& a, const geom::Brep& b,
+                        geom::SolidBooleanOp op, std::string_view message) {
+  INFO(name);
+  const geom::Result<geom::CurvedBooleanResult> first = geom::boolean_solid_curved(
+      a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
+  REQUIRE_MESSAGE(!first.has_value(), name << ": expected a diagnostic");
+  CHECK_MESSAGE(first.error().code == geom::Errc::unsupported, name << ": unexpected error code");
+  CHECK_MESSAGE(!message_of(first.error()).empty(), name << ": empty message");
+  CHECK_MESSAGE(message_of(first.error()) == message,
+                name << ": message " << message_of(first.error()));
+
+  const geom::Result<geom::CurvedBooleanResult> again = geom::boolean_solid_curved(
+      a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
+  REQUIRE_MESSAGE(!again.has_value(), name << ": the repeated call succeeded");
+  CHECK(again.error().code == first.error().code);
+  CHECK(message_of(again.error()) == message_of(first.error()));
+}
+
 }  // namespace
 
 TEST_CASE("brep: boolean_solid_curved subtracts a box from a quarter cylinder") {
@@ -857,4 +895,112 @@ TEST_CASE("brep: collapse_circular_chains heals a rim run beside the cut corner"
   }
   CHECK(keeps_corner);
 }
+// The QA corpus: six positive cases with independently derived volumes and six
+// diagnosed rejections. The positive volumes are
+//   I = pi/6 + sqrt(3)/4 - 1/2                  (offset-cap footprint, unit tall)
+//   offset box [0.5, 2] x [-0.5, 0.5] x [0.5, 1.5] on the unit cylinder:
+//     intersection = I, union = 1.5 + 2*pi - I, difference = 2*pi - I
+//   seam box [-2, 2]^2 x [1, 10]: union = 144 + pi
+//   slab [0.5, 2] x [-2, 2] x [-1, 10]: intersection = 2*(pi/3 - sqrt(3)/4)
+//   box [-0.2, 0.4] x [-2, 2] x [1.5, 3]: intersection = 0.587720000938..., i.e.
+//   half of the disk strip x in [-0.2, 0.4].
+TEST_CASE("brep: boolean_solid_curved QA corpus") {
+  const double tolerance = 1e-9;
+  const double i = kPi / 6.0 + std::sqrt(3.0) / 4.0 - 0.5;
 
+  const geom::Brep cylinder = make_test_cylinder(tolerance);
+  const geom::Brep offset_box =
+      geom::make_box(geom::Point3d{0.5, -0.5, 0.5}, geom::Point3d{2.0, 0.5, 1.5}, tolerance)
+          .value();
+  const geom::Brep seam_box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 1.0}, geom::Point3d{2.0, 2.0, 10.0}, tolerance)
+          .value();
+  const geom::Brep slab_box =
+      geom::make_box(geom::Point3d{0.5, -2.0, -1.0}, geom::Point3d{2.0, 2.0, 10.0}, tolerance)
+          .value();
+  const geom::Brep caps_box =
+      geom::make_box(geom::Point3d{-0.2, -2.0, 1.5}, geom::Point3d{0.4, 2.0, 3.0}, tolerance)
+          .value();
+
+  struct PositiveCase {
+    const char* name;
+    const geom::Brep* a;
+    const geom::Brep* b;
+    geom::SolidBooleanOp op;
+    double expected;
+  };
+  const std::array<PositiveCase, 6> positives{{
+      {"offset cap union", &cylinder, &offset_box, geom::SolidBooleanOp::union_,
+       1.5 + 2.0 * kPi - i},
+      {"offset cap intersection", &cylinder, &offset_box, geom::SolidBooleanOp::intersection, i},
+      {"offset cap difference", &cylinder, &offset_box, geom::SolidBooleanOp::difference,
+       2.0 * kPi - i},
+      {"seam box union", &cylinder, &seam_box, geom::SolidBooleanOp::union_, 144.0 + kPi},
+      {"slab intersection", &cylinder, &slab_box, geom::SolidBooleanOp::intersection,
+       2.0 * (kPi / 3.0 - std::sqrt(3.0) / 4.0)},
+      {"box through both caps intersection", &cylinder, &caps_box,
+       geom::SolidBooleanOp::intersection, 0.587720000938},
+  }};
+  for (const PositiveCase& entry : positives) {
+    check_qa_volume(entry.name, *entry.a, *entry.b, entry.op, entry.expected);
+  }
+
+  // Diagnosed rejections. The expected messages are the ones the driver
+  // documents:
+  //   sphere   "boolean_solid_curved: sphere operands are deferred to M3c"
+  //   torus    "boolean_solid_curved: torus operands are deferred to M3c"
+  //   cone     "boolean_solid_curved: cone operands are not supported
+  //             (apex-touching loops are deferred)"
+  //   NURBS    "boolean_solid_curved: NURBS operands are not supported"
+  //   tangent  "boolean_solid_curved: tangent face contact is not supported yet"
+  //   coplanar "boolean_solid_curved: coplanar face contact is not supported yet"
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 2.0, tolerance).value();
+  const geom::Brep torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 2.0, 0.5,
+                       tolerance)
+          .value();
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 1.0,
+                      tolerance)
+          .value();
+  const geom::Brep nurbs = make_nurbs_box(geom::Point3d{0.0, 0.0, 0.0},
+                                          geom::Point3d{1.0, 1.0, 1.0}, tolerance);
+  const geom::Brep wide_box =
+      geom::make_box(geom::Point3d{-5.0, -5.0, -5.0}, geom::Point3d{5.0, 5.0, 5.0}, tolerance)
+          .value();
+  // The box faces x = +-1 and y = +-1 are tangent to the unit cylinder.
+  const geom::Brep tangent_box =
+      geom::make_box(geom::Point3d{-1.0, -1.0, -1.0}, geom::Point3d{1.0, 1.0, 1.0}, tolerance)
+          .value();
+  // The box bottom face lies in the top cap plane (z = 2) and overlaps it.
+  const geom::Brep resting_box =
+      geom::make_box(geom::Point3d{-0.5, -0.5, 2.0}, geom::Point3d{0.5, 0.5, 3.0}, tolerance)
+          .value();
+
+  struct RejectionCase {
+    const char* name;
+    const geom::Brep* a;
+    const geom::Brep* b;
+    geom::SolidBooleanOp op;
+    const char* message;
+  };
+  const std::array<RejectionCase, 6> rejections{{
+      {"sphere box", &sphere, &wide_box, geom::SolidBooleanOp::union_,
+       "boolean_solid_curved: sphere operands are deferred to M3c"},
+      {"torus box", &torus, &wide_box, geom::SolidBooleanOp::union_,
+       "boolean_solid_curved: torus operands are deferred to M3c"},
+      {"cone box", &cone, &wide_box, geom::SolidBooleanOp::union_,
+       "boolean_solid_curved: cone operands are not supported (apex-touching loops are "
+       "deferred)"},
+      {"NURBS box", &nurbs, &wide_box, geom::SolidBooleanOp::union_,
+       "boolean_solid_curved: NURBS operands are not supported"},
+      {"tangent box", &tangent_box, &cylinder, geom::SolidBooleanOp::union_,
+       "boolean_solid_curved: tangent face contact is not supported yet"},
+      {"coplanar cap", &cylinder, &resting_box, geom::SolidBooleanOp::union_,
+       "boolean_solid_curved: coplanar face contact is not supported yet"},
+  }};
+  for (const RejectionCase& entry : rejections) {
+    check_qa_rejection(entry.name, *entry.a, *entry.b, entry.op, entry.message);
+  }
+}
