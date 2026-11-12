@@ -9,6 +9,9 @@
 #include <geom/brep/heal.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/solid_editor.hpp>
+#include <geom/brep/validate.hpp>
+
+#include "brep_heal_fixture.hpp"
 
 using namespace geom;
 
@@ -154,4 +157,252 @@ TEST_CASE("heal: issue kinds map to stable names") {
         "inconsistent_orientation");
   CHECK(std::string_view(to_string(HealIssueKind::invalid_result)) == "invalid_result");
   CHECK(std::string_view(to_string(static_cast<HealIssueKind>(200))) == "unknown");
+}
+
+TEST_CASE("heal fixture: a torn sheet is a valid open solid") {
+  for (const double gap : {1e-6, 1e-3}) {
+    const test::TornSheet sheet = test::make_torn_sheet(gap);
+    CHECK(sheet.brep.solid_alive(sheet.solid));
+    SolidEditor editor(sheet.brep);
+    CHECK(editor.commit().has_value());
+    CHECK(detail::heal_boundary_edges(sheet.brep, sheet.solid).size() == 8u);
+  }
+}
+
+TEST_CASE("heal fixture: the auxiliary sheets commit with eight boundary edges") {
+  const test::TornSheet split = test::make_torn_split_sheet(1e-6);
+  const test::TornSheet partial = test::make_partial_torn_sheet(1e-6, 1e-3);
+  const test::TornSheet reversed = test::make_reversed_keep_sheet(1e-6);
+  for (const test::TornSheet* sheet : {&split, &partial, &reversed}) {
+    SolidEditor editor(sheet->brep);
+    CHECK(editor.commit().has_value());
+    CHECK(detail::heal_boundary_edges(sheet->brep, sheet->solid).size() == 8u);
+  }
+}
+
+TEST_CASE("heal: a 1e-6 seam produces four mutual pairs") {
+  const test::TornSheet sheet = test::make_torn_sheet(1e-6);
+  const std::vector<EdgeId> boundary =
+      detail::heal_boundary_edges(sheet.brep, sheet.solid);
+  REQUIRE(boundary.size() == 8u);
+
+  const auto plan_result = detail::heal_plan(sheet.brep, boundary, 1e-6);
+  REQUIRE(plan_result.has_value());
+  const detail::HealPlan& plan = plan_result.value();
+  CHECK(plan.issues.empty());
+  REQUIRE(plan.pairs.size() == 4u);
+  for (const detail::HealEdgePair& pair : plan.pairs) {
+    CHECK(pair.keep.index() < pair.drop.index());
+    CHECK(pair.gap == doctest::Approx(1e-6).epsilon(1e-6));
+    CHECK_FALSE(pair.same_direction);
+    for (const detail::HealVertexWeld& weld : pair.welds) {
+      CHECK(weld.keep.index() < weld.drop.index());
+    }
+  }
+}
+
+TEST_CASE("heal: a gap past max_gap is measured and reported") {
+  const test::TornSheet sheet = test::make_torn_sheet(1e-3);
+  const std::vector<EdgeId> boundary =
+      detail::heal_boundary_edges(sheet.brep, sheet.solid);
+  REQUIRE(boundary.size() == 8u);
+
+  const auto plan_result = detail::heal_plan(sheet.brep, boundary, 1e-6);
+  REQUIRE(plan_result.has_value());
+  const detail::HealPlan& plan = plan_result.value();
+  CHECK(plan.pairs.empty());
+  REQUIRE(plan.issues.size() == 1u);
+  const HealIssue& issue = plan.issues.front();
+  CHECK(issue.kind == HealIssueKind::gap_too_large);
+  CHECK(issue.gap == doctest::Approx(1e-3).epsilon(1e-6));
+  REQUIRE(issue.entity_a != kNoEntity);
+  REQUIRE(issue.entity_b != kNoEntity);
+  CHECK(issue.entity_a < issue.entity_b);
+}
+
+TEST_CASE("heal: the same traversal direction is not sewn") {
+  const test::TornSheet sheet = test::make_torn_sheet(1e-6, true);
+  const std::vector<EdgeId> boundary =
+      detail::heal_boundary_edges(sheet.brep, sheet.solid);
+  REQUIRE(boundary.size() == 8u);
+
+  const auto plan_result = detail::heal_plan(sheet.brep, boundary, 1e-6);
+  REQUIRE(plan_result.has_value());
+  const detail::HealPlan& plan = plan_result.value();
+  CHECK(plan.pairs.empty());
+  REQUIRE(plan.issues.size() == 4u);
+  for (const HealIssue& issue : plan.issues) {
+    CHECK(issue.kind == HealIssueKind::inconsistent_orientation);
+    CHECK(issue.entity_a != kNoEntity);
+    CHECK(issue.entity_b != kNoEntity);
+  }
+}
+
+TEST_CASE("heal: ambiguous rims report one issue per middle edge") {
+  const test::TornSheet sheet = test::make_ambiguous_rims(1e-6);
+  const std::vector<EdgeId> boundary =
+      detail::heal_boundary_edges(sheet.brep, sheet.solid);
+  REQUIRE(boundary.size() == 12u);
+
+  const auto plan_result = detail::heal_plan(sheet.brep, boundary, 1.5e-6);
+  REQUIRE(plan_result.has_value());
+  const detail::HealPlan& plan = plan_result.value();
+  CHECK(plan.pairs.empty());
+  REQUIRE(plan.issues.size() == 4u);
+  std::vector<std::uint32_t> ambiguous_edges;
+  for (const HealIssue& issue : plan.issues) {
+    CHECK(issue.kind == HealIssueKind::ambiguous_gap);
+    ambiguous_edges.push_back(issue.entity_a);
+  }
+  CHECK(ambiguous_edges == std::vector<std::uint32_t>{0, 1, 2, 3});
+}
+
+TEST_CASE("heal: a torn sheet becomes a closed shell") {
+  const test::TornSheet sheet = test::make_torn_sheet(1e-6);
+  const auto healed = heal_brep(sheet.brep, sheet.solid, {});
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+
+  CHECK(result.report.changed);
+  CHECK(result.report.boundary_edges == 8u);
+  CHECK(result.report.welded_vertices == 4u);
+  CHECK(result.report.sewn_edges == 4u);
+  CHECK(result.report.issues.empty());
+  CHECK(result.report.max_closed_gap == doctest::Approx(1e-6).epsilon(1e-6));
+  CHECK(result.report.max_tolerance == doctest::Approx(1e-6).epsilon(1e-6));
+  CHECK(detail::heal_boundary_edges(result.brep, sheet.solid).empty());
+  CHECK(result.brep.vertex_count() == 4u);
+  CHECK(result.brep.edge_count() == 4u);
+  CHECK(result.brep.face_count() == 2u);
+  const auto shells = result.brep.solid_shells(sheet.solid);
+  REQUIRE(shells.size() == 1u);
+  CHECK(result.brep.shell(shells.front()).closed);
+  CHECK(validate_topology(result.brep).ok());
+}
+
+TEST_CASE("heal: a closed box is returned unchanged") {
+  const Brep box = make_box({0, 0, 0}, {1, 1, 1}, 0).value();
+  const SolidId solid = box.solid_ids().front();
+  const auto healed = heal_brep(box, solid, {});
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK_FALSE(result.report.changed);
+  CHECK(result.report.boundary_edges == 0u);
+  CHECK(result.report.welded_vertices == 0u);
+  CHECK(result.report.sewn_edges == 0u);
+  CHECK(result.report.issues.empty());
+  CHECK(result.brep.vertex_count() == box.vertex_count());
+  CHECK(result.brep.edge_count() == box.edge_count());
+}
+
+TEST_CASE("heal: a zero-length boundary edge is invalid topology") {
+  SolidEditor editor;
+  const auto first = editor.add_vertex({0, 0, 0}, 0).value();
+  const auto second = editor.add_vertex({0, 0, 0}, 0).value();
+  const auto edge = editor.add_edge(first, second, kNoGeometry, 0, 1, 0).value();
+  const std::array<EdgeId, 1> boundary{edge};
+
+  const auto plan = detail::heal_plan(editor.brep(), boundary, 1e-6);
+  REQUIRE_FALSE(plan.has_value());
+  CHECK(plan.error().code == Errc::invalid_topology);
+  CHECK(std::string_view(plan.error().message) ==
+        "heal_plan: boundary edge has zero length");
+}
+
+TEST_CASE("heal: a keep coedge whose raw reversed flag is set still pairs") {
+  const test::TornSheet sheet = test::make_reversed_keep_sheet(1e-6);
+  const std::vector<EdgeId> boundary =
+      detail::heal_boundary_edges(sheet.brep, sheet.solid);
+  REQUIRE(boundary.size() == 8u);
+
+  const auto plan_result = detail::heal_plan(sheet.brep, boundary, 1e-6);
+  REQUIRE(plan_result.has_value());
+  const detail::HealPlan& plan = plan_result.value();
+  CHECK(plan.issues.empty());
+  REQUIRE(plan.pairs.size() == 4u);
+  for (const detail::HealEdgePair& pair : plan.pairs) {
+    CoedgeId use{};
+    for (const CoedgeId id : sheet.brep.coedge_ids()) {
+      if (sheet.brep.coedge(id).edge == pair.keep) {
+        use = id;
+        break;
+      }
+    }
+    REQUIRE(!use.is_null());
+    CHECK(sheet.brep.coedge(use).reversed);
+  }
+
+  const auto healed = heal_brep(sheet.brep, sheet.solid, {});
+  REQUIRE(healed.has_value());
+  CHECK(healed.value().report.sewn_edges == 4u);
+  CHECK(detail::heal_boundary_edges(healed.value().brep, sheet.solid).empty());
+}
+
+TEST_CASE("heal: a sheet with only non-candidate boundary edges is rejected") {
+  SolidEditor editor;
+  const auto surface = editor.add_surface(Plane3{{0, 0, 1}, 0});
+  const std::array<EdgeId, 4> edges = add_quad_edges(editor, 0.0, 0.0, 1.0);
+  const SolidId solid = add_open_sheet(editor, surface, edges);
+  const Brep brep = editor.commit().value();
+
+  const auto healed = heal_brep(brep, solid, {});
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK_FALSE(result.report.changed);
+  REQUIRE(result.report.issues.size() == 1u);
+  CHECK(result.report.issues.front().kind == HealIssueKind::invalid_result);
+  CHECK(std::string_view(result.report.issues.front().message) ==
+        "heal_brep: no mutual pair");
+}
+
+TEST_CASE("heal: pcurves are repaired on interior edges at welded vertices") {
+  const test::TornSheet sheet = test::make_torn_split_sheet(1e-6);
+  const auto healed = heal_brep(sheet.brep, sheet.solid, {});
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK(result.report.changed);
+  CHECK(result.report.welded_vertices == 4u);
+  CHECK(result.report.sewn_edges == 4u);
+  CHECK(detail::heal_boundary_edges(result.brep, sheet.solid).empty());
+
+  const auto coedges = result.brep.coedge_ids();
+  REQUIRE(!coedges.empty());
+  for (const CoedgeId id : coedges) {
+    CHECK(result.brep.coedge(id).pcurve != kNoGeometry);
+  }
+}
+
+TEST_CASE("heal: a partially sewn sheet is rejected without a partial stitch") {
+  const test::TornSheet sheet = test::make_partial_torn_sheet(1e-6, 1e-3);
+  const auto healed = heal_brep(sheet.brep, sheet.solid, {});
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK_FALSE(result.report.changed);
+  CHECK(result.report.sewn_edges == 0u);
+  CHECK(result.brep.vertex_count() == sheet.brep.vertex_count());
+  CHECK(result.brep.edge_count() == sheet.brep.edge_count());
+  REQUIRE(result.report.issues.size() == 2u);
+  CHECK(result.report.issues[0].kind == HealIssueKind::invalid_result);
+  CHECK(std::string_view(result.report.issues[0].message) ==
+        "heal_brep: a shell is still open after stitching");
+  CHECK(result.report.issues[1].kind == HealIssueKind::gap_too_large);
+}
+
+TEST_CASE("heal: the tolerance cap is checked before welding") {
+  const test::TornSheet sheet =
+      test::make_torn_sheet_with_tolerance(2e-6, false, 2e-6);
+  HealOptions options;
+  options.max_gap = 1e-5;
+  options.max_tolerance = 1e-6;
+
+  const auto healed = heal_brep(sheet.brep, sheet.solid, options);
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK_FALSE(result.report.changed);
+  CHECK(result.report.welded_vertices == 0u);
+  CHECK(result.report.sewn_edges == 0u);
+  REQUIRE(result.report.issues.size() == 1u);
+  CHECK(result.report.issues.front().kind == HealIssueKind::invalid_result);
+  CHECK(std::string_view(result.report.issues.front().message) ==
+        "heal_brep: tolerance cap exceeded");
 }
