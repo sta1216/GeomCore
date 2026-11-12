@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -301,6 +302,288 @@ class SolidEditor {
     staged_.solid_shells_.insert(staged_.solid_shells_.end(), shells.begin(), shells.end());
     place(staged_.solids_, id, solid);
     return id;
+  }
+
+  // Healing primitives. Each one validates the staged topology before it
+  // mutates anything, so a rejected call leaves the staging copy exactly as it
+  // was; like the constructive methods above they do not allocate new entities
+  // except for the temporary bookkeeping they release again on exit.
+  //
+  // merge_vertices() welds `drop` into `keep`: every edge endpoint that still
+  // points at `drop` is retargeted to `keep`, `keep`'s tolerance grows to the
+  // largest of both tolerances and the distance between the two points (so the
+  // weld is within tolerance), and `drop` is released. A merge that would turn
+  // an incident edge into a self-loop (v0 == v1) is rejected with
+  // Errc::unsupported before anything changes.
+  Result<void> merge_vertices(VertexId keep, VertexId drop) {
+    if (!staged_.vertex_alive(keep) || !staged_.vertex_alive(drop)) {
+      return Error{Errc::invalid_topology, "solid_editor: merge vertex is not alive",
+                   keep.index(), drop.index()};
+    }
+    if (keep == drop) {
+      return Error{Errc::invalid_topology, "solid_editor: cannot merge a vertex into itself",
+                   keep.index(), drop.index()};
+    }
+    std::vector<EdgeId> incident;
+    for (std::size_t i = 0; i < staged_.edges_.size(); ++i) {
+      const Handle id = staged_.edge_alloc_.handle_at(static_cast<std::uint32_t>(i));
+      if (id.is_null()) continue;
+      const Edge& edge = staged_.edges_[i];
+      if (edge.v0 != drop && edge.v1 != drop) continue;
+      const VertexId v0 = edge.v0 == drop ? keep : edge.v0;
+      const VertexId v1 = edge.v1 == drop ? keep : edge.v1;
+      if (v0 == v1) {
+        return Error{Errc::unsupported,
+                     "solid_editor: vertex merge would create a self-loop edge", id.index(),
+                     0u};
+      }
+      incident.push_back(id);
+    }
+    const Vertex keep_vertex = staged_.vertex(keep);
+    const Vertex drop_vertex = staged_.vertex(drop);
+    const double distance = norm2(keep_vertex.point - drop_vertex.point);
+    for (const EdgeId id : incident) {
+      Edge& edge = staged_.edges_[static_cast<std::size_t>(id.index())];
+      if (edge.v0 == drop) edge.v0 = keep;
+      if (edge.v1 == drop) edge.v1 = keep;
+    }
+    staged_.vertices_[static_cast<std::size_t>(keep.index())].tol =
+        std::max({keep_vertex.tol, drop_vertex.tol, distance});
+    staged_.vertex_alloc_.release(drop);
+    return {};
+  }
+
+  // merge_edges() sews two boundary edges that already share both welded
+  // endpoints: every coedge that uses `drop` is retargeted to `keep` and its
+  // `reversed` flag is recomputed from the endpoint the coedge traverses, so a
+  // flipped endpoint correspondence still yields opposite traversal directions.
+  // `keep`'s tolerance is not widened here; raise_tolerances() re-establishes
+  // the tolerance chain afterwards. `drop`'s curve is inherited only when
+  // `keep` has none, together with its parameter interval.
+  Result<void> merge_edges(EdgeId keep, EdgeId drop) {
+    if (!staged_.edge_alive(keep) || !staged_.edge_alive(drop)) {
+      return Error{Errc::invalid_topology, "solid_editor: merge edge is not alive", keep.index(),
+                   drop.index()};
+    }
+    if (keep == drop) {
+      return Error{Errc::invalid_topology, "solid_editor: cannot merge an edge into itself",
+                   keep.index(), drop.index()};
+    }
+    Edge keep_edge = staged_.edge(keep);
+    const Edge drop_edge = staged_.edge(drop);
+    const bool same_order =
+        keep_edge.v0 == drop_edge.v0 && keep_edge.v1 == drop_edge.v1;
+    const bool flipped = keep_edge.v0 == drop_edge.v1 && keep_edge.v1 == drop_edge.v0;
+    if (keep_edge.v0 == keep_edge.v1 || drop_edge.v0 == drop_edge.v1 ||
+        (!same_order && !flipped)) {
+      return Error{Errc::invalid_topology,
+                   "solid_editor: merge edges are not welded pairwise", keep.index(),
+                   drop.index()};
+    }
+    if (keep_edge.curve == kNoGeometry) {
+      keep_edge.curve = drop_edge.curve;
+      keep_edge.t0 = drop_edge.t0;
+      keep_edge.t1 = drop_edge.t1;
+    }
+    for (std::size_t i = 0; i < staged_.coedges_.size(); ++i) {
+      if (staged_.coedge_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      Coedge& coedge = staged_.coedges_[i];
+      if (coedge.edge != drop) continue;
+      const VertexId start = coedge.reversed ? drop_edge.v1 : drop_edge.v0;
+      coedge.edge = keep;
+      coedge.reversed = start != keep_edge.v0;
+    }
+    staged_.edges_[static_cast<std::size_t>(keep.index())] = keep_edge;
+    staged_.edge_alloc_.release(drop);
+    return {};
+  }
+
+  // Marks a shell closed, but only after checking that every edge its faces use
+  // is used exactly twice inside that shell; an edge used once (a boundary) or
+  // more than twice is rejected with Errc::not_closed. Clearing the flag never
+  // needs that check.
+  Result<void> set_shell_closed(ShellId shell, bool closed) {
+    if (!staged_.shell_alive(shell)) {
+      return Error{Errc::invalid_topology, "solid_editor: shell is not alive", shell.index(),
+                   0u};
+    }
+    if (!closed) {
+      staged_.shells_[static_cast<std::size_t>(shell.index())].closed = false;
+      return {};
+    }
+    std::vector<std::uint32_t> uses(staged_.edges_.size(), 0u);
+    auto count_face = [&](FaceId face) {
+      LoopId loop_id = staged_.face(face).first_loop;
+      std::uint32_t loop_guard = 0;
+      while (staged_.loop_alive(loop_id)) {
+        if (++loop_guard > staged_.loop_count()) break;
+        const Loop loop = staged_.loop(loop_id);
+        CoedgeId coedge_id = loop.start;
+        std::uint32_t coedge_guard = 0;
+        while (staged_.coedge_alive(coedge_id)) {
+          if (++coedge_guard > staged_.coedge_count()) break;
+          const Coedge coedge = staged_.coedge(coedge_id);
+          if (staged_.edge_alive(coedge.edge)) ++uses[coedge.edge.index()];
+          coedge_id = coedge.next;
+          if (coedge_id == loop.start) break;
+        }
+        loop_id = loop.next;
+      }
+    };
+    for (const FaceId face : staged_.shell_faces(shell)) {
+      if (staged_.face_alive(face)) count_face(face);
+    }
+    for (std::size_t i = 0; i < staged_.edges_.size(); ++i) {
+      if (uses[i] != 0u && uses[i] != 2u) {
+        return Error{Errc::not_closed,
+                     "solid_editor: shell has an edge that is not used twice",
+                     static_cast<std::uint32_t>(i), 0u};
+      }
+    }
+    staged_.shells_[static_cast<std::size_t>(shell.index())].closed = true;
+    return {};
+  }
+
+  // Sets (or clears, with kNoGeometry) the pcurve a coedge references. Only the
+  // coedge changes; the pcurve store itself is shared and immutable here.
+  Result<void> set_coedge_pcurve(CoedgeId coedge, std::uint32_t pcurve) {
+    if (!staged_.coedge_alive(coedge)) {
+      return Error{Errc::invalid_topology, "solid_editor: coedge is not alive",
+                   coedge.index(), 0u};
+    }
+    if (pcurve != kNoGeometry &&
+        static_cast<std::size_t>(pcurve) >= staged_.geometry_.pcurves.size()) {
+      return Error{Errc::index_out_of_range,
+                   "solid_editor: coedge pcurve index out of range", pcurve, 0u};
+    }
+    staged_.coedges_[static_cast<std::size_t>(coedge.index())].pcurve = pcurve;
+    return {};
+  }
+
+  // Replaces an edge's curve reference and parameter interval. kNoGeometry
+  // clears the curve; the interval is always validated so an edge never holds
+  // an empty or non-finite one.
+  Result<void> set_edge_geometry(EdgeId edge, std::uint32_t curve, double t0, double t1) {
+    if (!staged_.edge_alive(edge)) {
+      return Error{Errc::invalid_topology, "solid_editor: edge is not alive", edge.index(),
+                   0u};
+    }
+    if (!(std::isfinite(t0) && std::isfinite(t1)) || !(t0 < t1)) {
+      return Error{Errc::degenerate,
+                   "solid_editor: edge parameter interval is empty or non-finite", 0u, 0u};
+    }
+    if (curve != kNoGeometry &&
+        static_cast<std::size_t>(curve) >= staged_.geometry_.curves.size()) {
+      return Error{Errc::index_out_of_range, "solid_editor: edge curve index out of range",
+                   curve, 0u};
+    }
+    Edge& staged_edge = staged_.edges_[static_cast<std::size_t>(edge.index())];
+    staged_edge.curve = curve;
+    staged_edge.t0 = t0;
+    staged_edge.t1 = t1;
+    return {};
+  }
+
+  // Raises tolerances in dominance order: edges to at least the larger of their
+  // two vertex tolerances, faces to at least the tolerances of the edges and
+  // coedges they use, solids to at least the largest face tolerance in their
+  // shells. Every value that this call would raise must stay at or below `cap`;
+  // a single violation returns Errc::tolerance_violation (message
+  // "heal_brep: tolerance cap exceeded") with nothing changed. Returns the
+  // largest tolerance this call set, or 0 when nothing changed.
+  Result<double> raise_tolerances(double cap) {
+    if (!std::isfinite(cap) || cap < 0.0) {
+      return Error{Errc::tolerance_violation, "heal_brep: tolerance cap exceeded", 0u, 0u};
+    }
+    const std::size_t edge_count = staged_.edges_.size();
+    const std::size_t face_count = staged_.faces_.size();
+    const std::size_t solid_count = staged_.solids_.size();
+    std::vector<double> edge_targets(edge_count, 0.0);
+    std::vector<double> face_targets(face_count, 0.0);
+    std::vector<double> solid_targets(solid_count, 0.0);
+
+    for (std::size_t i = 0; i < edge_count; ++i) {
+      if (staged_.edge_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      const Edge& edge = staged_.edges_[i];
+      double target = edge.tol;
+      if (staged_.vertex_alive(edge.v0)) target = std::max(target, staged_.vertex(edge.v0).tol);
+      if (staged_.vertex_alive(edge.v1)) target = std::max(target, staged_.vertex(edge.v1).tol);
+      edge_targets[i] = target;
+    }
+    for (std::size_t i = 0; i < face_count; ++i) {
+      if (staged_.face_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      face_targets[i] = staged_.faces_[i].tol;
+    }
+    for (std::size_t i = 0; i < staged_.coedges_.size(); ++i) {
+      if (staged_.coedge_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      const Coedge& coedge = staged_.coedges_[i];
+      if (!staged_.face_alive(coedge.face)) continue;
+      double target = coedge.tol;
+      if (staged_.edge_alive(coedge.edge)) {
+        target = std::max(target, edge_targets[coedge.edge.index()]);
+      }
+      double& face_target = face_targets[coedge.face.index()];
+      face_target = std::max(face_target, target);
+    }
+    for (std::size_t i = 0; i < solid_count; ++i) {
+      const SolidId id = staged_.solid_alloc_.handle_at(static_cast<std::uint32_t>(i));
+      if (id.is_null()) continue;
+      double target = staged_.solids_[i].tol;
+      for (const ShellId shell : staged_.solid_shells(id)) {
+        for (const FaceId face : staged_.shell_faces(shell)) {
+          if (staged_.face_alive(face)) {
+            target = std::max(target, face_targets[face.index()]);
+          }
+        }
+      }
+      solid_targets[i] = target;
+    }
+
+    for (std::size_t i = 0; i < edge_count; ++i) {
+      if (staged_.edge_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      if (edge_targets[i] > cap && edge_targets[i] > staged_.edges_[i].tol) {
+        return Error{Errc::tolerance_violation, "heal_brep: tolerance cap exceeded",
+                     static_cast<std::uint32_t>(i), 0u};
+      }
+    }
+    for (std::size_t i = 0; i < face_count; ++i) {
+      if (staged_.face_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      if (face_targets[i] > cap && face_targets[i] > staged_.faces_[i].tol) {
+        return Error{Errc::tolerance_violation, "heal_brep: tolerance cap exceeded",
+                     static_cast<std::uint32_t>(i), 0u};
+      }
+    }
+    for (std::size_t i = 0; i < solid_count; ++i) {
+      if (staged_.solid_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      if (solid_targets[i] > cap && solid_targets[i] > staged_.solids_[i].tol) {
+        return Error{Errc::tolerance_violation, "heal_brep: tolerance cap exceeded",
+                     static_cast<std::uint32_t>(i), 0u};
+      }
+    }
+
+    double largest = 0.0;
+    for (std::size_t i = 0; i < edge_count; ++i) {
+      if (staged_.edge_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      if (edge_targets[i] > staged_.edges_[i].tol) {
+        staged_.edges_[i].tol = edge_targets[i];
+        largest = std::max(largest, edge_targets[i]);
+      }
+    }
+    for (std::size_t i = 0; i < face_count; ++i) {
+      if (staged_.face_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      if (face_targets[i] > staged_.faces_[i].tol) {
+        staged_.faces_[i].tol = face_targets[i];
+        largest = std::max(largest, face_targets[i]);
+      }
+    }
+    for (std::size_t i = 0; i < solid_count; ++i) {
+      if (staged_.solid_alloc_.handle_at(static_cast<std::uint32_t>(i)).is_null()) continue;
+      if (solid_targets[i] > staged_.solids_[i].tol) {
+        staged_.solids_[i].tol = solid_targets[i];
+        largest = std::max(largest, solid_targets[i]);
+      }
+    }
+    return largest;
   }
 
   // Releases the edge's handle without repairing references to it. This is the
