@@ -26,9 +26,10 @@ struct QuadFace {
   LoopId loop{};
 };
 
-QuadFace add_quad_face(SolidEditor& editor, std::uint32_t surface, double x, double y,
-                       double side, double vertex_tol, double edge_tol, double face_tol,
-                       std::uint32_t curve = kNoGeometry, double t1 = 1.0) {
+QuadFace add_quad_face_without_loop(SolidEditor& editor, std::uint32_t surface, double x,
+                                    double y, double side, double vertex_tol, double edge_tol,
+                                    double face_tol, std::uint32_t curve = kNoGeometry,
+                                    double t1 = 1.0) {
   QuadFace quad;
   quad.vertices = {editor.add_vertex(Point3d{x, y, 0.0}, vertex_tol).value(),
                    editor.add_vertex(Point3d{x + side, y, 0.0}, vertex_tol).value(),
@@ -41,6 +42,14 @@ QuadFace add_quad_face(SolidEditor& editor, std::uint32_t surface, double x, dou
                         .value();
   }
   quad.face = editor.add_face(surface, false, face_tol).value();
+  return quad;
+}
+
+QuadFace add_quad_face(SolidEditor& editor, std::uint32_t surface, double x, double y,
+                       double side, double vertex_tol, double edge_tol, double face_tol,
+                       std::uint32_t curve = kNoGeometry, double t1 = 1.0) {
+  QuadFace quad = add_quad_face_without_loop(editor, surface, x, y, side, vertex_tol, edge_tol,
+                                             face_tol, curve, t1);
   std::vector<CoedgeSpec> loop;
   for (const EdgeId edge : quad.edges) loop.push_back(CoedgeSpec{edge});
   quad.loop = editor.add_loop(quad.face, loop, true).value();
@@ -199,11 +208,17 @@ TEST_CASE("heal editor: pcurve assignment round-trips and validates") {
   CHECK(editor.brep().coedge_count() == 4u);
   CHECK(editor.brep().loop(quad.loop).start == coedge);
 
+  // The highest live pcurve index is still in range.
+  const std::uint32_t top =
+      editor.add_pcurve(Pcurve2d{{Point2d{0.0, 0.0}, Point2d{1.0, 1.0}}});
+  REQUIRE(editor.set_coedge_pcurve(coedge, top).has_value());
+  CHECK(editor.brep().coedge(coedge).pcurve == top);
+
   const std::uint32_t out_of_range =
       static_cast<std::uint32_t>(editor.brep().geometry().pcurves.size());
   CHECK(editor.set_coedge_pcurve(coedge, out_of_range).error().code ==
         Errc::index_out_of_range);
-  CHECK(editor.brep().coedge(coedge).pcurve == pcurve);
+  CHECK(editor.brep().coedge(coedge).pcurve == top);
 
   REQUIRE(editor.set_coedge_pcurve(coedge, kNoGeometry).has_value());
   CHECK(editor.brep().coedge(coedge).pcurve == kNoGeometry);
@@ -225,15 +240,25 @@ TEST_CASE("heal editor: edge geometry round-trips and validates") {
   CHECK(editor.brep().edge(edge).t0 == 0.0);
   CHECK(editor.brep().edge(edge).t1 == 2.0);
 
+  // The highest live curve index is still in range.
+  const std::uint32_t top = editor.add_curve(LineCurve3{});
+  REQUIRE(editor.set_edge_geometry(edge, top, 0.0, 1.0).has_value());
+  CHECK(editor.brep().edge(edge).curve == top);
+
   const std::uint32_t out_of_range =
       static_cast<std::uint32_t>(editor.brep().geometry().curves.size());
   CHECK(editor.set_edge_geometry(edge, out_of_range, 0.0, 1.0).error().code ==
         Errc::index_out_of_range);
-  CHECK(editor.brep().edge(edge).curve == curve);
+  CHECK(editor.brep().edge(edge).curve == top);
 
+  // Descending and empty intervals are rejected without changing the edge.
+  CHECK(editor.set_edge_geometry(edge, kNoGeometry, 2.0, 1.0).error().code ==
+        Errc::degenerate);
   CHECK(editor.set_edge_geometry(edge, kNoGeometry, 1.0, 1.0).error().code ==
         Errc::degenerate);
-  CHECK(editor.brep().edge(edge).curve == curve);
+  CHECK(editor.brep().edge(edge).curve == top);
+  CHECK(editor.brep().edge(edge).t0 == 0.0);
+  CHECK(editor.brep().edge(edge).t1 == 1.0);
   REQUIRE(editor.set_edge_geometry(edge, kNoGeometry, 0.0, 1.0).has_value());
   CHECK(editor.brep().edge(edge).curve == kNoGeometry);
 
@@ -289,6 +314,198 @@ TEST_CASE("heal editor: the tolerance cap is enforced at the edge level") {
   const Result<double> rejected = editor.raise_tolerances(0.02);
   CHECK(rejected.error().code == Errc::tolerance_violation);
   CHECK(editor.brep().edge(quad.edges[0]).tol == 0.0);
+}
+
+TEST_CASE("heal editor: a vertex weld keeps the larger tolerance") {
+  SolidEditor editor;
+  const VertexId keep = editor.add_vertex(Point3d{0.0, 0.0, 0.0}, 0.5).value();
+  const VertexId drop = editor.add_vertex(Point3d{0.01, 0.0, 0.0}, 0.2).value();
+
+  REQUIRE(editor.merge_vertices(keep, drop).has_value());
+  CHECK(editor.brep().vertex(keep).tol == 0.5);
+  CHECK_FALSE(editor.brep().vertex_alive(drop));
+}
+
+TEST_CASE("heal editor: merging edges keeps the survivor's curve") {
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(Plane3{});
+  const std::uint32_t first_curve = editor.add_curve(LineCurve3{});
+  const std::uint32_t second_curve = editor.add_curve(LineCurve3{});
+  const QuadFace left =
+      add_quad_face(editor, surface, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, first_curve, 2.0);
+  const QuadFace right =
+      add_quad_face(editor, surface, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, second_curve, 3.0);
+  REQUIRE(editor.merge_vertices(left.vertices[1], right.vertices[0]).has_value());
+  REQUIRE(editor.merge_vertices(left.vertices[2], right.vertices[3]).has_value());
+  REQUIRE(editor.merge_edges(left.edges[1], right.edges[3]).has_value());
+
+  // The survivor already owns geometry, so the dropped edge's curve and
+  // parameter interval must not replace it.
+  CHECK(editor.brep().edge(left.edges[1]).curve == first_curve);
+  CHECK(editor.brep().edge(left.edges[1]).t0 == 0.0);
+  CHECK(editor.brep().edge(left.edges[1]).t1 == 2.0);
+}
+
+TEST_CASE("heal editor: merging edges rejects dead seam endpoints") {
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(Plane3{});
+  const QuadFace left = add_quad_face(editor, surface, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+  const VertexId top_right = editor.add_vertex(Point3d{2.0, 1.0, 0.0}, 0.0).value();
+  const VertexId bottom_right = editor.add_vertex(Point3d{2.0, 0.0, 0.0}, 0.0).value();
+  // The right quad shares the seam (left.vertices[1] -> left.vertices[2]) and
+  // therefore both of its endpoint handles.
+  const EdgeId seam =
+      editor
+          .add_edge(left.vertices[1], left.vertices[2], kNoGeometry, 0.0, 1.0, 0.0)
+          .value();
+  const EdgeId top =
+      editor
+          .add_edge(left.vertices[2], top_right, kNoGeometry, 0.0, 1.0, 0.0)
+          .value();
+  const EdgeId outer =
+      editor.add_edge(top_right, bottom_right, kNoGeometry, 0.0, 1.0, 0.0).value();
+  const EdgeId bottom =
+      editor
+          .add_edge(bottom_right, left.vertices[1], kNoGeometry, 0.0, 1.0, 0.0)
+          .value();
+  const FaceId right_face = editor.add_face(surface, false, 0.0).value();
+  std::vector<CoedgeSpec> right_loop{CoedgeSpec{seam}, CoedgeSpec{top}, CoedgeSpec{outer},
+                                     CoedgeSpec{bottom}};
+  const Result<LoopId> right_loop_id = editor.add_loop(right_face, right_loop, true);
+  REQUIRE(right_loop_id.has_value());
+  REQUIRE(editor.erase_vertex(left.vertices[1]).has_value());
+
+  const Result<void> merged = editor.merge_edges(left.edges[1], seam);
+  CHECK_FALSE(merged.has_value());
+  if (!merged.has_value()) CHECK(merged.error().code == Errc::invalid_topology);
+  // A rejected merge must not release its handles or retarget coedges.
+  CHECK(editor.brep().edge_alive(left.edges[1]));
+  CHECK(editor.brep().edge_alive(seam));
+  CHECK(editor.brep().coedge(editor.brep().loop(right_loop_id.value()).start).edge ==
+        seam);
+}
+
+TEST_CASE("heal editor: closing a shell ignores uses from other shells") {
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(Plane3{});
+  const QuadFace front = add_quad_face(editor, surface, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+  const FaceId back = editor.add_face(surface, false, 0.0).value();
+  std::vector<CoedgeSpec> back_loop{CoedgeSpec{front.edges[3], true},
+                                    CoedgeSpec{front.edges[2], true},
+                                    CoedgeSpec{front.edges[1], true},
+                                    CoedgeSpec{front.edges[0], true}};
+  REQUIRE(editor.add_loop(back, back_loop, true).has_value());
+  const ShellId closed_shell =
+      editor.add_shell(std::array<FaceId, 2>{front.face, back}, false).value();
+
+  // An outside face reuses one of the shell's edges; that extra use must not
+  // count against the shell's own two uses.
+  const FaceId outside = editor.add_face(surface, false, 0.0).value();
+  REQUIRE(editor
+              .add_loop(outside, std::array<CoedgeSpec, 1>{CoedgeSpec{front.edges[0]}}, true)
+              .has_value());
+  REQUIRE(editor.add_shell(std::array<FaceId, 1>{outside}, false).has_value());
+
+  REQUIRE(editor.set_shell_closed(closed_shell, true).has_value());
+  CHECK(editor.brep().shell(closed_shell).closed);
+}
+
+TEST_CASE("heal editor: closing a shell rejects a third in-shell use") {
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(Plane3{});
+  const QuadFace front = add_quad_face(editor, surface, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+  const FaceId back = editor.add_face(surface, false, 0.0).value();
+  std::vector<CoedgeSpec> back_loop{CoedgeSpec{front.edges[3], true},
+                                    CoedgeSpec{front.edges[2], true},
+                                    CoedgeSpec{front.edges[1], true},
+                                    CoedgeSpec{front.edges[0], true}};
+  REQUIRE(editor.add_loop(back, back_loop, true).has_value());
+  const FaceId fin = editor.add_face(surface, false, 0.0).value();
+  REQUIRE(editor
+              .add_loop(fin, std::array<CoedgeSpec, 1>{CoedgeSpec{front.edges[0]}}, true)
+              .has_value());
+  const ShellId shell =
+      editor.add_shell(std::array<FaceId, 3>{front.face, back, fin}, false).value();
+
+  const Result<void> closed = editor.set_shell_closed(shell, true);
+  CHECK_FALSE(closed.has_value());
+  if (!closed.has_value()) CHECK(closed.error().code == Errc::not_closed);
+  CHECK_FALSE(editor.brep().shell(shell).closed);
+}
+
+TEST_CASE("heal editor: a failed tolerance raise leaves every level unchanged") {
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(Plane3{});
+  const QuadFace quad =
+      add_quad_face_without_loop(editor, surface, 0.0, 0.0, 1.0, 0.01, 0.0, 0.01);
+  std::vector<CoedgeSpec> loop{CoedgeSpec{quad.edges[0], false, kNoGeometry, 0.05},
+                               CoedgeSpec{quad.edges[1]}, CoedgeSpec{quad.edges[2]},
+                               CoedgeSpec{quad.edges[3]}};
+  const Result<LoopId> loop_id = editor.add_loop(quad.face, loop, true);
+  REQUIRE(loop_id.has_value());
+  const ShellId shell = editor.add_shell(std::array<FaceId, 1>{quad.face}, false).value();
+  const SolidId solid = editor.add_solid(std::array<ShellId, 1>{shell}, 0.0).value();
+  const CoedgeId first_coedge = editor.brep().loop(loop_id.value()).start;
+
+  // Edges would legally rise to 0.01 under a 0.02 cap, but the coedge's 0.05
+  // pushes the face (and solid) over it. The whole raise must be rejected.
+  const Result<double> rejected = editor.raise_tolerances(0.02);
+  CHECK_FALSE(rejected.has_value());
+  if (!rejected.has_value()) CHECK(rejected.error().code == Errc::tolerance_violation);
+  CHECK(editor.brep().edge(quad.edges[0]).tol == 0.0);
+  CHECK(editor.brep().face(quad.face).tol == 0.01);
+  CHECK(editor.brep().coedge(first_coedge).tol == 0.05);
+  CHECK(editor.brep().solid(solid).tol == 0.0);
+}
+
+TEST_CASE("heal editor: a coedge tolerance raises its face and solid") {
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(Plane3{});
+  const QuadFace quad =
+      add_quad_face_without_loop(editor, surface, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+  std::vector<CoedgeSpec> loop{CoedgeSpec{quad.edges[0], false, kNoGeometry, 0.05},
+                               CoedgeSpec{quad.edges[1]}, CoedgeSpec{quad.edges[2]},
+                               CoedgeSpec{quad.edges[3]}};
+  REQUIRE(editor.add_loop(quad.face, loop, true).has_value());
+  const ShellId shell = editor.add_shell(std::array<FaceId, 1>{quad.face}, false).value();
+  const SolidId solid = editor.add_solid(std::array<ShellId, 1>{shell}, 0.0).value();
+
+  // A value exactly at the cap is allowed, not rejected.
+  const Result<double> raised = editor.raise_tolerances(0.05);
+  REQUIRE(raised.has_value());
+  CHECK(raised.value() == 0.05);
+  CHECK(editor.brep().face(quad.face).tol == 0.05);
+  CHECK(editor.brep().solid(solid).tol == 0.05);
+  CHECK(editor.brep().edge(quad.edges[0]).tol == 0.0);
+}
+
+TEST_CASE("heal editor: raise_tolerances reports the largest value it set") {
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(Plane3{});
+  const QuadFace quad =
+      add_quad_face(editor, surface, 0.0, 0.0, 1.0, 0.02, 0.0, 0.05);
+  const ShellId shell = editor.add_shell(std::array<FaceId, 1>{quad.face}, false).value();
+  const SolidId solid = editor.add_solid(std::array<ShellId, 1>{shell}, 0.0).value();
+
+  const Result<double> raised = editor.raise_tolerances(0.06);
+  REQUIRE(raised.has_value());
+  // The face was already at 0.05; only the solid is raised to it.
+  CHECK(raised.value() == 0.05);
+  CHECK(editor.brep().edge(quad.edges[0]).tol == 0.02);
+  CHECK(editor.brep().face(quad.face).tol == 0.05);
+  CHECK(editor.brep().solid(solid).tol == 0.05);
+}
+
+TEST_CASE("heal editor: clearing the closed flag needs no closure check") {
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(Plane3{});
+  const QuadFace sheet = add_quad_face(editor, surface, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+  const ShellId shell = editor.add_shell(std::array<FaceId, 1>{sheet.face}, false).value();
+
+  REQUIRE(editor.set_shell_closed(shell, false).has_value());
+  CHECK_FALSE(editor.brep().shell(shell).closed);
+  CHECK(editor.set_shell_closed(shell, true).error().code == Errc::not_closed);
+  CHECK_FALSE(editor.brep().shell(shell).closed);
 }
 
 }  // namespace

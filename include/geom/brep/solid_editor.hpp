@@ -371,6 +371,11 @@ class SolidEditor {
     }
     Edge keep_edge = staged_.edge(keep);
     const Edge drop_edge = staged_.edge(drop);
+    if (!staged_.vertex_alive(keep_edge.v0) || !staged_.vertex_alive(keep_edge.v1) ||
+        !staged_.vertex_alive(drop_edge.v0) || !staged_.vertex_alive(drop_edge.v1)) {
+      return Error{Errc::invalid_topology, "solid_editor: merge edge endpoint is not alive",
+                   keep.index(), drop.index()};
+    }
     const bool same_order =
         keep_edge.v0 == drop_edge.v0 && keep_edge.v1 == drop_edge.v1;
     const bool flipped = keep_edge.v0 == drop_edge.v1 && keep_edge.v1 == drop_edge.v0;
@@ -530,6 +535,7 @@ class SolidEditor {
       if (id.is_null()) continue;
       double target = staged_.solids_[i].tol;
       for (const ShellId shell : staged_.solid_shells(id)) {
+        if (!staged_.shell_alive(shell)) continue;
         for (const FaceId face : staged_.shell_faces(shell)) {
           if (staged_.face_alive(face)) {
             target = std::max(target, face_targets[face.index()]);
