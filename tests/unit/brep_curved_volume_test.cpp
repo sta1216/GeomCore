@@ -26,7 +26,6 @@
 namespace {
 
 constexpr double kPi = std::numbers::pi_v<double>;
-constexpr double kTwoPi = 2.0 * kPi;
 constexpr double kTolerance = 1e-9;
 
 double relative_error(double actual, double expected) {

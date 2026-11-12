@@ -309,13 +309,13 @@ inline void trim_face_apply_inserts_with_arcs(
   rebuilt.reserve(count + inserts.size());
   rebuilt_arcs.reserve(count + inserts.size());
   for (std::size_t i = 0; i < count; ++i) {
-    const std::optional<FaceUvArcRef> source =
-        i < arcs.size() ? arcs[i] : std::nullopt;
-    double start_t = source ? source->t0 : 0.0;
+    const FaceUvArcRef* source =
+        i < arcs.size() && arcs[i].has_value() ? &*arcs[i] : nullptr;
+    double start_t = source != nullptr ? source->t0 : 0.0;
     rebuilt.push_back(ring[i]);
     for (const std::pair<double, Point2d>& entry : extra[i]) {
       double angle = start_t;
-      if (source && split_angle(*source, entry.second, angle)) {
+      if (source != nullptr && split_angle(*source, entry.second, angle)) {
         rebuilt_arcs.push_back(FaceUvArcRef{source->circle, start_t, angle});
         start_t = angle;
       } else {

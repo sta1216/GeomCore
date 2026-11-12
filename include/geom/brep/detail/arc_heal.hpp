@@ -28,7 +28,7 @@
 #include <geom/primitives/vec.hpp>
 
 namespace geom {
-namespace v1 {
+inline namespace v1 {
 namespace detail {
 namespace arc_heal_detail {
 
