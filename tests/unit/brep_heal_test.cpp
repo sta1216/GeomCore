@@ -378,7 +378,11 @@ TEST_CASE("heal: a partially sewn sheet is rejected without a partial stitch") {
   REQUIRE(healed.has_value());
   const HealResult& result = healed.value();
   CHECK_FALSE(result.report.changed);
+  CHECK(result.report.boundary_edges == 8u);
+  CHECK(result.report.welded_vertices == 0u);
   CHECK(result.report.sewn_edges == 0u);
+  CHECK(result.report.max_closed_gap == 0.0);
+  CHECK(result.report.max_tolerance == 0.0);
   CHECK(result.brep.vertex_count() == sheet.brep.vertex_count());
   CHECK(result.brep.edge_count() == sheet.brep.edge_count());
   REQUIRE(result.report.issues.size() == 2u);
@@ -405,4 +409,130 @@ TEST_CASE("heal: the tolerance cap is checked before welding") {
   CHECK(result.report.issues.front().kind == HealIssueKind::invalid_result);
   CHECK(std::string_view(result.report.issues.front().message) ==
         "heal_brep: tolerance cap exceeded");
+}
+
+TEST_CASE("heal: a one-sided nearest preference is not sewn") {
+  const test::AsymmetricPreference fixture =
+      test::make_asymmetric_preference_sheet(1e-6);
+  const std::array<EdgeId, 5> boundary{fixture.three[0], fixture.three[1],
+                                       fixture.three[2], fixture.two[0],
+                                       fixture.two[1]};
+
+  const auto plan_result = detail::heal_plan(fixture.brep, boundary, 1.0);
+  REQUIRE(plan_result.has_value());
+  const detail::HealPlan& plan = plan_result.value();
+  CHECK(plan.issues.empty());
+  REQUIRE(plan.pairs.size() == 2u);
+  for (const detail::HealEdgePair& pair : plan.pairs) {
+    CHECK(pair.keep.index() != fixture.three[2].index());
+    CHECK(pair.drop.index() != fixture.three[2].index());
+  }
+}
+
+TEST_CASE("heal: different faces sharing a vertex are not candidates") {
+  const test::SharedVertexSheets fixture = test::make_shared_vertex_sheets();
+  const std::array<EdgeId, 2> boundary{fixture.first, fixture.second};
+
+  const auto plan_result = detail::heal_plan(fixture.brep, boundary, 1.0);
+  REQUIRE(plan_result.has_value());
+  CHECK(plan_result.value().pairs.empty());
+  CHECK(plan_result.value().issues.empty());
+}
+
+TEST_CASE("heal: weld chains collapse to one live keep") {
+  SolidEditor editor;
+  const auto v0 = editor.add_vertex({0.0, 0.0, 0.0}, 0).value();
+  const auto v1 = editor.add_vertex({1.0, 0.0, 0.0}, 0).value();
+  const auto v2 = editor.add_vertex({2.0, 0.0, 0.0}, 0).value();
+  const auto v3 = editor.add_vertex({3.0, 0.0, 0.0}, 0).value();
+  const auto dead = editor.add_vertex({4.0, 0.0, 0.0}, 0).value();
+  REQUIRE(editor.merge_vertices(v0, dead).has_value());
+  const Brep base = editor.brep();
+
+  std::vector<detail::HealEdgePair> pairs(4);
+  pairs[0].welds = {detail::HealVertexWeld{v0, v1},
+                    detail::HealVertexWeld{v0, v1}};
+  pairs[1].welds = {detail::HealVertexWeld{v1, v2},
+                    detail::HealVertexWeld{v1, v2}};
+  pairs[2].welds = {detail::HealVertexWeld{v2, v3},
+                    detail::HealVertexWeld{v2, v3}};
+  pairs[3].welds = {detail::HealVertexWeld{v0, dead},
+                    detail::HealVertexWeld{v0, dead}};
+
+  const auto deduped = detail::heal_dedup_welds(base, pairs);
+  REQUIRE(deduped.has_value());
+  CHECK(deduped.value().size() == 3u);
+
+  SolidEditor apply_editor(base);
+  const auto applied = detail::heal_apply_welds(apply_editor, deduped.value());
+  REQUIRE(applied.has_value());
+  CHECK(applied.value().size() == 3u);
+  CHECK(detail::heal_live_weld_count(apply_editor.brep(), applied.value()) == 1u);
+  CHECK(apply_editor.brep().vertex_alive(v0));
+  CHECK_FALSE(apply_editor.brep().vertex_alive(v1));
+  CHECK_FALSE(apply_editor.brep().vertex_alive(v2));
+  CHECK_FALSE(apply_editor.brep().vertex_alive(v3));
+  CHECK_FALSE(apply_editor.brep().vertex_alive(dead));
+}
+
+TEST_CASE("heal: a curved face is rejected before planning") {
+  const Brep cylinder =
+      make_cylinder({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 1.0, 1.0, 0.0).value();
+  const auto healed = heal_brep(cylinder, cylinder.solid_ids().front(), {});
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::unsupported);
+  CHECK(std::string_view(healed.error().message) ==
+        "heal_brep: curved geometry is not supported yet");
+}
+
+TEST_CASE("heal: unknown solid handles are index errors") {
+  const test::TornSheet sheet = test::make_torn_sheet(1e-6);
+  const SolidId stale = SolidId::make(
+      sheet.solid.index(),
+      static_cast<std::uint8_t>(sheet.solid.generation() + 1u));
+  const SolidId out_of_range = SolidId::make(
+      static_cast<std::uint32_t>(sheet.brep.solids().size() + 7u), 0);
+  for (const SolidId solid : {SolidId{}, stale, out_of_range}) {
+    const auto healed = heal_brep(sheet.brep, solid, {});
+    REQUIRE_FALSE(healed.has_value());
+    CHECK(healed.error().code == Errc::index_out_of_range);
+    CHECK(std::string_view(healed.error().message) ==
+          "heal_brep: unknown solid");
+  }
+}
+
+TEST_CASE("heal: a boundary edge shared with another solid is rejected") {
+  SolidEditor editor;
+  const auto surface = editor.add_surface(Plane3{{0.0, 0.0, 1.0}, 0.0});
+  const auto v0 = editor.add_vertex({0.0, 0.0, 0.0}, 0).value();
+  const auto v1 = editor.add_vertex({1.0, 0.0, 0.0}, 0).value();
+  const auto v2 = editor.add_vertex({0.0, 1.0, 0.0}, 0).value();
+  const auto v3 = editor.add_vertex({-1.0, 0.0, 0.0}, 0).value();
+
+  const auto shared = editor.add_edge(v0, v1, kNoGeometry, 0, 1, 0).value();
+  const auto a1 = editor.add_edge(v1, v2, kNoGeometry, 0, 1, 0).value();
+  const auto a2 = editor.add_edge(v2, v0, kNoGeometry, 0, 1, 0).value();
+  const auto a_face = editor.add_face(surface, false, 0).value();
+  const CoedgeSpec a_loop[] = {{shared, false}, {a1, false}, {a2, false}};
+  REQUIRE(editor.add_loop(a_face, a_loop, true).has_value());
+  const auto a_shell =
+      editor.add_shell(std::array<FaceId, 1>{a_face}, false).value();
+  const SolidId solid_a =
+      editor.add_solid(std::array<ShellId, 1>{a_shell}, 0).value();
+
+  const auto b1 = editor.add_edge(v0, v3, kNoGeometry, 0, 1, 0).value();
+  const auto b2 = editor.add_edge(v3, v1, kNoGeometry, 0, 1, 0).value();
+  const auto b_face = editor.add_face(surface, false, 0).value();
+  const CoedgeSpec b_loop[] = {{shared, true}, {b1, false}, {b2, false}};
+  REQUIRE(editor.add_loop(b_face, b_loop, true).has_value());
+  const auto b_shell =
+      editor.add_shell(std::array<FaceId, 1>{b_face}, false).value();
+  REQUIRE(editor.add_solid(std::array<ShellId, 1>{b_shell}, 0).has_value());
+  const Brep brep = editor.commit().value();
+
+  const auto healed = heal_brep(brep, solid_a, {});
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::invalid_topology);
+  CHECK(std::string_view(healed.error().message) ==
+        "heal_brep: boundary edge is shared with another solid");
 }

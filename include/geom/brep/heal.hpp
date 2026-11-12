@@ -125,6 +125,85 @@ struct HealPlan {
   std::vector<HealIssue> issues;
 };
 
+// Builds the deduplicated vertex-weld map for a plan. Entries whose keep or
+// drop handle is no longer alive are skipped. A drop mapped to two different
+// keeps (or a keep to two different drops) is inconsistent.
+inline Result<std::vector<HealVertexWeld>> heal_dedup_welds(
+    const Brep& brep, std::span<const HealEdgePair> pairs) {
+  const std::size_t vertex_slots = brep.vertices().size();
+  std::vector<std::uint32_t> drop_to_keep(vertex_slots, kNoEntity);
+  std::vector<std::uint32_t> keep_to_drop(vertex_slots, kNoEntity);
+  std::vector<HealVertexWeld> welds;
+  for (const HealEdgePair& pair : pairs) {
+    for (const HealVertexWeld& weld : pair.welds) {
+      const std::uint32_t keep_index = weld.keep.index();
+      const std::uint32_t drop_index = weld.drop.index();
+      if (keep_index >= vertex_slots || drop_index >= vertex_slots) {
+        return Error{Errc::invalid_topology,
+                     "heal_brep: weld map is inconsistent", 0, 0};
+      }
+      if (!brep.vertex_alive(weld.keep) || !brep.vertex_alive(weld.drop)) {
+        continue;
+      }
+      if (drop_to_keep[drop_index] != kNoEntity &&
+          drop_to_keep[drop_index] != keep_index) {
+        return Error{Errc::invalid_topology,
+                     "heal_brep: weld map is inconsistent", 0, 0};
+      }
+      if (keep_to_drop[keep_index] != kNoEntity &&
+          keep_to_drop[keep_index] != drop_index) {
+        return Error{Errc::invalid_topology,
+                     "heal_brep: weld map is inconsistent", 0, 0};
+      }
+      if (drop_to_keep[drop_index] == kNoEntity) {
+        drop_to_keep[drop_index] = keep_index;
+        keep_to_drop[keep_index] = drop_index;
+        welds.push_back(weld);
+      }
+    }
+  }
+  return welds;
+}
+
+// Applies welds in descending drop order so a chain v0<-v1<-v2 collapses to a
+// single live keep. Handles that became dead earlier in the chain are skipped.
+inline Result<std::vector<HealVertexWeld>> heal_apply_welds(
+    SolidEditor& editor, std::span<const HealVertexWeld> welds) {
+  std::vector<HealVertexWeld> ordered(welds.begin(), welds.end());
+  std::sort(ordered.begin(), ordered.end(),
+            [](const HealVertexWeld& a, const HealVertexWeld& b) {
+              return a.drop.index() > b.drop.index();
+            });
+  std::vector<HealVertexWeld> applied;
+  applied.reserve(ordered.size());
+  for (const HealVertexWeld& weld : ordered) {
+    if (!editor.brep().vertex_alive(weld.keep) ||
+        !editor.brep().vertex_alive(weld.drop)) {
+      continue;
+    }
+    const Result<void> merged = editor.merge_vertices(weld.keep, weld.drop);
+    if (!merged) return merged.error();
+    applied.push_back(weld);
+  }
+  return applied;
+}
+
+inline std::uint32_t heal_live_weld_count(
+    const Brep& brep, std::span<const HealVertexWeld> welds) {
+  std::vector<char> seen(brep.vertices().size(), 0);
+  std::uint32_t count = 0;
+  for (const HealVertexWeld& weld : welds) {
+    if (!brep.vertex_alive(weld.keep) || weld.keep.index() >= seen.size()) {
+      continue;
+    }
+    if (seen[weld.keep.index()] == 0) {
+      seen[weld.keep.index()] = 1;
+      ++count;
+    }
+  }
+  return count;
+}
+
 namespace heal_detail {
 
 inline double point_distance(const Point3d& a, const Point3d& b) {
@@ -272,6 +351,9 @@ inline Result<HealPlan> heal_plan(const Brep& brep,
   HealPlan plan;
   if (boundary.empty()) return plan;
 
+  // When heal_brep calls this, it has already rejected boundary edges shared
+  // with another solid, so every coedge of a boundary edge belongs to the
+  // target solid. The first use is therefore a sound direction reference.
   std::vector<CoedgeId> first_coedge(brep.edges().size(), CoedgeId{});
   for (const CoedgeId coedge_id : brep.coedge_ids()) {
     const Coedge& coedge = brep.coedge(coedge_id);
@@ -534,7 +616,7 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
                  "heal_brep: max_tolerance must be finite and positive", 0, 0};
   }
   if (!brep.solid_alive(solid)) {
-    return Error{Errc::invalid_topology, "heal_brep: unknown solid", 0, 0};
+    return Error{Errc::index_out_of_range, "heal_brep: unknown solid", 0, 0};
   }
 
   const ValidationReport topology = validate_topology(brep);
@@ -544,6 +626,40 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
   }
 
   const std::vector<EdgeId> boundary = detail::heal_boundary_edges(brep, solid);
+
+  // A boundary edge is only safe to stitch when both of its uses belong to the
+  // target solid. If the other use is on another solid, the edge is shared and
+  // heal_plan would otherwise pair the target's face with a face it must not
+  // modify.
+  std::vector<char> solid_faces(brep.faces().size(), 0);
+  for (const ShellId shell : brep.solid_shells(solid)) {
+    if (!brep.shell_alive(shell)) continue;
+    for (const FaceId face_id : brep.shell_faces(shell)) {
+      if (brep.face_alive(face_id) && face_id.index() < solid_faces.size()) {
+        solid_faces[face_id.index()] = 1;
+      }
+    }
+  }
+  std::vector<std::vector<CoedgeId>> edge_coedges(brep.edges().size());
+  for (const CoedgeId coedge_id : brep.coedge_ids()) {
+    const Coedge& coedge = brep.coedge(coedge_id);
+    if (brep.edge_alive(coedge.edge) &&
+        coedge.edge.index() < edge_coedges.size()) {
+      edge_coedges[coedge.edge.index()].push_back(coedge_id);
+    }
+  }
+  for (const EdgeId edge_id : boundary) {
+    for (const CoedgeId coedge_id : edge_coedges[edge_id.index()]) {
+      const FaceId face_id = brep.coedge(coedge_id).face;
+      if (!brep.face_alive(face_id) || face_id.index() >= solid_faces.size() ||
+          solid_faces[face_id.index()] == 0) {
+        return Error{Errc::invalid_topology,
+                     "heal_brep: boundary edge is shared with another solid", 0,
+                     0};
+      }
+    }
+  }
+
   const auto& surfaces = brep.geometry().surfaces;
   const auto& curves = brep.geometry().curves;
   for (const ShellId shell : brep.solid_shells(solid)) {
@@ -634,54 +750,16 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
     }
   }
 
-  const std::size_t vertex_slots = brep.vertices().size();
-  std::vector<std::uint32_t> drop_to_keep(vertex_slots, kNoEntity);
-  std::vector<std::uint32_t> keep_to_drop(vertex_slots, kNoEntity);
-  std::vector<detail::HealVertexWeld> welds;
-  for (const detail::HealEdgePair& pair : plan.pairs) {
-    for (const detail::HealVertexWeld& weld : pair.welds) {
-      const std::uint32_t keep_index = weld.keep.index();
-      const std::uint32_t drop_index = weld.drop.index();
-      if (keep_index >= vertex_slots || drop_index >= vertex_slots) {
-        return Error{Errc::invalid_topology,
-                     "heal_brep: weld map is inconsistent", 0, 0};
-      }
-      if (drop_to_keep[drop_index] != kNoEntity &&
-          drop_to_keep[drop_index] != keep_index) {
-        return Error{Errc::invalid_topology,
-                     "heal_brep: weld map is inconsistent", 0, 0};
-      }
-      if (keep_to_drop[keep_index] != kNoEntity &&
-          keep_to_drop[keep_index] != drop_index) {
-        return Error{Errc::invalid_topology,
-                     "heal_brep: weld map is inconsistent", 0, 0};
-      }
-      if (drop_to_keep[drop_index] == kNoEntity) {
-        drop_to_keep[drop_index] = keep_index;
-        keep_to_drop[keep_index] = drop_index;
-        welds.push_back(weld);
-      }
-    }
-  }
-
-  std::sort(welds.begin(), welds.end(),
-            [](const detail::HealVertexWeld& a,
-               const detail::HealVertexWeld& b) {
-              return a.drop.index() > b.drop.index();
-            });
+  const Result<std::vector<detail::HealVertexWeld>> welds_result =
+      detail::heal_dedup_welds(brep, plan.pairs);
+  if (!welds_result) return welds_result.error();
 
   SolidEditor editor(brep);
-  std::vector<detail::HealVertexWeld> applied_welds;
-  applied_welds.reserve(welds.size());
-  for (const detail::HealVertexWeld& weld : welds) {
-    if (!editor.brep().vertex_alive(weld.keep) ||
-        !editor.brep().vertex_alive(weld.drop)) {
-      continue;
-    }
-    const Result<void> merged = editor.merge_vertices(weld.keep, weld.drop);
-    if (!merged) return reject(merged.error().message, true);
-    applied_welds.push_back(weld);
-  }
+  const Result<std::vector<detail::HealVertexWeld>> applied_result =
+      detail::heal_apply_welds(editor, welds_result.value());
+  if (!applied_result) return reject(applied_result.error().message, true);
+  const std::vector<detail::HealVertexWeld>& applied_welds =
+      applied_result.value();
 
   std::uint32_t sewn_edges = 0;
   for (const detail::HealEdgePair& pair : plan.pairs) {
@@ -761,7 +839,7 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
   Result<Brep> committed = editor.commit();
   if (!committed) return reject(committed.error().message, true);
 
-  report.welded_vertices = static_cast<std::uint32_t>(applied_welds.size());
+  report.welded_vertices = detail::heal_live_weld_count(editor.brep(), applied_welds);
   report.sewn_edges = sewn_edges;
   report.changed = report.welded_vertices + report.sewn_edges > 0;
   double max_closed_gap = 0.0;

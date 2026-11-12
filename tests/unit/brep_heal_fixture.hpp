@@ -178,4 +178,81 @@ inline TornSheet make_reversed_keep_sheet(double gap) {
   return fixture_detail::finish(editor, faces, 0.0);
 }
 
+// A 3-edge triangle and a 2-edge part of a second triangle. The nearest
+// candidates form A0-B0 and A1-B1; A2's nearest is B1 but B1 prefers A1, so
+// A2 is a one-sided preference and must not be sewn.
+struct AsymmetricPreference {
+  Brep brep;
+  SolidId solid{};
+  std::array<EdgeId, 3> three{};
+  std::array<EdgeId, 2> two{};
+};
+
+inline AsymmetricPreference make_asymmetric_preference_sheet(double gap) {
+  SolidEditor editor;
+  const auto below = editor.add_surface(Plane3{{0.0, 0.0, 1.0}, 0.0});
+  const auto above = editor.add_surface(Plane3{{0.0, 0.0, 1.0}, gap});
+  const auto a0 = editor.add_vertex({0.229, -0.565, 0.0}, 0).value();
+  const auto a1 = editor.add_vertex({-0.854, -0.197, 0.0}, 0).value();
+  const auto a2 = editor.add_vertex({-0.169, 0.788, 0.0}, 0).value();
+  const auto ae0 = editor.add_edge(a0, a1, kNoGeometry, 0, 1, 0).value();
+  const auto ae1 = editor.add_edge(a1, a2, kNoGeometry, 0, 1, 0).value();
+  const auto ae2 = editor.add_edge(a2, a0, kNoGeometry, 0, 1, 0).value();
+  const auto a_face = editor.add_face(below, false, 0).value();
+  const CoedgeSpec a_loop[] = {{ae0, false}, {ae1, false}, {ae2, false}};
+  fixture_detail::require_ok(editor.add_loop(a_face, a_loop, true));
+
+  const auto b0 = editor.add_vertex({-0.957, -0.301, gap}, 0).value();
+  const auto b1 = editor.add_vertex({-0.474, -0.852, gap}, 0).value();
+  const auto b2 = editor.add_vertex({-0.463, 0.742, gap}, 0).value();
+  const auto be0 = editor.add_edge(b0, b1, kNoGeometry, 0, 1, 0).value();
+  const auto be1 = editor.add_edge(b1, b2, kNoGeometry, 0, 1, 0).value();
+  const auto be2 = editor.add_edge(b2, b0, kNoGeometry, 0, 1, 0).value();
+  const auto b_face = editor.add_face(above, false, 0).value();
+  const CoedgeSpec b_loop[] = {
+      {be0, false}, {be1, true}, {be2, true}};
+  fixture_detail::require_ok(editor.add_loop(b_face, b_loop, true));
+
+  const std::array<FaceId, 2> faces{a_face, b_face};
+  const TornSheet sheet = fixture_detail::finish(editor, faces, 0.0);
+  return {sheet.brep, sheet.solid, {ae0, ae1, ae2}, {be0, be1}};
+}
+
+// Two triangles that meet only at the shared vertex s. Each returned edge is a
+// boundary edge of a different face and both are incident to s, so they are
+// not a candidate pair.
+struct SharedVertexSheets {
+  Brep brep;
+  SolidId solid{};
+  EdgeId first{};
+  EdgeId second{};
+};
+
+inline SharedVertexSheets make_shared_vertex_sheets() {
+  SolidEditor editor;
+  const auto plane = editor.add_surface(Plane3{{0.0, 0.0, 1.0}, 0.0});
+  const auto s = editor.add_vertex({0.0, 0.0, 0.0}, 0).value();
+  const auto a1 = editor.add_vertex({1.0, 0.0, 0.0}, 0).value();
+  const auto a2 = editor.add_vertex({0.0, 1.0, 0.0}, 0).value();
+  const auto ae0 = editor.add_edge(s, a1, kNoGeometry, 0, 1, 0).value();
+  const auto ae1 = editor.add_edge(a1, a2, kNoGeometry, 0, 1, 0).value();
+  const auto ae2 = editor.add_edge(a2, s, kNoGeometry, 0, 1, 0).value();
+  const auto a_face = editor.add_face(plane, false, 0).value();
+  const CoedgeSpec a_loop[] = {{ae0, false}, {ae1, false}, {ae2, false}};
+  fixture_detail::require_ok(editor.add_loop(a_face, a_loop, true));
+
+  const auto b1 = editor.add_vertex({0.8, 0.2, 0.0}, 0).value();
+  const auto b2 = editor.add_vertex({0.2, 0.8, 0.0}, 0).value();
+  const auto be0 = editor.add_edge(s, b1, kNoGeometry, 0, 1, 0).value();
+  const auto be1 = editor.add_edge(b1, b2, kNoGeometry, 0, 1, 0).value();
+  const auto be2 = editor.add_edge(b2, s, kNoGeometry, 0, 1, 0).value();
+  const auto b_face = editor.add_face(plane, false, 0).value();
+  const CoedgeSpec b_loop[] = {{be0, false}, {be1, false}, {be2, false}};
+  fixture_detail::require_ok(editor.add_loop(b_face, b_loop, true));
+
+  const std::array<FaceId, 2> faces{a_face, b_face};
+  const TornSheet sheet = fixture_detail::finish(editor, faces, 0.0);
+  return {sheet.brep, sheet.solid, ae0, be0};
+}
+
 }  // namespace geom::test
