@@ -106,6 +106,50 @@ double fragment_area(const CurvedFragment& fragment) {
   return area;
 }
 
+// The spherical area of the region a seam-only fragment covers, derived from
+// its latitude rings. All of these rings are horizontal circles, so the sign of
+// their projection onto xy tells which side carries the material (the
+// arrangement keeps the material on its left in uv); a ring above the material
+// contributes +2*pi*(1 - z), a ring below contributes -2*pi*(1 - z). The sum is
+// wrapped into [0, 4*pi].
+double spherical_area(const CurvedFragment& fragment) {
+  double sum = 0.0;
+  for (const std::vector<Point3d>& ring : fragment.loops) {
+    REQUIRE(ring.size() >= 3);
+    const double z = ring.front()[2];
+    double projected = 0.0;
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+      const Point3d& a = ring[i];
+      const Point3d& b = ring[(i + 1) % ring.size()];
+      projected += a[0] * b[1] - b[0] * a[1];
+    }
+    const double cap = 2.0 * kPi * (1.0 - z);
+    sum += projected > 0.0 ? cap : -cap;
+  }
+  const double sphere = 4.0 * kPi;
+  double area = std::fmod(sum, sphere);
+  if (area <= 0.0) area += sphere;
+  return area;
+}
+
+// A seam-closed ring stores the two parameter copies of one physical seam point
+// first and last; the implicit closing edge is that seam edge, so the two ends
+// must land on the same 3D point even though the parameter copies differ by a
+// whole turn (their 3D distance is about 2.4e-16, not zero).
+void check_ring_closes(const std::vector<Point3d>& ring) {
+  REQUIRE(ring.size() >= 2);
+  CHECK(norm2(ring.front() - ring.back()) <= 1e-12);
+}
+
+// A rejected split must leave the seam-only input face untouched.
+void check_sphere_face_unchanged(const Brep& sphere, FaceId face) {
+  const Result<std::vector<FaceUvLoop>> loops = face_loops_uv(sphere, face, 1e-9);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1);
+  CHECK(loops.value().front().points.size() == 64);
+  CHECK(signed_area2(loops.value().front().points) == 0.0);
+}
+
 // Converts world points on a planar face into the face's uv frame.
 FaceCut uv_cut(const Brep& brep, FaceId face,
                std::initializer_list<Point3d> points) {
@@ -1525,6 +1569,19 @@ TEST_CASE("trim face: a sphere splits into caps and bands") {
       CHECK(point[2] == doctest::Approx(0.5).epsilon(1e-12));
     }
   }
+
+  // The one cut leaves a cap of area pi and the rest of the sphere, 3*pi. The
+  // ring itself has no uv area: it is the straight latitude line u = 0..2*pi.
+  std::vector<double> areas;
+  for (const CurvedFragment& fragment : result.value()) {
+    areas.push_back(spherical_area(fragment));
+    check_ring_closes(fragment.loops.front());
+  }
+  REQUIRE(areas.size() == 2);
+  std::sort(areas.begin(), areas.end());
+  CHECK(areas[0] == doctest::Approx(kPi).epsilon(1e-12));
+  CHECK(areas[1] == doctest::Approx(3.0 * kPi).epsilon(1e-12));
+  CHECK(areas[0] + areas[1] == doctest::Approx(4.0 * kPi).epsilon(1e-12));
 }
 
 TEST_CASE("trim face: two latitude cuts split a sphere into three bands") {
@@ -1553,9 +1610,12 @@ TEST_CASE("trim face: two latitude cuts split a sphere into three bands") {
 
   // Each ring is a full latitude circle: no ring carries a synthetic side and
   // every ring's points share one exact z coordinate, on the sphere.
+  std::vector<double> areas;
   for (const CurvedFragment& fragment : result.value()) {
+    areas.push_back(spherical_area(fragment));
     for (const std::vector<Point3d>& ring : fragment.loops) {
       REQUIRE(ring.size() == 65);
+      check_ring_closes(ring);
       const double z = ring.front()[2];
       CHECK(std::fabs(z) == doctest::Approx(0.8).epsilon(1e-12));
       for (const Point3d& point : ring) {
@@ -1565,6 +1625,14 @@ TEST_CASE("trim face: two latitude cuts split a sphere into three bands") {
       }
     }
   }
+
+  // Two caps of 0.4*pi and the band between them, 3.2*pi.
+  REQUIRE(areas.size() == 3);
+  CHECK(areas[0] == doctest::Approx(0.4 * kPi).epsilon(1e-12));
+  CHECK(areas[1] == doctest::Approx(3.2 * kPi).epsilon(1e-12));
+  CHECK(areas[2] == doctest::Approx(0.4 * kPi).epsilon(1e-12));
+  CHECK(areas[0] + areas[1] + areas[2] ==
+        doctest::Approx(4.0 * kPi).epsilon(1e-12));
 }
 
 TEST_CASE("trim face: an open cut on a seam-only face is unsupported") {
@@ -1581,6 +1649,7 @@ TEST_CASE("trim face: an open cut on a seam-only face is unsupported") {
   CHECK(result.error().code == Errc::unsupported);
   CHECK(std::string_view(result.error().message) ==
         "split_face_curved: open cuts on a seam-only face");
+  check_sphere_face_unchanged(sphere, face);
 }
 
 TEST_CASE("trim face: a cut outside the sphere parameter domain is unsupported") {
@@ -1600,4 +1669,73 @@ TEST_CASE("trim face: a cut outside the sphere parameter domain is unsupported")
   CHECK(result.error().code == Errc::unsupported);
   CHECK(std::string_view(result.error().message) ==
         "split_face_curved: cut leaves the parameter domain");
+  check_sphere_face_unchanged(sphere, face);
+}
+
+TEST_CASE("trim face: a meridian ring on a seam-only face is unsupported") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  // A closed ring along the seam meridian (u = 0) and the opposite meridian
+  // (u = pi). The u = 0 half lies on the synthetic seam side, so after the
+  // arrangement the cut and the domain boundary cannot be distinguished and the
+  // strip step would delete half the ring.
+  FaceCut cut;
+  for (int i = 0; i <= 64; ++i) {
+    cut.uv.push_back(Point2d{0.0, -0.5 * kPi + kPi * i / 64.0});
+  }
+  for (int i = 0; i <= 64; ++i) {
+    cut.uv.push_back(Point2d{kPi, 0.5 * kPi - kPi * i / 64.0});
+  }
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message).find("boundary") !=
+        std::string_view::npos);
+  check_sphere_face_unchanged(sphere, face);
+}
+
+TEST_CASE("trim face: a pole ring on a seam-only face is unsupported") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  // A ring at the north pole lies on the top synthetic side; the cut has zero
+  // length in 3D and must be rejected instead of yielding no fragments.
+  FaceCut cut;
+  for (int i = 0; i <= 64; ++i) {
+    cut.uv.push_back(Point2d{2.0 * kPi * i / 64.0, 0.5 * kPi});
+  }
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message).find("boundary") !=
+        std::string_view::npos);
+  check_sphere_face_unchanged(sphere, face);
+}
+
+TEST_CASE("trim face: an open meridian cut on a seam-only face is unsupported") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  // The two endpoints are on the v sides (the poles), but they are two
+  // different points: a pole-to-pole meridian is an open chain, not a loop.
+  FaceCut cut;
+  for (int i = 0; i <= 64; ++i) {
+    cut.uv.push_back(Point2d{kPi, -0.5 * kPi + kPi * i / 64.0});
+  }
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "split_face_curved: open cuts on a seam-only face");
+  check_sphere_face_unchanged(sphere, face);
 }

@@ -759,13 +759,63 @@ inline std::optional<std::array<double, 4>> trim_face_seam_only_domain(
   return std::nullopt;
 }
 
-// True when the point lies exactly on one of the four parameter-domain sides.
-// The sides are axis-aligned parameter lines, so exact double equality is the
-// right identity: the split stage keeps a touching point exactly.
-inline bool trim_face_seam_only_on_side(
-    const Point2d& point, const std::array<double, 4>& domain) noexcept {
-  return point[0] == domain[0] || point[0] == domain[1] ||
-         point[1] == domain[2] || point[1] == domain[3];
+// True when the value lies within the standard parameter tolerance of one
+// domain side value. The tolerance is the same relative 1e-12 the projection
+// uses for parameter equality; a single point may touch a side (an open cut
+// endpoint on the boundary), but a whole segment may not.
+inline bool trim_face_seam_only_near_side(double value, double side) noexcept {
+  return std::fabs(value - side) <= 1e-12 * std::max(1.0, std::fabs(value));
+}
+
+// True when the segment lies along one domain side. Such a cut cannot be told
+// apart from the synthetic chain on that side after the arrangement, and the
+// strip step would delete it together with the synthetic geometry, so the
+// caller rejects the cut up front.
+inline bool trim_face_seam_only_on_same_side(
+    const Point2d& a, const Point2d& b,
+    const std::array<double, 4>& domain) noexcept {
+  return (trim_face_seam_only_near_side(a[0], domain[0]) &&
+          trim_face_seam_only_near_side(b[0], domain[0])) ||
+         (trim_face_seam_only_near_side(a[0], domain[1]) &&
+          trim_face_seam_only_near_side(b[0], domain[1])) ||
+         (trim_face_seam_only_near_side(a[1], domain[2]) &&
+          trim_face_seam_only_near_side(b[1], domain[2])) ||
+         (trim_face_seam_only_near_side(a[1], domain[3]) &&
+          trim_face_seam_only_near_side(b[1], domain[3]));
+}
+
+// True when the two endpoints are the two parameter copies of one physical
+// seam point: one at each u side with exactly equal v (a periodic u seam), or
+// one at each v side with exactly equal u (a periodic v seam). Requiring the
+// exact other coordinate keeps a chain whose ends are different seam points
+// from being closed by a chord through the surface, and no rule ever joins the
+// two different poles of a sphere.
+inline bool trim_face_seam_only_seam_pair(
+    const Point2d& a, const Point2d& b, const std::array<double, 4>& domain,
+    bool periodic_u, bool periodic_v) noexcept {
+  if (periodic_u && a[1] == b[1] &&
+      ((a[0] == domain[0] && b[0] == domain[1]) ||
+       (a[0] == domain[1] && b[0] == domain[0]))) {
+    return true;
+  }
+  if (periodic_v && a[0] == b[0] &&
+      ((a[1] == domain[2] && b[1] == domain[3]) ||
+       (a[1] == domain[3] && b[1] == domain[2]))) {
+    return true;
+  }
+  return false;
+}
+
+// The ordering key of a ring: its lexicographic minimum. Unlike the ring front
+// it does not depend on where the arrangement's walk started or which way the
+// ring runs, so ring and fragment order are stable under cycle rotation.
+inline Point2d trim_face_seam_only_ring_key(
+    const std::vector<Point2d>& ring) noexcept {
+  Point2d key = ring.front();
+  for (const Point2d& point : ring) {
+    if (trim_face_lex_less(point, key)) key = point;
+  }
+  return key;
 }
 
 // True when the edge lies along one domain side. The arrangement has no source
@@ -890,9 +940,25 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
         }
       }
     }
-    const bool closed = trim_face_same_xy(points.front(), points.back());
-    if (!closed && (!trim_face_seam_only_on_side(points.front(), domain) ||
-                    !trim_face_seam_only_on_side(points.back(), domain))) {
+    // A cut that runs along a domain side would merge with the synthetic chain
+    // on that side; after the strip step its geometry would look synthetic and
+    // disappear. Reject it before the arrangement so no partial work is done.
+    for (std::size_t i = 1; i < points.size(); ++i) {
+      if (trim_face_seam_only_on_same_side(points[i - 1], points[i], domain)) {
+        return Error{Errc::unsupported,
+                     "split_face_curved: cut lies on the parameter domain "
+                     "boundary",
+                     face.index(), cut_index};
+      }
+    }
+    // A cut chain is closed when it ends where it began, or when its two ends
+    // are the two copies of one seam point. Anything else cannot form a loop of
+    // cut geometry on this face.
+    const bool closed =
+        trim_face_same_xy(points.front(), points.back()) ||
+        trim_face_seam_only_seam_pair(points.front(), points.back(), domain,
+                                      projection.periodic_u(), periodic_v);
+    if (!closed) {
       return Error{Errc::unsupported,
                    "split_face_curved: open cuts on a seam-only face",
                    face.index(), cut_index};
@@ -978,11 +1044,25 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
     }
     if (cut_edges == 0) continue;
 
-    // Rotate the walk to a cut edge so a run never straddles the array end.
+    // Start the walk at the first edge of a cut run. The arrangement's face
+    // cycle may start in the middle of a run, which would otherwise split that
+    // run into two partial chains; walking one full turn from a run start
+    // emits every maximal run whole. A cycle with no synthetic edge is one
+    // closed run of its own (a cycle with no cut edge was skipped above).
     std::size_t first_cut = 0;
-    while (first_cut < cycle.size() && synthetic[first_cut] != 0) ++first_cut;
+    for (std::size_t k = 0; k < cycle.size(); ++k) {
+      if (synthetic[k] == 0 &&
+          synthetic[(k + cycle.size() - 1) % cycle.size()] != 0) {
+        first_cut = k;
+        break;
+      }
+    }
 
-    std::vector<std::vector<Point2d>> rings;
+    struct SeamRing {
+      std::vector<Point2d> points;
+      bool seam = false;
+    };
+    std::vector<SeamRing> rings;
     std::size_t i = 0;
     while (i < cycle.size()) {
       const std::size_t index = (first_cut + i) % cycle.size();
@@ -1008,63 +1088,90 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
                              trim_face_finite3(back3) &&
                              front3[0] == back3[0] && front3[1] == back3[1] &&
                              front3[2] == back3[2];
-      // The two u sides are two parameter copies of one physical seam, so a run
-      // that leaves at (u_lo, v) and returns at (u_hi, v) closes at the same 3D
-      // point. The v sides of a torus are one seam in the same way, and a run
-      // that starts and ends at one pole closes there too. Requiring the two
-      // copies to agree in the other coordinate keeps a chain whose ends are
-      // different seam points from being closed by a chord through the surface.
-      const bool seam_close =
-          (front[0] == u_lo || front[0] == u_hi) &&
-          (back[0] == u_lo || back[0] == u_hi) && front[1] == back[1];
-      const bool v_seam_close =
-          (front[1] == v_lo || front[1] == v_hi) &&
-          (back[1] == v_lo || back[1] == v_hi) && front[0] == back[0];
-      const bool pole_close = (front[1] == v_lo && back[1] == v_lo) ||
-                              (front[1] == v_hi && back[1] == v_hi);
-      if (!identical && !seam_close && !v_seam_close && !pole_close) {
-        return Error{Errc::numeric_failure,
-                     "split_face_curved: synthetic boundary chain is open",
-                     face.index(), f};
+      bool seam = false;
+      if (!identical) {
+        // The two u sides are two parameter copies of one physical seam, so a
+        // run that leaves at (u_lo, v) and returns at (u_hi, v) is one
+        // physical loop; the v sides of a torus are one seam in the same way.
+        // Two different poles never close: a chain from one pole to the other
+        // is a meridian, not a loop.
+        seam = trim_face_seam_only_seam_pair(front, back, domain,
+                                             projection.periodic_u(),
+                                             periodic_v);
+        if (!seam) {
+          return Error{Errc::numeric_failure,
+                       "split_face_curved: synthetic boundary chain is open",
+                       face.index(), f};
+        }
       }
-      run.push_back(front);
-      if (run.size() < 3) continue;
-      // Normalize before ordering so the ring front (and therefore the sort
-      // key below) does not depend on the arrangement's starting vertex.
-      trim_face_normalize_ring(run, true);
-      rings.push_back(std::move(run));
+      if (identical) {
+        run.push_back(front);
+        if (run.size() < 3) continue;
+        trim_face_normalize_ring(run, true);
+      } else if (run.size() < 3) {
+        continue;
+      }
+      // A seam pair keeps its two seam copies first and last: the implicit
+      // closing edge is the zero-length seam edge, so the ring does not repeat
+      // its first point and its ends stay the cut chain's ends.
+      rings.push_back(SeamRing{std::move(run), seam});
     }
     if (rings.empty()) continue;
 
-    // Outer first by descending |uv area|; ties are resolved by size and then
-    // lexicographically so the ring order is independent of the arrangement's
-    // vertex ids.
+    // A seam ring is a chain whose implicit closing edge is the zero-length
+    // seam edge, so its uv shoelace area is a chord artefact, not a region
+    // area: it must not be used to choose the outer ring. The seam rings are
+    // the boundary of the full uv domain, so they are the outer boundary of a
+    // fragment and come first; interior closed rings are the holes, ordered by
+    // descending |uv area|. Ties among seam rings (a band has two of them) are
+    // broken by the lexicographic minimum point, which does not depend on
+    // where the arrangement's walk started.
     std::stable_sort(rings.begin(), rings.end(),
-                     [](const std::vector<Point2d>& lhs,
-                        const std::vector<Point2d>& rhs) {
-                       const double lhs_area = std::fabs(signed_area2(lhs));
-                       const double rhs_area = std::fabs(signed_area2(rhs));
-                       if (lhs_area != rhs_area) return lhs_area > rhs_area;
-                       if (lhs.size() != rhs.size()) return lhs.size() > rhs.size();
-                       return trim_face_lex_less(lhs.front(), rhs.front());
+                     [](const SeamRing& lhs, const SeamRing& rhs) {
+                       if (lhs.seam != rhs.seam) return lhs.seam;
+                       if (!lhs.seam) {
+                         const double lhs_area =
+                             std::fabs(signed_area2(lhs.points));
+                         const double rhs_area =
+                             std::fabs(signed_area2(rhs.points));
+                         if (lhs_area != rhs_area) return lhs_area > rhs_area;
+                         if (lhs.points.size() != rhs.points.size()) {
+                           return lhs.points.size() > rhs.points.size();
+                         }
+                       }
+                       return trim_face_lex_less(
+                           trim_face_seam_only_ring_key(lhs.points),
+                           trim_face_seam_only_ring_key(rhs.points));
                      });
     CurvedFragment fragment;
     fragment.reversed = false;
     for (std::size_t l = 0; l < rings.size(); ++l) {
-      // The first ring is already counter-clockwise; every other ring is a
-      // hole and gets the opposite orientation.
-      if (l != 0) trim_face_normalize_ring(rings[l], false);
-      fragment.loops_uv.push_back(std::move(rings[l]));
+      // Interior rings get the outer/hole orientation. A seam ring keeps its
+      // walk direction so its two seam copies stay first and last; its uv area
+      // is zero anyway, so the orientation carries no information.
+      if (!rings[l].seam) {
+        trim_face_normalize_ring(rings[l].points, l == 0);
+      }
+      fragment.loops_uv.push_back(std::move(rings[l].points));
     }
     if (fragment.loops_uv.empty()) continue;
     fragments.push_back(std::move(fragment));
   }
 
+  // A seam-only face always has material on both sides of a closed cut, so an
+  // empty result means the cut geometry was stripped away entirely.
+  if (fragments.empty()) {
+    return Error{Errc::numeric_failure, "split_face_curved: no fragments",
+                 face.index(), 0u};
+  }
+
   std::stable_sort(fragments.begin(), fragments.end(),
                    [](const CurvedFragment& lhs,
                       const CurvedFragment& rhs) noexcept {
-                     const Point2d& la = lhs.loops_uv.front().front();
-                     const Point2d& ra = rhs.loops_uv.front().front();
+                     const Point2d la =
+                         trim_face_seam_only_ring_key(lhs.loops_uv.front());
+                     const Point2d ra =
+                         trim_face_seam_only_ring_key(rhs.loops_uv.front());
                      if (la[0] != ra[0]) return la[0] < ra[0];
                      if (la[1] != ra[1]) return la[1] < ra[1];
                      return lhs.loops_uv.size() < rhs.loops_uv.size();
