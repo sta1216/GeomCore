@@ -192,7 +192,7 @@ TEST_CASE("curved boolean: a sphere face advertises its full uv domain") {
   const Result<Brep> sphere = make_sphere(Point3d{0, 0, 0}, 1.0, 1e-9);
   REQUIRE(sphere.has_value());
   const SolidId solid = sphere.value().solid_ids().front();
-  const std::vector<FaceId> faces = sphere.value().solid_faces(solid);
+  const std::vector<FaceId> faces = sphere.value().face_ids();
   REQUIRE(faces.size() == 1u);
   const Result<detail::CurvedBooleanFaceInfo> info =
       detail::curved_boolean_face_info(sphere.value(), faces.front(), 1e-9);
@@ -205,6 +205,18 @@ TEST_CASE("curved boolean: a sphere face advertises its full uv domain") {
   CHECK(info.value().bounds.hi[0] == doctest::Approx(1.0));
   CHECK(info.value().bounds.lo[1] == doctest::Approx(-1.0));
   CHECK(info.value().bounds.hi[1] == doctest::Approx(1.0));
+  CHECK(info.value().bounds.lo[2] == doctest::Approx(-1.0));
+  CHECK(info.value().bounds.hi[2] == doctest::Approx(1.0));
+}
+
+TEST_CASE("curved boolean: the torus advertises its full uv domain") {
+  const auto domain = detail::curved_boolean_surface_uv_domain(
+      Torus3{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 2.0, 0.5});
+  REQUIRE(domain.has_value());
+  CHECK((*domain)[0] == 0.0);
+  CHECK((*domain)[1] == doctest::Approx(2.0 * 3.14159265358979323846));
+  CHECK((*domain)[2] == 0.0);
+  CHECK((*domain)[3] == doctest::Approx(2.0 * 3.14159265358979323846));
 }
 
 TEST_CASE("curved boolean: the cone domain ends at the axial apex") {
@@ -223,21 +235,23 @@ TEST_CASE("curved boolean: the cone domain ends at the axial apex") {
 
 - [ ] **Step 2: Run it and confirm it fails**
 
-Run: `.\build\tests\Debug\geom_tests.exe --test-case="curved boolean: a failed operation still reports the stage counters"`
-Expected: compile error — `boolean_solid_curved` takes 6 arguments.
+Run: `.\build\tests\Debug\geom_tests.exe --test-case="curved boolean: a sphere face advertises its full uv domain"`.
+Expected: `u[1]` is 0 (not 2π) and the bounds are the xz slice `x=y=0`, so the test fails.
 
 - [ ] **Step 3: Implement**
 
-Add the parameter, zero it on entry (`*failure_report = CurvedBooleanReport{};`), and replace every `return Error{...}` in the function body with a two-line form that copies the locally accumulated counters (the variables ending up in `report` today) into `*failure_report` before returning. Keep the counters in one `CurvedBooleanReport report{};` local used both for the success return and the failure copy; do not add a second set of counters.
+Add `curved_boolean_surface_uv_domain` above `curved_boolean_face_info`. In `curved_boolean_face_info`, after the loop-derived bounds and the periodic clamp, replace all four bounds only when `u_hi - u_lo <= 1e-12 * max(1, max(|u_lo|, |u_hi|))` and the analytic domain exists; recompute the 5×5 chart bounds with the existing `surface_eval` loop. Do not change plane/cylinder behavior.
+
+Add a regression test for the guard: a trimmed torus patch (`R=2`, `r=0.5`, `u in [0, 0.1]`, `v in [0, 0.5]`, four `CircleCurve3` edges) must keep `u = [0, 0.1]`, `v = [0, 0.5]` and a narrow `bounds`; a version that substitutes unconditionally would report the full `4π²` rectangle.
 
 - [ ] **Step 4: Verify**
 
-Run Debug and Release: `.\build\tests\Debug\geom_tests.exe` and `.\build-rel\tests\Release\geom_tests.exe --test-case="*curved*"`.
-Expected: all green; the existing curved boolean tests compile unchanged.
+Run Debug and Release full suites plus `--test-case="*curved*"`. Expected 898+ cases: the sphere/cone/torus/guard cases pass; `boolean_solid_curved` still rejects sphere operands (gate is Task 5).
 
 - [ ] **Step 5: Commit**
 
-`git add -A; git commit -m "feat(m3c2): report curved boolean counters on failure"`
+`git add include/geom/brep/boolean_solid_curved.hpp tests/unit/brep_face_uv_test.cpp; git commit -m "feat(m3c2): synthesize the full uv domain of seam-only faces"`
+
 
 ---
 
