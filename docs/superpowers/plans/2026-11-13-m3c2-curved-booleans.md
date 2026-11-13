@@ -270,8 +270,7 @@ Run Debug and Release full suites plus `--test-case="*curved*"`. Expected 898+ c
 TEST_CASE("trim face: a sphere splits into caps and bands") {
   const Result<Brep> sphere = make_sphere(Point3d{0, 0, 0}, 1.0, 1e-9);
   REQUIRE(sphere.has_value());
-  const SolidId solid = sphere.value().solid_ids().front();
-  const FaceId face = sphere.value().solid_faces(solid).front();
+  const FaceId face = sphere.value().face_ids().front();
 
   // z = 0.5, CCW seen from +z. Only the uv loop is consumed by the splitter.
   const double v = std::asin(0.5);
