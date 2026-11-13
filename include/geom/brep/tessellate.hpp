@@ -16,7 +16,7 @@
 #include <geom/brep/face_uv.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/cgeom/polygon2.hpp>
-#include <geom/cgeom/trimmed_domain.hpp>
+#include <geom/brep/trimmed_domain.hpp>
 #include <geom/core/result.hpp>
 #include <geom/cgeom/triangulate2.hpp>
 #include <geom/curves/analytic_curve.hpp>
@@ -43,8 +43,9 @@ struct TessellationOptions {
   // Maximum distance between a chord and the true curve; a lower value emits more
   // circle edge segments.
   double deflection = 1e-3;
-  // Reserved for curved faces, which are not tessellated yet; it must still be a
-  // valid positive number so callers can pass one option set everywhere.
+  // Validated by tessellate() but not used for sampling: every face samples at
+  // the deflection-derived step, and the adaptive refinement splits on the chord
+  // sag only.
   double angle_tolerance = 0.35;
 };
 
@@ -383,7 +384,7 @@ struct TessellateRing {
 };
 
 inline Result<void> tessellate_planar_face(TessellateState& state, const Brep& brep, FaceId id,
-                                           const TessellationOptions& options) {
+                                       const TessellationOptions& options) {
   const Face& face = brep.face(id);
   if (face.surface >= brep.geometry().surfaces.size()) {
     return Error{Errc::unsupported, "tessellate: only planar faces are supported", id.index(), 0u};
@@ -1075,6 +1076,26 @@ struct TessellateStripChain {
 // follow the surface and every boundary sub-segment stays present on both sides.
 // Returns `false` when the ring is not rectilinear (the caller keeps the generic
 // polygon path) and an error result when the plan itself is invalid.
+// A uv ring is rectilinear when every segment is parallel to a parameter axis.
+// Both the strip decomposition and the trimmed mass properties require this: a
+// non-rectilinear domain (a slanted cut ellipse) cannot be covered by boundary
+// aligned strips, and a chordal fallback would break the surface-following
+// contract at coarse deflections. Shared by tessellate.hpp and
+// mass_properties.hpp so the two rejections agree.
+inline bool tessellate_ring_rectilinear(const std::vector<Point2d>& points) {
+  if (points.size() < 3) return false;
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    const Point2d& a = points[i];
+    const Point2d& b = points[(i + 1) % points.size()];
+    const double scale = 1.0 + std::max(std::fabs(a[0]), std::fabs(a[1]));
+    const double tolerance = 1e-9 * scale;
+    const double du = std::fabs(b[0] - a[0]);
+    const double dv = std::fabs(b[1] - a[1]);
+    if (du > tolerance && dv > tolerance) return false;
+  }
+  return true;
+}
+
 inline Result<bool> tessellate_trimmed_strip_triangles(
     TessellateState& state, const FaceUvProjection& projection, const TessellateTrimmedRing& ring,
     FaceId id, std::vector<std::array<std::uint32_t, 3>>& triangles) {
@@ -1403,11 +1424,13 @@ inline Result<void> tessellate_refine_trimmed_edges(
     queue.push_back(entry.first);
   }
   while (!queue.empty()) {
-    // Refinement is bounded: a domain whose base triangulation is chordal cannot
-    // be healed by splitting, so stop after a fixed budget of splits. The caller
-    // then rejects the mesh through its deflection check instead of running to
-    // the global triangle limit.
-    if (splits >= split_budget) break;
+    // Refinement is bounded so a chordal triangulation cannot grow without
+    // limit. Hitting the budget is a failure, not a silent stop: the caller must
+    // not accept a mesh whose chord error was never resolved.
+    if (splits >= split_budget) {
+      return Error{Errc::numeric_failure,
+                   "tessellate: trimmed face refinement budget is exhausted", id.index(), 0u};
+    }
     const std::uint64_t edge = queue.back();
     queue.pop_back();
     const auto found = adjacency.find(edge);
@@ -1422,10 +1445,18 @@ inline Result<void> tessellate_refine_trimmed_edges(
     const Point3d& pa = state.mesh.positions[a];
     const Point3d& pb = state.mesh.positions[b];
     const Result<Point2d> first = face_uv_project(projection, pa, 0.0, false);
-    if (!first.has_value()) continue;
+    if (!first.has_value()) {
+      return Error{Errc::numeric_failure,
+                   "tessellate: trimmed face projection failed during refinement", id.index(),
+                   0u};
+    }
     const Point2d ua = first.value();
     const Result<Point2d> second = face_uv_project(projection, pb, ua[0], true);
-    if (!second.has_value()) continue;
+    if (!second.has_value()) {
+      return Error{Errc::numeric_failure,
+                   "tessellate: trimmed face projection failed during refinement", id.index(),
+                   0u};
+    }
     Point2d ub = second.value();
     if (projection.periodic_u()) ub[0] = face_uv_unwrap(ub[0], ua[0]);
     if (projection.periodic_v()) ub[1] = face_uv_unwrap(ub[1], ua[1]);
@@ -1593,9 +1624,13 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
                  id.index(), static_cast<std::uint32_t>(outer_count)};
   }
 
-  // The outer ring is triangulated first, then the holes in ring order. A
-  // periodic outer ring is split away from the seam so the welded seam stays
-  // manifold; rings with holes keep the single-polygon path.
+  // A trimmed face is only meshed here when its uv domain is a single outer ring
+  // with an axis-aligned boundary: the boundary-aligned strips cover it exactly,
+  // while holes and slanted (non-rectilinear) trims are rejected before any
+  // triangulation, independently of the deflection. Keeping the rejection here
+  // (instead of relying on the later sag check) makes the contract deterministic:
+  // a coarse deflection must not silently turn a hole or an ellipse into a
+  // chordal, non-manifold patch. Curved-face holes and slanted trims are M3c-2.
   std::vector<TessellateTrimmedRing> outer;
   std::vector<TessellateTrimmedRing> holes;
   for (TessellateTrimmedRing& ring : rings) {
@@ -1604,6 +1639,14 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
     } else {
       holes.push_back(std::move(ring));
     }
+  }
+  if (!holes.empty()) {
+    return Error{Errc::unsupported, "tessellate: trimmed curved face has a hole", id.index(),
+                 0u};
+  }
+  if (!tessellate_ring_rectilinear(outer.front().points)) {
+    return Error{Errc::unsupported,
+                 "tessellate: trimmed curved face boundary is not rectilinear", id.index(), 0u};
   }
 
   // A cheap upper bound on the triangles the generic path can emit is checked
@@ -1686,11 +1729,23 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
     const Point3d& p1 = state.mesh.positions[triangle[1]];
     const Point3d& p2 = state.mesh.positions[triangle[2]];
     const Result<Point2d> uv0 = face_uv_project(projection, p0, 0.0, false);
-    if (!uv0.has_value()) continue;
+    if (!uv0.has_value()) {
+      return Error{Errc::numeric_failure,
+                   "tessellate: trimmed face projection failed during the sag check",
+                   id.index(), 0u};
+    }
     const Result<Point2d> uv1 = face_uv_project(projection, p1, uv0.value()[0], true);
-    if (!uv1.has_value()) continue;
+    if (!uv1.has_value()) {
+      return Error{Errc::numeric_failure,
+                   "tessellate: trimmed face projection failed during the sag check",
+                   id.index(), 0u};
+    }
     const Result<Point2d> uv2 = face_uv_project(projection, p2, uv0.value()[0], true);
-    if (!uv2.has_value()) continue;
+    if (!uv2.has_value()) {
+      return Error{Errc::numeric_failure,
+                   "tessellate: trimmed face projection failed during the sag check",
+                   id.index(), 0u};
+    }
     Point2d second = uv1.value();
     Point2d third = uv2.value();
     if (projection.periodic_u()) {
@@ -1773,7 +1828,7 @@ inline bool tessellate_face_has_polyline_edge(const Brep& brep, FaceId id) {
 // triangulated from its boundary samples in the face uv domain instead. Nurbs
 // faces remain unsupported.
 inline Result<void> sample_curved_face(TessellateState& state, const Brep& brep, FaceId id,
-                                           const TessellationOptions& options) {
+                                       const TessellationOptions& options) {
   const Face& face = brep.face(id);
   if (face.surface >= brep.geometry().surfaces.size()) {
     return Error{Errc::unsupported, "tessellate: face has no surface geometry", id.index(), 0u};
@@ -1876,6 +1931,3 @@ inline Result<TriMesh> tessellate(const Brep& brep, const TessellationOptions& o
 
 }  // namespace v1
 }  // namespace geom
-
-
-

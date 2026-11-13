@@ -684,7 +684,7 @@ git commit -m "docs(m3c1): record trimmed tessellation evidence and limits"
 - [x] The trimmed band meets the chord-height bound at `deflection = 2e-3`; a smaller deflection produces more triangles.
 - [x] `mass_properties()` returns volume/centroid/inertia for the half-trimmed cylinder within the documented 1e-5 relative accuracy, matching both the analytic values and `detail::curved_solid_volume`.
 - [x] QA-13 exists and is deterministic; the ADR and `docs/benchmarks/m3c1.md` record the measured evidence.
-- [x] Sphere, torus, cone and NURBS remain explicit `unsupported`/deferred and are listed for M3c-2.
+- [x] Sphere, torus and cone remain explicit `unsupported`/deferred *as curved-boolean operands and trim contours*; their canonical untrimmed tessellation and mass properties stay supported. NURBS faces stay deferred and are listed for M3c-2.
 
 ## Review Focus Notes for the Implementer
 

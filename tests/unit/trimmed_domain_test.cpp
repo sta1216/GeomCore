@@ -5,7 +5,7 @@
 #include <geom/brep/face_uv.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/cgeom/polygon2.hpp>
-#include <geom/cgeom/trimmed_domain.hpp>
+#include <geom/brep/trimmed_domain.hpp>
 #include <geom/core/result.hpp>
 
 #include <array>

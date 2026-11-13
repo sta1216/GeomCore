@@ -12,7 +12,7 @@
 #include <geom/brep/face_uv.hpp>
 #include <geom/brep/tessellate.hpp>
 #include <geom/brep/topology.hpp>
-#include <geom/cgeom/trimmed_domain.hpp>
+#include <geom/brep/trimmed_domain.hpp>
 #include <geom/core/error.hpp>
 #include <geom/core/result.hpp>
 #include <geom/curves/analytic_curve.hpp>
@@ -55,14 +55,17 @@ inline namespace v1 {
 // trimmed uv triangulation instead: every triangle is split until its longest
 // uv edge is shorter than the quadrature step, then the exact surface position
 // and Jacobian are sampled with the seven-point Dunavant rule. The step is
-// max(sqrt(8*curved_sampling_deflection), 5e-2 radians): the boundary samples
-// produced by trimmed_face_boundaries are not floored, so honouring a very fine
-// deflection in the interior would dominate the cost (a 1e-9 uv step on the
-// default fixture takes about 31 s) for no measurable gain. The floor bounds the
-// triangle count and means the attainable accuracy on a large trimmed face is
-// about 1e-6 relative at the default deflection, not the 4e-10 seen on the
-// r = 1 fixture. A trimmed face with a hole or a non-rectilinear boundary stays
-// Errc::unsupported; curved-face holes are deferred to M3c-2.
+// max(sqrt(8*curved_sampling_deflection), 5e-2 radians); the floor binds for
+// curved_sampling_deflection <= 3.125e-4 (where sqrt(8d) < 5e-2), so a finer
+// request cannot refine the interior further. The boundary samples produced by
+// trimmed_face_boundaries are not floored, but a rectilinear domain's samples
+// lie on exact parameter lines and are reduced to its corners, so the integrated
+// region does not depend on them. The floor therefore bounds the runtime (a
+// 1e-9 uv step on the default fixture takes about 31 s); it does not cap the
+// measured accuracy: the volume relative error is 4.4e-10 on the r = 1 fixture
+// and 4.4e-11 on the r = 10 fixture at the default. A trimmed face with a hole
+// or a non-rectilinear boundary stays Errc::unsupported; curved-face holes are
+// deferred to M3c-2.
 //
 // All output values are finite; a non-finite integral is Errc::numeric_failure.
 // Options: a non-positive or non-finite sampling_deflection or
@@ -80,9 +83,10 @@ struct MassPropertiesOptions {
   int quadrature_order = 24;          // Gauss-Legendre points per direction.
   // Trimmed curved faces: boundary chord height for the uv ring, and (through
   // sqrt(8*deflection)) the interior quadrature step, which is floored at 5e-2
-  // radians because a fine interior step cannot improve on the unfloored
-  // boundary sampling and only multiplies the triangle count. Out-of-range
-  // values (non-finite or <= 0) are Errc::tolerance_violation.
+  // radians. The floor binds when curved_sampling_deflection <= 3.125e-4; it
+  // exists because the boundary sampling is not floored and a finer interior
+  // step only multiplies the triangle count. Out-of-range values (non-finite or
+  // <= 0) are Errc::tolerance_violation.
   double curved_sampling_deflection = 1e-5;
 };
 
@@ -405,23 +409,6 @@ inline Result<void> mass_integrate_trimmed_parametric(
   return {};
 }
 
-// A trimmed curved face is integrable here only when its uv domain is a single
-// rectilinear ring: the same assumption the trimmed tessellation strip
-// decomposition makes. Anything else reports the honest unsupported error.
-inline bool mass_ring_rectilinear(const std::vector<Point2d>& points) {
-  if (points.size() < 3) return false;
-  for (std::size_t i = 0; i < points.size(); ++i) {
-    const Point2d& a = points[i];
-    const Point2d& b = points[(i + 1) % points.size()];
-    const double scale = 1.0 + std::max(std::fabs(a[0]), std::fabs(a[1]));
-    const double tolerance = 1e-9 * scale;
-    const double du = std::fabs(b[0] - a[0]);
-    const double dv = std::fabs(b[1] - a[1]);
-    if (du > tolerance && dv > tolerance) return false;
-  }
-  return true;
-}
-
 // Drops the collinear samples of a rectilinear uv ring. The trimmed domain of a
 // rectilinear face is exactly the polygon through its corners (the arc samples
 // lie on the same parameter line), so this removes the boundary sampling cost
@@ -456,7 +443,7 @@ inline Result<void> mass_add_trimmed_face(const Brep& brep, FaceId id, const Sur
     return Error{Errc::unsupported, "mass_properties: trimmed curved face has a hole", id.index(),
                  0u};
   }
-  if (!mass_ring_rectilinear(boundaries.value().front().points)) {
+  if (!tessellate_ring_rectilinear(boundaries.value().front().points)) {
     return Error{Errc::unsupported,
                  "mass_properties: trimmed curved face boundary is not rectilinear", id.index(),
                  0u};
@@ -467,14 +454,13 @@ inline Result<void> mass_add_trimmed_face(const Brep& brep, FaceId id, const Sur
   const std::vector<TrimmedBoundary> simplified{std::move(domain)};
   const Result<TrimmedUvTriangulation> triangulation = triangulate_trimmed_domain(simplified);
   if (!triangulation.has_value()) return triangulation.error();
-  // The uv edges of a rectilinear trimmed domain are exact parameter lines, so
-  // curved_sampling_deflection controls only the interior quadrature density.
-  // The step is max(sqrt(8*deflection), 5e-2 rad): the boundary sampling in
-  // trimmed_face_boundaries is not floored, so a finer interior step cannot
-  // improve the result and only multiplies the triangle count (a 1e-9 step on
-  // the default fixture takes about 31 s). The floor is load-bearing for the
-  // runtime; it is also why a large trimmed face tops out near 1e-6 relative
-  // accuracy at the default deflection.
+  // The uv edges of a rectilinear trimmed domain are exact parameter lines, and
+  // the corner simplification above removes their samples, so the integrated
+  // region is independent of curved_sampling_deflection; only the interior
+  // quadrature density uses it. The step is max(sqrt(8*deflection), 5e-2 rad):
+  // the floor binds for deflection <= 3.125e-4 and is load-bearing for the
+  // runtime (a 1e-9 step on the default fixture takes about 31 s). It does not
+  // cap the measured accuracy (4.4e-10 relative on r = 1, 4.4e-11 on r = 10).
   const double step = std::max(std::sqrt(8.0 * options.curved_sampling_deflection), 5e-2);
   return mass_integrate_trimmed_parametric(surface, triangulation.value().points,
                                            triangulation.value().triangles,

@@ -527,7 +527,8 @@ TEST_CASE("mass properties: a windowed cylinder matches its reference moments") 
   REQUIRE(mass.has_value());
   // Cylinder r=1, h=2 minus the prism {x >= 0.5, |y| <= 0.5, 0.5 <= z <= 1.5}.
   // Closed-form reference (pocket integral by Simpson quadrature); all tensor
-  // components are about the centroid.
+  // components are about the centroid. These are within-1e-7 sanity checks
+  // against the analytic values; the exact floored output is pinned separately.
   CHECK(mass.value().volume == doctest::Approx(5.8265738297177867).epsilon(1e-7));
   CHECK(mass.value().centroid[0] == doctest::Approx(-0.057209149501289074).epsilon(1e-9));
   CHECK(mass.value().centroid[1] == doctest::Approx(0.0).epsilon(1e-7));
@@ -550,6 +551,26 @@ TEST_CASE("mass properties: a windowed cylinder matches its reference moments") 
   CHECK(mass.value().inertia[1][2] == mass.value().inertia[2][1]);
 }
 
+TEST_CASE("mass properties: trimmed output is pinned at the quadrature floor") {
+  // The floor is load-bearing: with curved_sampling_deflection below 3.125e-4
+  // the interior step stays at 5e-2 rad, so the output is a fixed, reproducible
+  // value. These checks are tight enough to fail if the std::max floor is
+  // removed (the unfloored 1e-5 step changes every digit below).
+  const geom::Brep brep = windowed_cylinder_brep();
+  const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
+  REQUIRE(mass.has_value());
+  CHECK(mass.value().volume == doctest::Approx(5.826573827129446).epsilon(1e-12));
+  CHECK(mass.value().centroid[0] == doctest::Approx(-0.057209149585365).epsilon(1e-12));
+  CHECK(mass.value().centroid[1] == doctest::Approx(0.0).epsilon(1e-12));
+  CHECK(mass.value().centroid[2] == doctest::Approx(1.0).epsilon(1e-12));
+  CHECK(mass.value().inertia[0][0] == doctest::Approx(3.592034030767950).epsilon(1e-12));
+  CHECK(mass.value().inertia[1][1] == doctest::Approx(3.356457963297069).epsilon(1e-12));
+  CHECK(mass.value().inertia[2][2] == doctest::Approx(2.835803705474689).epsilon(1e-12));
+  CHECK(mass.value().inertia[0][1] == doctest::Approx(0.0).epsilon(1e-12));
+  CHECK(mass.value().inertia[0][2] == doctest::Approx(0.0).epsilon(1e-12));
+  CHECK(mass.value().inertia[1][2] == doctest::Approx(0.0).epsilon(1e-12));
+}
+
 TEST_CASE("mass properties: trimmed volume agrees with the volume integrator") {
   const geom::Brep brep = windowed_cylinder_brep();
   const geom::Result<double> reference =
@@ -570,8 +591,9 @@ TEST_CASE("mass properties: a scaled trimmed face stays accurate at the default"
       geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9);
   REQUIRE(reference.has_value());
   CHECK(reference.value() == doctest::Approx(1433.8128835477412).epsilon(1e-9));
-  // 1e-7 shares the floored step with 1e-5 (floor binds at >= 3.125e-4), so the
-  // second row documents that the option is accepted below the floor, not a finer mesh.
+  // 1e-7 is below the floor (which binds for curved_sampling_deflection <=
+  // 3.125e-4), so it is accepted but produces exactly the same floored step as
+  // 1e-5: the second row documents option acceptance, not a finer mesh.
   for (const double deflection : {1e-5, 1e-7}) {
     const auto mass =
         geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, deflection});
@@ -588,8 +610,9 @@ TEST_CASE("mass properties: trimmed sampling deflection stays at the quadrature 
       geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9);
   REQUIRE(reference.has_value());
   // The uv edges of this rectilinear trimmed domain are exact parameter lines,
-  // so the deflection only controls the interior quadrature density: 1e-3 and
-  // 1e-5 both sit at the same floor (~2.6e-9 absolute, 4.4e-10 relative).
+  // so the deflection only controls the interior quadrature density: 1e-5 sits at
+  // the floor (5e-2 rad); 1e-3 is above the floor (step 8.9e-2 rad) and both
+  // stay within 2.6e-9 absolute of the reference.
   const auto fine = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-3});
   const auto finer = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
   REQUIRE(fine.has_value());

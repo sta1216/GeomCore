@@ -10,6 +10,7 @@
 #include <geom/brep/validate.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -237,7 +238,9 @@ TEST_CASE("trimmed tessellation: windowed cylinder area is exact and outward") {
   const double ring_area = 4.0 * pi - pi / 3.0;
   const auto exact = geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9);
   REQUIRE(exact.has_value());
-  CHECK(exact.value() == doctest::Approx(5.826573829689068).epsilon(1e-9));
+  // The measured integrator value; the closed form 5.826573829689068 differs at
+  // 7e-14 relative, below this check's resolution.
+  CHECK(exact.value() == doctest::Approx(5.826573829688656).epsilon(1e-12));
   for (const double deflection : {1e-2, 1e-3}) {
     const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});
     REQUIRE(mesh.has_value());
@@ -309,19 +312,49 @@ TEST_CASE("trimmed tessellation: a half cylinder sliver stays watertight") {
           2.0 * deflection * exact.value());
   }
 }
+TEST_CASE("trimmed tessellation: a projection failure is an error, not a skip") {
+  // The refinement projects every queued edge endpoint. A wire whose vertex sits
+  // on the cylinder axis makes that projection singular (the chart is undefined
+  // there); the helper must report numeric_failure instead of silently skipping
+  // the edge and returning a mesh that was never refined.
+  const geom::Brep brep =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0, 1e-9)
+          .value();
+  const geom::FaceId lateral = lateral_face(brep);
+  REQUIRE(!lateral.is_null());
+  const auto projection = geom::detail::face_uv_projection(brep, brep.face(lateral), 1e-9);
+  REQUIRE(projection.has_value());
+  geom::detail::TessellateState state;
+  state.edges.resize(brep.edges().size());
+  state.vertices.assign(brep.vertices().size(), 0u);
+  state.vertex_sampled.assign(brep.vertices().size(), 0);
+  for (const geom::Point3d& point :
+       {geom::Point3d{0.0, 0.0, 0.0}, geom::Point3d{1.0, 0.0, 0.0}, geom::Point3d{0.0, 1.0, 0.0}}) {
+    REQUIRE(geom::detail::tessellate_append_point(state, point).has_value());
+  }
+  std::vector<std::array<std::uint32_t, 3>> triangles{{0u, 1u, 2u}};
+  const auto refined = geom::detail::tessellate_refine_trimmed_edges(
+      state, projection.value(), triangles, {}, 1e-2, lateral);
+  REQUIRE(!refined.has_value());
+  CHECK(refined.error().code == geom::Errc::numeric_failure);
+  CHECK(std::string(refined.error().message) ==
+        "tessellate: trimmed face projection failed during refinement");
+}
+
 TEST_CASE("trimmed tessellation: a slanted trim reports the trimmed-path error") {
   // The ellipse boundary is not rectilinear in the uv chart, so this domain is
-  // rejected by the surface-following check. The error must describe the trimmed
-  // path, never the analytic primitive.
+  // rejected deterministically before triangulation, independent of the
+  // deflection. The error must describe the trimmed path, never the analytic
+  // primitive.
   for (const bool upper : {true, false}) {
     const geom::Brep brep = slanted_cylinder(upper);
     REQUIRE(geom::validate_topology(brep).ok());
-    for (const double deflection : {1e-2, 1e-3}) {
+    for (const double deflection : {1e-2, 1e-3, 0.5, 1.0}) {
       const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});
       REQUIRE(!mesh.has_value());
       CHECK(mesh.error().code == geom::Errc::unsupported);
       CHECK(std::string(mesh.error().message) ==
-            "tessellate: trimmed face does not follow the surface");
+            "tessellate: trimmed curved face boundary is not rectilinear");
       CHECK(std::string(mesh.error().message) != "tessellate: cylinder face is missing a cap circle");
     }
   }
@@ -356,9 +389,10 @@ TEST_CASE("trimmed tessellation: the sag refinement subdivides the sliver band")
 }
 TEST_CASE("trimmed tessellation: a hole loop is rejected with the trimmed-path error") {
   // The window sits fully inside the lateral face, so the face carries two loops.
-  // The strip path covers rings without holes, and the generic path's chords
-  // exceed the deviation bound, so the domain is rejected rather than remeshed
-  // with a chordal patch. This pins the honest error for the 2-loop fixture.
+  // Hole domains are rejected deterministically, independent of the deflection,
+  // because the strip path cannot cover them and a chordal patch would break the
+  // watertight and surface-following contracts. This pins the honest error for
+  // the 2-loop fixture.
   const geom::Brep brep = hole_window_cylinder();
   REQUIRE(geom::validate_topology(brep).ok());
   const geom::FaceId lateral = lateral_face(brep);
@@ -366,12 +400,12 @@ TEST_CASE("trimmed tessellation: a hole loop is rejected with the trimmed-path e
   const auto loops = geom::face_loops_uv(brep, lateral, 1e-9);
   REQUIRE(loops.has_value());
   REQUIRE(loops.value().size() == 2);
-  for (const double deflection : {1e-2, 1e-3}) {
+  for (const double deflection : {1e-2, 1e-3, 0.5, 1.0}) {
     const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});
     REQUIRE(!mesh.has_value());
     CHECK(mesh.error().code == geom::Errc::unsupported);
     CHECK(std::string(mesh.error().message) ==
-          "tessellate: trimmed face does not follow the surface");
+          "tessellate: trimmed curved face has a hole");
   }
 }
 TEST_CASE("trimmed tessellation: a band-shaped domain refines with smaller deflection") {
