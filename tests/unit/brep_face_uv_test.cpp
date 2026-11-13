@@ -580,6 +580,94 @@ TEST_CASE("curved boolean: a trimmed torus keeps its own uv rectangle") {
   CHECK(info.value().bounds.hi[0] == doctest::Approx(major + minor));
 }
 
+TEST_CASE("curved boolean: a sliver torus patch is not the full domain") {
+  constexpr double major = 2.0;
+  constexpr double minor = 0.5;
+  constexpr double u_end = 1e-6;
+  constexpr double v_end = 0.5;
+  const double u_cos = std::cos(u_end);
+  const double u_sin = std::sin(u_end);
+  const double top_radius = major + minor * std::cos(v_end);
+  const double top_z = minor * std::sin(v_end);
+
+  // Corners of the patch, in loop order A -> B -> C -> D.
+  const geom::Point3d a{major + minor, 0.0, 0.0};
+  const geom::Point3d b{(major + minor) * u_cos, (major + minor) * u_sin, 0.0};
+  const geom::Point3d c{top_radius * u_cos, top_radius * u_sin, top_z};
+  const geom::Point3d d{top_radius, 0.0, top_z};
+
+  geom::SolidEditor editor;
+  const std::uint32_t surface =
+      editor.add_surface(geom::Torus3{geom::Point3d{0.0, 0.0, 0.0},
+                                      geom::Vec3d{0.0, 0.0, 1.0},
+                                      geom::Vec3d{1.0, 0.0, 0.0}, major, minor});
+  const geom::VertexId va = editor.add_vertex(a, 0.0).value();
+  const geom::VertexId vb = editor.add_vertex(b, 0.0).value();
+  const geom::VertexId vc = editor.add_vertex(c, 0.0).value();
+  const geom::VertexId vd = editor.add_vertex(d, 0.0).value();
+
+  // Bottom rim v = 0: A -> B, t in [0, u_end].
+  const std::uint32_t bottom_curve = editor.add_curve(geom::CircleCurve3{
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{1.0, 0.0, 0.0},
+      geom::Vec3d{0.0, 1.0, 0.0}, major + minor});
+  const geom::EdgeId bottom =
+      editor.add_edge(va, vb, bottom_curve, 0.0, u_end, 0.0).value();
+
+  // Top rim v = v_end: the edge runs D -> C so the reversed coedge runs C -> D.
+  const std::uint32_t top_curve = editor.add_curve(geom::CircleCurve3{
+      geom::Point3d{0.0, 0.0, top_z}, geom::Vec3d{1.0, 0.0, 0.0},
+      geom::Vec3d{0.0, 1.0, 0.0}, top_radius});
+  const geom::EdgeId top =
+      editor.add_edge(vd, vc, top_curve, 0.0, u_end, 0.0).value();
+
+  // Left seam u = 0: the edge runs A -> D so the reversed coedge runs D -> A.
+  const std::uint32_t left_curve = editor.add_curve(geom::CircleCurve3{
+      geom::Point3d{major, 0.0, 0.0}, geom::Vec3d{1.0, 0.0, 0.0},
+      geom::Vec3d{0.0, 0.0, 1.0}, minor});
+  const geom::EdgeId left = editor.add_edge(va, vd, left_curve, 0.0, v_end, 0.0).value();
+
+  // Right seam u = u_end: B -> C, t in [0, v_end].
+  const std::uint32_t right_curve = editor.add_curve(geom::CircleCurve3{
+      geom::Point3d{major * u_cos, major * u_sin, 0.0},
+      geom::Vec3d{u_cos, u_sin, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, minor});
+  const geom::EdgeId right = editor.add_edge(vb, vc, right_curve, 0.0, v_end, 0.0).value();
+
+  // Pcurves are stored along the edge direction (t0 -> t1), in the torus uv.
+  const std::uint32_t bottom_pcurve =
+      editor.add_pcurve(geom::Pcurve2d{geom::Point2d{0.0, 0.0},
+                                       geom::Point2d{u_end, 0.0}});
+  const std::uint32_t top_pcurve =
+      editor.add_pcurve(geom::Pcurve2d{geom::Point2d{0.0, v_end},
+                                       geom::Point2d{u_end, v_end}});
+  const std::uint32_t left_pcurve =
+      editor.add_pcurve(geom::Pcurve2d{geom::Point2d{0.0, 0.0},
+                                       geom::Point2d{0.0, v_end}});
+  const std::uint32_t right_pcurve =
+      editor.add_pcurve(geom::Pcurve2d{geom::Point2d{u_end, 0.0},
+                                       geom::Point2d{u_end, v_end}});
+
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 4> coedges{
+      geom::CoedgeSpec{bottom, false, bottom_pcurve, 0.0},
+      geom::CoedgeSpec{right, false, right_pcurve, 0.0},
+      geom::CoedgeSpec{top, true, top_pcurve, 0.0},
+      geom::CoedgeSpec{left, true, left_pcurve, 0.0}};
+  REQUIRE(editor.add_loop(face, coedges, true).has_value());
+
+  const auto info =
+      geom::detail::curved_boolean_face_info(editor.brep(), face, kTolerance);
+  REQUIRE(info.has_value());
+  // A one-microradian sliver is still far above the 1e-12 degeneracy
+  // threshold, so its own range must survive untouched. Mutating the
+  // threshold to 1e-6 collapses this into the full torus rectangle.
+  CHECK(info.value().u[0] == 0.0);
+  CHECK(info.value().u[1] == doctest::Approx(u_end));
+  CHECK(info.value().v[0] == 0.0);
+  CHECK(info.value().v[1] == doctest::Approx(v_end));
+  CHECK(info.value().bounds.hi[0] == doctest::Approx(major + minor));
+  CHECK(info.value().bounds.lo[0] > 2.42);
+}
+
 TEST_CASE("a torus seam loop covers both parameter periods") {
   const double major = 2.0;
   const double minor = 0.5;
