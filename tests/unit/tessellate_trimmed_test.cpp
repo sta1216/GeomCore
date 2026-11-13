@@ -7,9 +7,11 @@
 #include <geom/brep/validate.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <map>
 #include <numbers>
 #include <utility>
+#include <variant>
 
 namespace {
 
@@ -54,6 +56,53 @@ double mesh_volume(const geom::TriMesh& mesh) {
   return volume;
 }
 
+std::uint64_t hash_mesh(const geom::TriMesh& mesh) {
+  std::uint64_t hash = 1469598103934665603ull;
+  const auto mix = [&](const void* data, std::size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+      hash ^= bytes[i];
+      hash *= 1099511628211ull;
+    }
+  };
+  for (const geom::Point3d& point : mesh.positions) {
+    const double values[3] = {point[0], point[1], point[2]};
+    mix(values, sizeof(values));
+  }
+  for (const auto& triangle : mesh.triangles) mix(triangle.data(), sizeof(triangle));
+  for (const std::uint32_t face : mesh.triangle_face) mix(&face, sizeof(face));
+  return hash;
+}
+
+geom::FaceId lateral_face(const geom::Brep& brep) {
+  for (const geom::FaceId id : brep.face_ids()) {
+    if (std::holds_alternative<geom::Cylinder3>(
+            brep.geometry().surfaces[brep.face(id).surface])) {
+      return id;
+    }
+  }
+  return geom::FaceId::null();
+}
+
+double half_cylinder_exact_volume() {
+  // The x >= 0.5 part of the unit cylinder of height 2: 2 * (pi/2 - 0.956611477...).
+  return 1.228369698608801;
+}
+
+geom::Brep half_cylinder() {
+  const geom::Brep cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                          1e-9)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, -1.0}, geom::Point3d{0.5, 2.0, 3.0}, 1e-9).value();
+  return geom::boolean_solid_curved(cylinder, cylinder.solid_ids().front(), box,
+                                    box.solid_ids().front(), geom::SolidBooleanOp::difference,
+                                    geom::CurvedBooleanOptions{1e-9})
+      .value()
+      .brep;
+}
+
 }  // namespace
 
 TEST_CASE("trimmed tessellation: windowed cylinder is watertight and keeps its faces") {
@@ -95,4 +144,118 @@ TEST_CASE("trimmed tessellation: canonical primitives are unchanged") {
   REQUIRE(mesh.has_value());
   check_watertight(mesh.value());
   CHECK(mesh_volume(mesh.value()) == doctest::Approx(2.0 * std::numbers::pi_v<double>).epsilon(1e-3));
+}
+
+TEST_CASE("trimmed tessellation: canonical primitive output hashes are stable") {
+  // Hashes pin the byte-exact output of the canonical builders: the trimmed
+  // fallback must never take over a face the analytic builder accepts.
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-1.0, -1.0, -1.0}, geom::Point3d{1.0, 1.0, 1.0}, 1e-9).value();
+  const geom::Brep cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                          1e-9)
+          .value();
+  const geom::Brep torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 2.0, 0.5, 1e-9)
+          .value();
+  const geom::TessellationOptions options{1e-2, 0.35};
+  const auto box_mesh = geom::tessellate(box, options);
+  const auto cylinder_mesh = geom::tessellate(cylinder, options);
+  const auto torus_mesh = geom::tessellate(torus, options);
+  REQUIRE(box_mesh.has_value());
+  REQUIRE(cylinder_mesh.has_value());
+  REQUIRE(torus_mesh.has_value());
+  CHECK(box_mesh.value().triangles.size() == 12u);
+  CHECK(box_mesh.value().positions.size() == 8u);
+  CHECK(hash_mesh(box_mesh.value()) == 0x2abc6bb21fd6d800ull);
+  CHECK(cylinder_mesh.value().triangles.size() == 88u);
+  CHECK(cylinder_mesh.value().positions.size() == 46u);
+  CHECK(hash_mesh(cylinder_mesh.value()) == 0x687a72048f8f4296ull);
+  CHECK(torus_mesh.value().triangles.size() == 1152u);
+  CHECK(torus_mesh.value().positions.size() == 576u);
+  CHECK(hash_mesh(torus_mesh.value()) == 0xc808f6ee4d9c72dbull);
+}
+
+TEST_CASE("trimmed tessellation: windowed cylinder area is exact and outward") {
+  const geom::Brep brep = cut_cylinder();
+  const geom::FaceId lateral = lateral_face(brep);
+  REQUIRE(!lateral.is_null());
+  const auto projection =
+      geom::detail::face_uv_projection(brep, brep.face(lateral), 1e-9);
+  REQUIRE(projection.has_value());
+  const double pi = std::numbers::pi_v<double>;
+  const double ring_area = 4.0 * pi - pi / 3.0;
+  const auto exact = geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9);
+  REQUIRE(exact.has_value());
+  CHECK(exact.value() == doctest::Approx(5.826573829689068).epsilon(1e-9));
+  for (const double deflection : {1e-2, 1e-3}) {
+    const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});
+    REQUIRE(mesh.has_value());
+    check_watertight(mesh.value());
+    double uv_sum = 0.0;
+    double area_3d_sum = 0.0;
+    for (std::size_t t = 0; t < mesh.value().triangles.size(); ++t) {
+      if (mesh.value().triangle_face[t] != lateral.index()) continue;
+      const auto& triangle = mesh.value().triangles[t];
+      geom::Point2d uv[3];
+      for (int k = 0; k < 3; ++k) {
+        const auto projected = geom::detail::face_uv_project(
+            projection.value(),
+            mesh.value().positions[triangle[static_cast<std::size_t>(k)]], 0.0, false);
+        REQUIRE(projected.has_value());
+        uv[k] = projected.value();
+      }
+      for (int k = 1; k < 3; ++k) {
+        while (uv[k][0] - uv[0][0] > pi) uv[k][0] -= 2.0 * pi;
+        while (uv[0][0] - uv[k][0] > pi) uv[k][0] += 2.0 * pi;
+      }
+      const double twice = (uv[1][0] - uv[0][0]) * (uv[2][1] - uv[0][1]) -
+                           (uv[1][1] - uv[0][1]) * (uv[2][0] - uv[0][0]);
+      CHECK(twice > 0.0);
+      uv_sum += 0.5 * twice;
+      for (int k = 0; k < 3; ++k) {
+        for (int j = k + 1; j < 3; ++j) {
+          CHECK(std::abs(uv[k][0] - uv[j][0]) < pi / 2.0);
+        }
+      }
+      const geom::Point3d& p = mesh.value().positions[triangle[0]];
+      const geom::Point3d& q = mesh.value().positions[triangle[1]];
+      const geom::Point3d& r = mesh.value().positions[triangle[2]];
+      const geom::Vec3d normal =
+          geom::cross(geom::Vec3d{q[0] - p[0], q[1] - p[1], q[2] - p[2]},
+                      geom::Vec3d{r[0] - p[0], r[1] - p[1], r[2] - p[2]});
+      const double area_3d = 0.5 * std::sqrt(geom::dot(normal, normal));
+      area_3d_sum += area_3d;
+      const geom::Vec3d centroid{(p[0] + q[0] + r[0]) / 3.0, (p[1] + q[1] + r[1]) / 3.0, 0.0};
+      CHECK(geom::dot(normal, centroid) > 0.0);
+      for (int k = 0; k < 3; ++k) {
+        const geom::Point3d& a = mesh.value().positions[triangle[static_cast<std::size_t>(k)]];
+        const geom::Point3d& b =
+            mesh.value().positions[triangle[static_cast<std::size_t>((k + 1) % 3)]];
+        CHECK(std::abs(std::hypot(0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])) - 1.0) <=
+              deflection);
+      }
+    }
+    CHECK(uv_sum == doctest::Approx(ring_area).epsilon(1e-9));
+    // The inscribed mesh may not gain area: only the total is comparable, since a
+    // chord triangle can exceed its UV triangle near the window corners.
+    CHECK(area_3d_sum <= uv_sum + 1e-12);
+    const double volume = mesh_volume(mesh.value());
+    CHECK(std::abs(volume - exact.value()) <= 2.0 * deflection * exact.value());
+  }
+}
+
+TEST_CASE("trimmed tessellation: a half cylinder sliver stays watertight") {
+  const geom::Brep brep = half_cylinder();
+  REQUIRE(geom::validate_topology(brep).ok());
+  const auto exact = geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9);
+  REQUIRE(exact.has_value());
+  CHECK(exact.value() == doctest::Approx(half_cylinder_exact_volume()).epsilon(1e-6));
+  for (const double deflection : {1e-2, 1e-3}) {
+    const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});
+    REQUIRE(mesh.has_value());
+    check_watertight(mesh.value());
+    CHECK(std::abs(mesh_volume(mesh.value()) - exact.value()) <=
+          2.0 * deflection * exact.value());
+  }
 }
