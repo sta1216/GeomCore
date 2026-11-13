@@ -1427,6 +1427,10 @@ inline Result<std::vector<FaceId>> curved_boolean_operand_faces(const Brep& brep
 // `a` / `b` are single-solid documents, `a_solid` / `b_solid` their solids, and
 // `op` the regularized operation. The result is a new document with one solid;
 // counters in the report are a pure function of the inputs.
+// `failure_report`, when non-null, is zero-initialized on entry; at an error
+// return it carries the counters accumulated up to that point and is meaningful
+// only when the Result is an error. On success it stays zeroed because the
+// returned report is authoritative; nullptr is the previous behavior.
 inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a_solid,
                                                         const Brep& b, SolidId b_solid,
                                                         SolidBooleanOp op,
