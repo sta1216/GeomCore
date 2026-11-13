@@ -11,6 +11,7 @@
 #include <variant>
 #include <vector>
 
+#include <geom/brep/boolean_solid_curved.hpp>
 #include <geom/brep/face_uv.hpp>
 #include <geom/brep/plane_frame.hpp>
 #include <geom/brep/primitives.hpp>
@@ -442,6 +443,24 @@ TEST_CASE("a sphere seam loop stays finite at the poles") {
   }
   // The seam meridian spans both poles.
   CHECK(max_v - min_v == doctest::Approx(kPi).epsilon(1e-12));
+}
+
+TEST_CASE("curved boolean: a sphere face advertises its full uv domain") {
+  const auto sphere = geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, kTolerance);
+  REQUIRE(sphere.has_value());
+  const std::vector<geom::FaceId> faces = sphere.value().face_ids();
+  REQUIRE(faces.size() == 1u);
+  const auto info =
+      geom::detail::curved_boolean_face_info(sphere.value(), faces.front(), kTolerance);
+  REQUIRE(info.has_value());
+  CHECK(info.value().u[0] == 0.0);
+  CHECK(info.value().u[1] == doctest::Approx(2.0 * 3.14159265358979323846));
+  CHECK(info.value().v[0] == doctest::Approx(-1.5707963267948966));
+  CHECK(info.value().v[1] == doctest::Approx(1.5707963267948966));
+  CHECK(info.value().bounds.lo[0] == doctest::Approx(-1.0));
+  CHECK(info.value().bounds.hi[0] == doctest::Approx(1.0));
+  CHECK(info.value().bounds.lo[1] == doctest::Approx(-1.0));
+  CHECK(info.value().bounds.hi[1] == doctest::Approx(1.0));
 }
 
 TEST_CASE("a torus seam loop covers both parameter periods") {

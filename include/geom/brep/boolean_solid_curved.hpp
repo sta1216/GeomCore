@@ -64,6 +64,7 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <unordered_map>
@@ -177,6 +178,30 @@ inline CurvedBooleanSurfaceGate curved_boolean_surface_gate(
       "deferred)"};
 }
 
+// Full parameter rectangle of a surface whose face may have no real boundary
+// loop (a sphere or torus whose only loop is its seam, or a cone whose lateral
+// loop collapses at the apex). Returns {u_lo, u_hi, v_lo, v_hi}; nullopt for
+// surfaces whose domain is not known analytically.
+inline std::optional<std::array<double, 4>> curved_boolean_surface_uv_domain(
+    const SurfaceGeometry& surface) noexcept {
+  if (std::holds_alternative<Sphere3>(surface)) {
+    return std::array<double, 4>{0.0, kCurvedBooleanTwoPi, -kCurvedBooleanPi / 2.0,
+                                 kCurvedBooleanPi / 2.0};
+  }
+  if (std::holds_alternative<Torus3>(surface)) {
+    return std::array<double, 4>{0.0, kCurvedBooleanTwoPi, 0.0, kCurvedBooleanTwoPi};
+  }
+  if (const auto* cone = std::get_if<Cone3>(&surface)) {
+    // Cone3's v is axial, so the apex sits at v = radius / tan(half_angle), the
+    // primitive's height; the task contract stores the ruling length
+    // hypot(radius, height) as the upper bound instead.
+    const double height = cone->radius / std::tan(cone->half_angle);
+    return std::array<double, 4>{0.0, kCurvedBooleanTwoPi, 0.0,
+                                 std::hypot(cone->radius, height)};
+  }
+  return std::nullopt;
+}
+
 // One face of an operand in its surface parameter domain, with the domain, the
 // face's 3D bounds and the projection needed to lift uv points back to 3D.
 struct CurvedBooleanFaceInfo {
@@ -227,6 +252,21 @@ inline Result<CurvedBooleanFaceInfo> curved_boolean_face_info(const Brep& brep, 
   // projection folds the seam, so a wider patch would trace it twice.
   if (info.projection.periodic_u() && u_hi - u_lo > kCurvedBooleanTwoPi) {
     u_hi = u_lo + kCurvedBooleanTwoPi;
+  }
+  // A seam-only face (a sphere or cone lateral face, a torus cut along its own
+  // seam) has no boundary loop of its own: the loop-derived u-span collapses
+  // onto one parameter line even though the face covers the whole surface. The
+  // chart still needs the analytic range for the 5x5 sample and for the
+  // splitter, so substitute it -- but only for a collapsed span, never for a
+  // genuinely trimmed face, whose old range must stay byte for byte.
+  const std::optional<std::array<double, 4>> analytic_domain =
+      curved_boolean_surface_uv_domain(*info.surface);
+  if (analytic_domain.has_value() &&
+      u_hi - u_lo <= 1e-12 * std::max(1.0, std::max(std::abs(u_lo), std::abs(u_hi)))) {
+    u_lo = (*analytic_domain)[0];
+    u_hi = (*analytic_domain)[1];
+    v_lo = (*analytic_domain)[2];
+    v_hi = (*analytic_domain)[3];
   }
   info.u = {u_lo, u_hi};
   info.v = {v_lo, v_hi};
