@@ -94,10 +94,12 @@ TEST_CASE("curved boolean: a failed operation still reports the stage counters")
   const Result<Brep> b = make_box(Point3d{10, 0, 0}, Point3d{11, 1, 1}, 1e-9);
   REQUIRE(a.has_value());
   REQUIRE(b.has_value());
+  const SolidId solid_a = a.value().solid_ids().front();
+  const SolidId solid_b = b.value().solid_ids().front();
   CurvedBooleanReport report;
   report.face_pairs = 999;  // must be overwritten by the operation
   const Result<CurvedBooleanResult> result =
-      boolean_solid_curved(a.value(), SolidId{0}, b.value(), SolidId{0}, SolidBooleanOp::intersection,
+      boolean_solid_curved(a.value(), solid_a, b.value(), solid_b, SolidBooleanOp::intersection,
                            CurvedBooleanOptions{}, &report);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == Errc::numeric_failure);
@@ -155,7 +157,8 @@ Add to `tests/unit/brep_boolean_curved_test.cpp`:
 TEST_CASE("curved boolean: a sphere face advertises its full uv domain") {
   const Result<Brep> sphere = make_sphere(Point3d{0, 0, 0}, 1.0, 1e-9);
   REQUIRE(sphere.has_value());
-  const std::vector<FaceId> faces = sphere.value().solid_faces(SolidId{0});
+  const SolidId solid = sphere.value().solid_ids().front();
+  const std::vector<FaceId> faces = sphere.value().solid_faces(solid);
   REQUIRE(faces.size() == 1u);
   const Result<detail::CurvedBooleanFaceInfo> info =
       detail::curved_boolean_face_info(sphere.value(), faces.front(), 1e-9);
@@ -205,7 +208,8 @@ Debug and Release green; specifically `sphere ∩ box` still returns "result is 
 TEST_CASE("trim face: a sphere splits into caps and bands") {
   const Result<Brep> sphere = make_sphere(Point3d{0, 0, 0}, 1.0, 1e-9);
   REQUIRE(sphere.has_value());
-  const FaceId face = sphere.value().solid_faces(SolidId{0}).front();
+  const SolidId solid = sphere.value().solid_ids().front();
+  const FaceId face = sphere.value().solid_faces(solid).front();
 
   // z = 0.5, CCW seen from +z. Only the uv loop is consumed by the splitter.
   const double v = std::asin(0.5);
@@ -268,7 +272,8 @@ Debug/Release: the new test yields exactly 2 fragments; add a second case with t
 TEST_CASE("curved volume: a sphere integrates through its poles") {
   const Result<Brep> sphere = make_sphere(Point3d{0, 0, 0}, 1.0, 1e-9);
   REQUIRE(sphere.has_value());
-  const Result<double> volume = curved_solid_volume(sphere.value(), SolidId{0}, 1e-9);
+  const SolidId solid = sphere.value().solid_ids().front();
+  const Result<double> volume = curved_solid_volume(sphere.value(), solid, 1e-9);
   REQUIRE(volume.has_value());
   CHECK(volume.value() == doctest::Approx(4.0 * 3.14159265358979323846 / 3.0).epsilon(1e-12));
 }
@@ -324,12 +329,14 @@ TEST_CASE("curved boolean: sphere and box") {
                                     1e-9);
   REQUIRE(sphere.has_value());
   REQUIRE(box.has_value());
+  const SolidId solid_a = sphere.value().solid_ids().front();
+  const SolidId solid_b = box.value().solid_ids().front();
   const Result<CurvedBooleanResult> cut =
-      boolean_solid_curved(sphere.value(), SolidId{0}, box.value(), SolidId{0},
+      boolean_solid_curved(sphere.value(), solid_a, box.value(), solid_b,
                            SolidBooleanOp::intersection);
   REQUIRE(cut.has_value());
   CHECK(cut.value().report.cuts >= 1u);
-  CHECK(curved_solid_volume(cut.value().brep, SolidId{0}, 1e-9).value() ==
+  CHECK(curved_solid_volume(cut.value().brep, cut.value().brep.solid_ids().front(), 1e-9).value() ==
         doctest::Approx(0.6544984694978736).epsilon(1e-9));
   CHECK(validate_topology(cut.value().brep).ok());
 }
@@ -376,12 +383,14 @@ TEST_CASE("curved boolean: torus and half space") {
                                     1e-9);
   REQUIRE(torus.has_value());
   REQUIRE(box.has_value());
+  const SolidId solid_a = torus.value().solid_ids().front();
+  const SolidId solid_b = box.value().solid_ids().front();
   const Result<CurvedBooleanResult> half =
-      boolean_solid_curved(torus.value(), SolidId{0}, box.value(), SolidId{0},
+      boolean_solid_curved(torus.value(), solid_a, box.value(), solid_b,
                            SolidBooleanOp::intersection);
   REQUIRE(half.has_value());
   CHECK(half.value().report.max_cut_residual <= 1e-3);
-  CHECK(curved_solid_volume(half.value().brep, SolidId{0}, 1e-9).value() ==
+  CHECK(curved_solid_volume(half.value().brep, half.value().brep.solid_ids().front(), 1e-9).value() ==
         doctest::Approx(2.4674011002723395).epsilon(1e-6));
   CHECK(validate_topology(half.value().brep).ok());
 }
@@ -430,11 +439,13 @@ TEST_CASE("curved boolean: cone and box") {
                                     1e-9);
   REQUIRE(cone.has_value());
   REQUIRE(box.has_value());
+  const SolidId solid_a = cone.value().solid_ids().front();
+  const SolidId solid_b = box.value().solid_ids().front();
   const Result<CurvedBooleanResult> kept =
-      boolean_solid_curved(cone.value(), SolidId{0}, box.value(), SolidId{0},
+      boolean_solid_curved(cone.value(), solid_a, box.value(), solid_b,
                            SolidBooleanOp::intersection);
   REQUIRE(kept.has_value());
-  CHECK(curved_solid_volume(kept.value().brep, SolidId{0}, 1e-9).value() ==
+  CHECK(curved_solid_volume(kept.value().brep, kept.value().brep.solid_ids().front(), 1e-9).value() ==
         doctest::Approx(0.2617993877991494).epsilon(1e-9));
   CHECK(validate_topology(kept.value().brep).ok());
 }
