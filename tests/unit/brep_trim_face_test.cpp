@@ -1489,3 +1489,115 @@ TEST_CASE("trim_face: an endpoint just inside a rim arc snaps onto the circle") 
   }
   CHECK(on_rim);
 }
+
+TEST_CASE("trim face: a sphere splits into caps and bands") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  // A latitude circle sampled once around the periodic seam. The first and the
+  // last point lie on the two synthetic seam sides (u = 0 and u = 2*pi), so the
+  // chain is closed by the seam itself rather than by repeating a point.
+  const double v = std::asin(0.5);
+  FaceCut cut;
+  for (int i = 0; i <= 64; ++i) {
+    cut.uv.push_back(Point2d{2.0 * kPi * i / 64.0, v});
+  }
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 2);
+
+  for (const CurvedFragment& fragment : result.value()) {
+    REQUIRE(fragment.loops.size() == 1);
+    REQUIRE(fragment.loops_uv.size() == 1);
+    CHECK(fragment.reversed == false);
+    CHECK(fragment.arc_spans.empty());
+    // Only cut geometry appears: the synthetic domain sides are stripped.
+    REQUIRE(fragment.loops_uv.front().size() == 65);
+    for (const Point2d& point : fragment.loops_uv.front()) {
+      CHECK(point[1] == v);
+    }
+    for (const Point3d& point : fragment.loops.front()) {
+      CHECK(norm2(point - Point3d{0, 0, 0}) ==
+            doctest::Approx(1.0).epsilon(1e-12));
+      CHECK(point[2] == doctest::Approx(0.5).epsilon(1e-12));
+    }
+  }
+}
+
+TEST_CASE("trim face: two latitude cuts split a sphere into three bands") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  const double v = std::asin(0.8);
+  std::vector<FaceCut> cuts(2);
+  for (int i = 0; i <= 64; ++i) {
+    const double u = 2.0 * kPi * i / 64.0;
+    cuts[0].uv.push_back(Point2d{u, -v});
+    cuts[1].uv.push_back(Point2d{u, v});
+  }
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 3);
+
+  std::vector<std::size_t> loop_counts;
+  loop_counts.reserve(result.value().size());
+  for (const CurvedFragment& fragment : result.value()) {
+    loop_counts.push_back(fragment.loops.size());
+  }
+  CHECK(loop_counts == std::vector<std::size_t>{1, 2, 1});
+
+  // Each ring is a full latitude circle: no ring carries a synthetic side and
+  // every ring's points share one exact z coordinate, on the sphere.
+  for (const CurvedFragment& fragment : result.value()) {
+    for (const std::vector<Point3d>& ring : fragment.loops) {
+      REQUIRE(ring.size() == 65);
+      const double z = ring.front()[2];
+      CHECK(std::fabs(z) == doctest::Approx(0.8).epsilon(1e-12));
+      for (const Point3d& point : ring) {
+        CHECK(point[2] == z);
+        CHECK(norm2(point - Point3d{0, 0, 0}) ==
+              doctest::Approx(1.0).epsilon(1e-12));
+      }
+    }
+  }
+}
+
+TEST_CASE("trim face: an open cut on a seam-only face is unsupported") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  FaceCut cut;
+  cut.uv = {Point2d{0.5, 0.2}, Point2d{1.0, 0.25}, Point2d{1.4, 0.2}};
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "split_face_curved: open cuts on a seam-only face");
+}
+
+TEST_CASE("trim face: a cut outside the sphere parameter domain is unsupported") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  const double v = 0.5 * kPi + 0.1;
+  FaceCut cut;
+  for (int i = 0; i <= 64; ++i) {
+    cut.uv.push_back(Point2d{2.0 * kPi * i / 64.0, v});
+  }
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "split_face_curved: cut leaves the parameter domain");
+}
