@@ -570,13 +570,15 @@ TEST_CASE("mass properties: a scaled trimmed face stays accurate at the default"
       geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9);
   REQUIRE(reference.has_value());
   CHECK(reference.value() == doctest::Approx(1433.8128835477412).epsilon(1e-9));
+  // 1e-7 shares the floored step with 1e-5 (floor binds at >= 3.125e-4), so the
+  // second row documents that the option is accepted below the floor, not a finer mesh.
   for (const double deflection : {1e-5, 1e-7}) {
     const auto mass =
         geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, deflection});
     REQUIRE(mass.has_value());
     const double relative =
         std::abs(mass.value().volume - reference.value()) / reference.value();
-    CHECK(relative < 1e-5);
+    CHECK(relative < 1e-9);
   }
 }
 
