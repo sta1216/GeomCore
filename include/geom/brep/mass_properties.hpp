@@ -9,8 +9,10 @@
 #include <numbers>
 #include <vector>
 
+#include <geom/brep/face_uv.hpp>
 #include <geom/brep/tessellate.hpp>
 #include <geom/brep/topology.hpp>
+#include <geom/cgeom/trimmed_domain.hpp>
 #include <geom/core/error.hpp>
 #include <geom/core/result.hpp>
 #include <geom/curves/analytic_curve.hpp>
@@ -48,6 +50,14 @@ inline namespace v1 {
 // sphere, two closed circles for a torus). Any other curved face returns
 // Errc::unsupported rather than integrating the wrong region.
 //
+// A curved face whose boundary is a polyline trim (the curved-boolean output)
+// and whose uv domain is a single rectilinear ring is integrated over its
+// trimmed uv triangulation instead: every triangle is split until its longest
+// uv edge is short enough for the requested curved_sampling_deflection, then
+// the exact surface position and Jacobian are sampled with the seven-point
+// Dunavant rule. A trimmed face with a hole or a non-rectilinear boundary stays
+// Errc::unsupported; curved-face holes are deferred to M3c-2.
+//
 // All output values are finite; a non-finite integral is Errc::numeric_failure.
 // Options: a non-positive or non-finite sampling_deflection and a
 // quadrature_order below 1 are Errc::tolerance_violation.
@@ -61,6 +71,7 @@ struct MassProperties {
 struct MassPropertiesOptions {
   double sampling_deflection = 1e-9;  // Planar face boundary chord height.
   int quadrature_order = 24;          // Gauss-Legendre points per direction.
+  double curved_sampling_deflection = 1e-5;  // Boundary chord for trimmed curved faces.
 };
 
 namespace detail {
@@ -283,6 +294,152 @@ inline void mass_integrate_parametric(const Surface& surface, const MassUvDomain
       mass_add_surface_element(acc, local, area, weight);
     }
   }
+}
+
+// Seven-point Dunavant rule on the reference triangle (exact to degree five).
+struct MassTriangleRule {
+  double barycentric[7][3];
+  double weight[7];
+};
+
+inline const MassTriangleRule& mass_triangle_rule() {
+  static const MassTriangleRule rule = {
+      {{1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0},
+       {0.059715871789770, 0.470142064105115, 0.470142064105115},
+       {0.470142064105115, 0.059715871789770, 0.470142064105115},
+       {0.470142064105115, 0.470142064105115, 0.059715871789770},
+       {0.797426985353087, 0.101286507323456, 0.101286507323456},
+       {0.101286507323456, 0.797426985353087, 0.101286507323456},
+       {0.101286507323456, 0.101286507323456, 0.797426985353087}},
+      {0.225, 0.132394152788506, 0.132394152788506, 0.132394152788506, 0.125939180544827,
+       0.125939180544827, 0.125939180544827}};
+  return rule;
+}
+
+inline double mass_uv_distance(const Point2d& a, const Point2d& b) noexcept {
+  const double du = b[0] - a[0];
+  const double dv = b[1] - a[1];
+  return std::sqrt(du * du + dv * dv);
+}
+
+// Integrates a triangulated (u,v) domain over the exact analytic surface with
+// the seven-point Dunavant rule. Triangles whose longest edge exceeds `step`
+// are split recursively at their uv midpoint so the quadrature sees a
+// surface-following partition; the split points are interior to the uv domain,
+// so the partition stays exact and hanging nodes do not affect the integral.
+template <class Surface>
+inline Result<void> mass_integrate_trimmed_parametric(
+    const Surface& surface, const std::vector<Point2d>& points,
+    const std::vector<std::array<std::uint32_t, 3>>& triangles, bool reversed,
+    const Vec3d& reference, double step, MassIntegrals& acc) {
+  constexpr std::size_t kMaxTriangles = 2000000u;
+  std::vector<Point2d> uv = points;
+  uv.reserve(points.size() + triangles.size());
+  std::vector<std::array<std::uint32_t, 3>> pending(triangles.rbegin(), triangles.rend());
+  std::vector<std::array<std::uint32_t, 3>> fine;
+  fine.reserve(triangles.size());
+  const MassTriangleRule& rule = mass_triangle_rule();
+  while (!pending.empty()) {
+    const std::array<std::uint32_t, 3> triangle = pending.back();
+    pending.pop_back();
+    const std::uint32_t corners[3][2] = {{triangle[0], triangle[1]},
+                                         {triangle[1], triangle[2]},
+                                         {triangle[2], triangle[0]}};
+    int longest_edge = 0;
+    double longest = mass_uv_distance(uv[corners[0][0]], uv[corners[0][1]]);
+    for (int i = 1; i < 3; ++i) {
+      const double length = mass_uv_distance(uv[corners[i][0]], uv[corners[i][1]]);
+      if (length > longest) {
+        longest = length;
+        longest_edge = i;
+      }
+    }
+    if (longest > step) {
+      if (uv.size() >= kMaxTriangles || fine.size() + pending.size() >= kMaxTriangles) {
+        return mass_numeric_failure("mass_properties: trimmed face exceeds the triangle limit");
+      }
+      const std::uint32_t first = corners[longest_edge][0];
+      const std::uint32_t second = corners[longest_edge][1];
+      const std::uint32_t opposite = triangle[(longest_edge + 2) % 3];
+      uv.push_back(Point2d{0.5 * (uv[first][0] + uv[second][0]),
+                           0.5 * (uv[first][1] + uv[second][1])});
+      const std::uint32_t middle = static_cast<std::uint32_t>(uv.size() - 1);
+      pending.push_back({first, middle, opposite});
+      pending.push_back({middle, second, opposite});
+      continue;
+    }
+    const Point2d& p0 = uv[triangle[0]];
+    const Point2d& p1 = uv[triangle[1]];
+    const Point2d& p2 = uv[triangle[2]];
+    const double cross2 =
+        (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p1[1] - p0[1]) * (p2[0] - p0[0]);
+    if (!(std::fabs(cross2) > 0.0)) continue;
+    const double uv_area = 0.5 * std::fabs(cross2);
+    for (int k = 0; k < 7; ++k) {
+      const double u = rule.barycentric[k][0] * p0[0] + rule.barycentric[k][1] * p1[0] +
+                       rule.barycentric[k][2] * p2[0];
+      const double v = rule.barycentric[k][0] * p0[1] + rule.barycentric[k][1] * p1[1] +
+                       rule.barycentric[k][2] * p2[1];
+      Vec3d area = cross(surface.du(u, v), surface.dv(u, v));
+      if (reversed) area = mass_negate(area);
+      const Point3d point = surface.eval(u, v);
+      const Point3d local{point[0] - reference[0], point[1] - reference[1],
+                          point[2] - reference[2]};
+      mass_add_surface_element(acc, local, area, uv_area * rule.weight[k]);
+    }
+  }
+  return {};
+}
+
+// A trimmed curved face is integrable here only when its uv domain is a single
+// rectilinear ring: the same assumption the trimmed tessellation strip
+// decomposition makes. Anything else reports the honest unsupported error.
+inline bool mass_ring_rectilinear(const std::vector<Point2d>& points) {
+  if (points.size() < 3) return false;
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    const Point2d& a = points[i];
+    const Point2d& b = points[(i + 1) % points.size()];
+    const double scale = 1.0 + std::max(std::fabs(a[0]), std::fabs(a[1]));
+    const double tolerance = 1e-9 * scale;
+    const double du = std::fabs(b[0] - a[0]);
+    const double dv = std::fabs(b[1] - a[1]);
+    if (du > tolerance && dv > tolerance) return false;
+  }
+  return true;
+}
+
+template <class Surface>
+inline Result<void> mass_add_trimmed_face(const Brep& brep, FaceId id, const Surface& surface,
+                                          const MassPropertiesOptions& options,
+                                          const Vec3d& reference, MassIntegrals& acc) {
+  if (!tessellate_face_has_polyline_edge(brep, id)) return mass_unsupported_rectangle(id);
+  const Result<FaceUvProjection> projection =
+      face_uv_projection(brep, brep.face(id), options.curved_sampling_deflection);
+  if (!projection.has_value()) return projection.error();
+  const Result<std::vector<TrimmedBoundary>> boundaries = trimmed_face_boundaries(
+      brep, id, projection.value(), options.curved_sampling_deflection);
+  if (!boundaries.has_value()) return boundaries.error();
+  if (boundaries.value().size() != 1u) {
+    return Error{Errc::unsupported, "mass_properties: trimmed curved face has a hole", id.index(),
+                 0u};
+  }
+  if (!mass_ring_rectilinear(boundaries.value().front().points)) {
+    return Error{Errc::unsupported,
+                 "mass_properties: trimmed curved face boundary is not rectilinear", id.index(),
+                 0u};
+  }
+  const Result<TrimmedUvTriangulation> triangulation =
+      triangulate_trimmed_domain(boundaries.value());
+  if (!triangulation.has_value()) return triangulation.error();
+  // The uv edges of a rectilinear trimmed domain are exact parameter lines, so
+  // curved_sampling_deflection controls only the interior quadrature density;
+  // the seven-point rule reaches its accuracy floor well before the step a 1e-5
+  // deflection would ask for, so the step is floored at 5e-2 radians. Without
+  // the floor a default call would spend seconds for no measurable gain.
+  const double step = std::max(std::sqrt(8.0 * options.curved_sampling_deflection), 5e-2);
+  return mass_integrate_trimmed_parametric(surface, triangulation.value().points,
+                                           triangulation.value().triangles,
+                                           brep.face(id).reversed, reference, step, acc);
 }
 
 inline Result<MassUvDomain> mass_cylinder_domain(const Brep& brep, FaceId id,
@@ -632,7 +789,10 @@ inline Result<void> mass_add_face(const Brep& brep, FaceId id, const MassPropert
   if (const Cylinder3* cylinder = std::get_if<Cylinder3>(&surface)) {
     const Result<MassUvDomain> domain =
         mass_cylinder_domain(brep, id, *cylinder, options.sampling_deflection);
-    if (!domain.has_value()) return domain.error();
+    if (!domain.has_value()) {
+      if (domain.error().code != Errc::unsupported) return domain.error();
+      return mass_add_trimmed_face(brep, id, *cylinder, options, reference, acc);
+    }
     mass_integrate_parametric(*cylinder, domain.value(), face.reversed, reference, nodes,
                               weights, acc);
     return {};
@@ -640,7 +800,10 @@ inline Result<void> mass_add_face(const Brep& brep, FaceId id, const MassPropert
   if (const Cone3* cone = std::get_if<Cone3>(&surface)) {
     const Result<MassUvDomain> domain =
         mass_cone_domain(brep, id, *cone, options.sampling_deflection);
-    if (!domain.has_value()) return domain.error();
+    if (!domain.has_value()) {
+      if (domain.error().code != Errc::unsupported) return domain.error();
+      return mass_add_trimmed_face(brep, id, *cone, options, reference, acc);
+    }
     mass_integrate_parametric(*cone, domain.value(), face.reversed, reference, nodes, weights,
                               acc);
     return {};
@@ -648,7 +811,10 @@ inline Result<void> mass_add_face(const Brep& brep, FaceId id, const MassPropert
   if (const Sphere3* sphere = std::get_if<Sphere3>(&surface)) {
     const Result<MassUvDomain> domain =
         mass_sphere_domain(brep, id, *sphere, options.sampling_deflection);
-    if (!domain.has_value()) return domain.error();
+    if (!domain.has_value()) {
+      if (domain.error().code != Errc::unsupported) return domain.error();
+      return mass_add_trimmed_face(brep, id, *sphere, options, reference, acc);
+    }
     mass_integrate_parametric(*sphere, domain.value(), face.reversed, reference, nodes,
                               weights, acc);
     return {};
@@ -656,7 +822,10 @@ inline Result<void> mass_add_face(const Brep& brep, FaceId id, const MassPropert
   if (const Torus3* torus = std::get_if<Torus3>(&surface)) {
     const Result<MassUvDomain> domain =
         mass_torus_domain(brep, id, *torus, options.sampling_deflection);
-    if (!domain.has_value()) return domain.error();
+    if (!domain.has_value()) {
+      if (domain.error().code != Errc::unsupported) return domain.error();
+      return mass_add_trimmed_face(brep, id, *torus, options, reference, acc);
+    }
     mass_integrate_parametric(*torus, domain.value(), face.reversed, reference, nodes,
                               weights, acc);
     return {};
@@ -673,7 +842,8 @@ inline Result<void> mass_add_face(const Brep& brep, FaceId id, const MassPropert
 inline Result<MassProperties> mass_properties(
     const Brep& brep, const MassPropertiesOptions& options = {}) {
   if (!std::isfinite(options.sampling_deflection) || !(options.sampling_deflection > 0.0) ||
-      options.quadrature_order <= 0) {
+      !std::isfinite(options.curved_sampling_deflection) ||
+      !(options.curved_sampling_deflection > 0.0) || options.quadrature_order <= 0) {
     return Error{Errc::tolerance_violation, "mass_properties: options are out of range", 0u, 0u};
   }
   if (brep.shell_count() == 0) {

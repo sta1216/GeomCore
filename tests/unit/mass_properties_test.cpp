@@ -7,9 +7,12 @@
 #include <numbers>
 #include <utility>
 
+#include <geom/brep/boolean_solid_curved.hpp>
+#include <geom/brep/detail/curved_volume.hpp>
 #include <geom/brep/mass_properties.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/solid_editor.hpp>
+#include <geom/brep/split_solid.hpp>
 #include <geom/core/error.hpp>
 
 namespace {
@@ -404,4 +407,188 @@ TEST_CASE("all-reversed box has no mass properties") {
   const auto m = geom::mass_properties(b.value());
   REQUIRE_FALSE(m.has_value());
   CHECK(m.error().code == geom::Errc::numeric_failure);
+}
+
+namespace {
+
+geom::Brep windowed_cylinder_brep() {
+  const geom::Brep cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                          1e-9)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{0.5, -0.5, 0.5}, geom::Point3d{2.0, 0.5, 1.5}, 1e-9).value();
+  return geom::boolean_solid_curved(cylinder, cylinder.solid_ids().front(), box,
+                                    box.solid_ids().front(), geom::SolidBooleanOp::difference,
+                                    geom::CurvedBooleanOptions{1e-9})
+      .value()
+      .brep;
+}
+
+geom::Brep hole_window_brep() {
+  const geom::Brep cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                          1e-9)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-0.5, 0.5, 0.5}, geom::Point3d{0.5, 2.0, 1.5}, 1e-9).value();
+  return geom::boolean_solid_curved(cylinder, cylinder.solid_ids().front(), box,
+                                    box.solid_ids().front(), geom::SolidBooleanOp::difference,
+                                    geom::CurvedBooleanOptions{1e-9})
+      .value()
+      .brep;
+}
+
+geom::Brep slanted_trim_brep() {
+  const geom::Brep cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                          1e-9)
+          .value();
+  const geom::Vec3d normal{0.3, 0.0, 1.0};
+  const double length = std::sqrt(geom::dot(normal, normal));
+  const geom::Plane3 plane{geom::Vec3d{normal[0] / length, normal[1] / length, normal[2] / length},
+                           1.0 / length};
+  return geom::split_solid_by_plane(cylinder, cylinder.solid_ids().front(), plane, 1e-9)
+      .value()
+      .above;
+}
+
+std::array<std::uint64_t, 10> mass_bits(const geom::MassProperties& mass) {
+  const double values[10] = {mass.volume,
+                             mass.centroid[0],
+                             mass.centroid[1],
+                             mass.centroid[2],
+                             mass.inertia[0][0],
+                             mass.inertia[1][1],
+                             mass.inertia[2][2],
+                             mass.inertia[0][1],
+                             mass.inertia[0][2],
+                             mass.inertia[1][2]};
+  std::array<std::uint64_t, 10> bits{};
+  for (std::size_t i = 0; i < 10; ++i) {
+    std::memcpy(&bits[i], &values[i], sizeof(double));
+  }
+  return bits;
+}
+
+}  // namespace
+
+TEST_CASE("mass properties: canonical paths stay bit-identical") {
+  // Pins the exact rectangular Gauss-Legendre output of the untrimmed paths so
+  // the trimmed-face work cannot perturb them.
+  {
+    const geom::Brep cylinder =
+        geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                            1e-9)
+            .value();
+    const auto mass = geom::mass_properties(cylinder);
+    REQUIRE(mass.has_value());
+    const std::array<std::uint64_t, 10> expected = {
+        0x401921fb541433a0ull, 0xbdde8ac000000000ull, 0xbcc100b76a374858ull, 0x3ff0000000000006ull,
+        0x400d524fe1f92f62ull, 0x400d524fe1ef9732ull, 0x400921fb5401033eull, 0x3ca091760dcabfd0ull,
+        0xbcf89b18e670b3aaull, 0xbc70342f650004a5ull};
+    CHECK(mass_bits(mass.value()) == expected);
+  }
+  {
+    const geom::Brep box =
+        geom::make_box(geom::Point3d{0.0, 0.0, 0.0}, geom::Point3d{1.0, 2.0, 3.0}, 1e-9).value();
+    const auto mass = geom::mass_properties(box);
+    REQUIRE(mass.has_value());
+    const std::array<std::uint64_t, 10> expected = {
+        0x4018000000000000ull, 0x3fe0000000000000ull, 0x3ff0000000000000ull, 0x3ff8000000000000ull,
+        0x401a000000000000ull, 0x4013ffffffffffffull, 0x4004000000000000ull, 0x0000000000000000ull,
+        0x0000000000000000ull, 0x0000000000000000ull};
+    CHECK(mass_bits(mass.value()) == expected);
+  }
+}
+
+TEST_CASE("mass properties: a windowed cylinder matches its reference moments") {
+  const geom::Brep brep = windowed_cylinder_brep();
+  const geom::Result<geom::MassProperties> mass =
+      geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
+  REQUIRE(mass.has_value());
+  // Cylinder r=1, h=2 minus the prism {x >= 0.5, |y| <= 0.5, 0.5 <= z <= 1.5}.
+  CHECK(mass.value().volume == doctest::Approx(5.826573829689068).epsilon(2e-4));
+  CHECK(mass.value().centroid[0] == doctest::Approx(-0.057209149506498476).epsilon(2e-4));
+  CHECK(mass.value().centroid[1] == doctest::Approx(0.0).epsilon(1e-7));
+  CHECK(mass.value().centroid[2] == doctest::Approx(1.0).epsilon(1e-7));
+  CHECK(mass.value().inertia[0][0] == doctest::Approx(3.5920340332341665).epsilon(2e-4));
+  // The brief's Iyy (3.5729643167320004) is a transcription error: the window
+  // sits at x ~ 0.73, far from the y axis, so removing it lowers Iyy well below
+  // Ixx. Independent band quadrature of the pocket gives 3.3564579629722258.
+  CHECK(mass.value().inertia[1][1] == doctest::Approx(3.3564579629722258).epsilon(2e-4));
+  CHECK(mass.value().inertia[2][2] == doctest::Approx(2.8358037071487563).epsilon(2e-4));
+  CHECK(mass.value().inertia[0][1] == doctest::Approx(0.0).epsilon(1e-6));
+  CHECK(mass.value().inertia[0][2] == doctest::Approx(0.0).epsilon(1e-6));
+  // All tensor components are about the centroid. Cx is the parallel-axis
+  // derivation -0.057209149506498476 (the pocket's first moment over the solid
+  // volume); the tensor must be exactly symmetric.
+  CHECK(mass.value().centroid[0] == doctest::Approx(-0.057209149506498476).epsilon(1e-9));
+  CHECK(mass.value().inertia[0][1] == mass.value().inertia[1][0]);
+  CHECK(mass.value().inertia[0][2] == mass.value().inertia[2][0]);
+  CHECK(mass.value().inertia[1][2] == mass.value().inertia[2][1]);
+}
+
+TEST_CASE("mass properties: trimmed volume agrees with the volume integrator") {
+  const geom::Brep brep = windowed_cylinder_brep();
+  const geom::Result<double> reference =
+      geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9);
+  REQUIRE(reference.has_value());
+  const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
+  REQUIRE(mass.has_value());
+  CHECK(mass.value().volume == doctest::Approx(reference.value()).epsilon(2e-4));
+}
+
+TEST_CASE("mass properties: trimmed sampling deflection stays at the quadrature floor") {
+  const geom::Brep brep = windowed_cylinder_brep();
+  const geom::Result<double> reference =
+      geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9);
+  REQUIRE(reference.has_value());
+  // The uv edges of this rectilinear trimmed domain are exact parameter lines,
+  // so the deflection only controls the interior quadrature density: 1e-3 and
+  // 1e-5 both sit at the same floor (~2.6e-9 absolute, 4.4e-10 relative).
+  const auto fine = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-3});
+  const auto finer = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
+  REQUIRE(fine.has_value());
+  REQUIRE(finer.has_value());
+  CHECK(std::abs(fine.value().volume - reference.value()) <= 1e-8 * reference.value());
+  CHECK(std::abs(finer.value().volume - reference.value()) <= 1e-8 * reference.value());
+  // A deliberately coarse deflection does coarsen the interior quadrature; only
+  // there does the expected error ordering become observable.
+  const auto coarse = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-1});
+  REQUIRE(coarse.has_value());
+  const double coarse_error = std::abs(coarse.value().volume - reference.value());
+  const double fine_error = std::abs(fine.value().volume - reference.value());
+  CHECK(fine_error < coarse_error);
+}
+
+TEST_CASE("mass properties: trimmed dents and holes report their limitation") {
+  {
+    // A window that crosses the seam becomes two loops, which the parametric
+    // integration does not support yet (deferred to M3c-2).
+    const geom::Brep brep = hole_window_brep();
+    const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
+    REQUIRE(!mass.has_value());
+    CHECK(mass.error().code == geom::Errc::unsupported);
+    CHECK(std::string(mass.error().message) ==
+          "mass_properties: trimmed curved face has a hole");
+  }
+  {
+    // An oblique cut leaves an ellipse in uv, which is not rectilinear.
+    const geom::Brep brep = slanted_trim_brep();
+    const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
+    REQUIRE(!mass.has_value());
+    CHECK(mass.error().code == geom::Errc::unsupported);
+    CHECK(std::string(mass.error().message) ==
+          "mass_properties: trimmed curved face boundary is not rectilinear");
+  }
+}
+
+TEST_CASE("mass properties: trimmed sampling deflection is validated") {
+  const geom::Brep brep = windowed_cylinder_brep();
+  for (const double deflection : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN()}) {
+    const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, deflection});
+    REQUIRE(!mass.has_value());
+    CHECK(mass.error().code == geom::Errc::tolerance_violation);
+  }
 }
