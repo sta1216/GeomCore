@@ -9,6 +9,7 @@
 #include <geom/brep/tessellate.hpp>
 #include <geom/brep/validate.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -17,6 +18,7 @@
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -450,6 +452,10 @@ TEST_CASE("QA-13: trimmed tessellation is watertight, finite and deterministic")
   REQUIRE(second.has_value());
   const geom::TriMesh& a = first.value();
   const geom::TriMesh& b = second.value();
+  REQUIRE(!a.triangles.empty());
+  CHECK(a.triangles.size() == 894);
+  CHECK(a.positions.size() == 449);
+  CHECK(a.triangle_face.size() == a.triangles.size());
   check_watertight(a);
   CHECK(a.triangles == b.triangles);
   CHECK(a.triangle_face == b.triangle_face);
@@ -459,6 +465,14 @@ TEST_CASE("QA-13: trimmed tessellation is watertight, finite and deterministic")
       CHECK(index < a.positions.size());
     }
   }
+  // Every triangle is grouped under a valid face, and all eight fixture faces
+  // receive at least one triangle.
+  std::vector<bool> grouped(brep.face_ids().size(), false);
+  for (const std::uint32_t face : a.triangle_face) {
+    CHECK(face < brep.face_ids().size());
+    if (face < grouped.size() && !grouped[face]) grouped[face] = true;
+  }
+  CHECK(std::count(grouped.begin(), grouped.end(), true) == 8);
   for (std::size_t i = 0; i < a.positions.size(); ++i) {
     for (int axis = 0; axis < 3; ++axis) {
       CHECK(std::isfinite(a.positions[i][static_cast<std::size_t>(axis)]));

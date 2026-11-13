@@ -4,7 +4,7 @@
 
 **Goal:** Tessellate trimmed analytic B-rep faces (holes, partial rims, seam crossings) into a watertight mesh within `deflection`, and compute volume, centroid and inertia for solids that contain those faces.
 
-**Architecture:** A trimmed face contributes a set of UV rings (outer CCW, holes CW) obtained by projecting its coedge edge samples, so every boundary vertex is the same pool index the neighbouring face uses. The rings are triangulated by the existing exact `triangulate_polygon2`, lifted with `face_uv_eval`, and refined uniformly per face until the chord height meets `deflection`. `mass_properties` reuses the same ring/triangulation machinery with arc-aware boundary resampling and a seven-point Dunavant rule that accumulates the first and second moments. Canonical untrimmed primitives keep their existing grid builders, so the current weld and pole guarantees are untouched.
+**Architecture:** A trimmed face contributes a set of UV rings (outer CCW, holes CW) obtained by projecting its coedge edge samples, so every boundary vertex is the same pool index the neighbouring face uses. The rings are triangulated by the existing exact `triangulate_polygon2`, lifted with `face_uv_eval`, and refined by adaptive chord-height subdivision (split while the sag exceeds `0.9*deflection`, budget `8*triangles+64`, 2e6-triangle cap) until the chord height meets `deflection`. `mass_properties` reuses the same ring/triangulation machinery with arc-aware boundary resampling and a seven-point Dunavant rule that accumulates the first and second moments. Canonical untrimmed primitives keep their existing grid builders, so the current weld and pole guarantees are untouched.
 
 **Tech Stack:** C++20, CMake 4.4.4 + VS2022 (MSVC 19.44), doctest 2.4.11, `geom::v1`, exact predicates from `geom/cgeom`, `/W4 /WX /utf-8`.
 
@@ -663,11 +663,11 @@ Run the Debug and Release suites and record: total cases/assertions, the trimmed
 
 - [x] **Step 3: Write ADR-0027**
 
-Record: trimmed analytic faces are meshed by UV triangulation of the projected ring set (not by extending the per-surface grids); boundary indices are shared with neighbouring faces; refinement is uniform per face; mass properties integrate the same triangulation with Dunavant quadrature at `curved_sampling_deflection = 1e-5` (relative accuracy ~1e-5); sphere/torus/cone operands and NURBS trim contours are M3c-2; canonical primitives keep the old grids.
+Record: trimmed analytic faces are meshed by UV triangulation of the projected ring set (not by extending the per-surface grids); boundary indices are shared with neighbouring faces; refinement is adaptive sag (split while the sag exceeds `0.9*deflection`, budget `8*triangles+64`, 2e6-triangle cap); mass properties integrate the same triangulation with Dunavant quadrature at `curved_sampling_deflection = 1e-5` (step floored at `max(sqrt(8*defl), 5e-2 rad)`; measured 4.4e-10 relative on r=1, 4.4e-11 on r=10); sphere/torus/cone operands and NURBS trim contours are M3c-2; canonical primitives keep the old grids.
 
 - [x] **Step 4: Update §16.3 and the plan boxes**
 
-Add an M3c-1 row: "trimmed cylinder tessellation + trimmed mass properties: PASS (QA-13, QA-11 extended); limits: M3c-2 for sphere/torus/cone operands and NURBS". Check the task boxes in this plan.
+Add an M3c-1 row: "trimmed cylinder tessellation + trimmed mass properties: QA-13 PASS; QA-11 not extended in M3c-1; limits: M3c-2 for sphere/torus/cone operands and NURBS". Check the task boxes in this plan.
 
 - [x] **Step 5: Commit**
 
