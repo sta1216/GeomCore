@@ -371,7 +371,7 @@ TEST_CASE("trimmed tessellation: a hole loop is rejected with the trimmed-path e
           "tessellate: trimmed face does not follow the surface");
   }
 }
-TEST_CASE("trimmed tessellation: smaller deflection refines the trimmed band") {
+TEST_CASE("trimmed tessellation: a band-shaped domain refines with smaller deflection") {
   const geom::Brep brep = cut_cylinder();
   const auto coarse = geom::tessellate(brep, geom::TessellationOptions{5e-2, 0.35});
   const auto fine = geom::tessellate(brep, geom::TessellationOptions{2e-3, 0.35});
@@ -382,7 +382,7 @@ TEST_CASE("trimmed tessellation: smaller deflection refines the trimmed band") {
   check_watertight(fine.value());
 }
 
-TEST_CASE("trimmed tessellation: chord height of the windowed band meets deflection") {
+TEST_CASE("trimmed tessellation: a band-shaped domain chord height meets deflection") {
   const geom::Brep brep = cut_cylinder();
   const double deflection = 2e-3;
   const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});

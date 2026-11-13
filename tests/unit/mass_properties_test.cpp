@@ -3,8 +3,10 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <numbers>
+#include <string>
 #include <utility>
 
 #include <geom/brep/boolean_solid_curved.hpp>
@@ -453,6 +455,22 @@ geom::Brep slanted_trim_brep() {
       .above;
 }
 
+geom::Brep scaled_window_brep() {
+  // r=10, h=5 with a rectilinear window that crosses the seam (x >= 5, |y| <= 5)
+  // between z=1 and z=4.
+  const geom::Brep cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 10.0, 5.0,
+                          1e-9)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{5.0, -5.0, 1.0}, geom::Point3d{20.0, 5.0, 4.0}, 1e-9).value();
+  return geom::boolean_solid_curved(cylinder, cylinder.solid_ids().front(), box,
+                                    box.solid_ids().front(), geom::SolidBooleanOp::difference,
+                                    geom::CurvedBooleanOptions{1e-9})
+      .value()
+      .brep;
+}
+
 std::array<std::uint64_t, 10> mass_bits(const geom::MassProperties& mass) {
   const double values[10] = {mass.volume,
                              mass.centroid[0],
@@ -508,22 +526,25 @@ TEST_CASE("mass properties: a windowed cylinder matches its reference moments") 
       geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
   REQUIRE(mass.has_value());
   // Cylinder r=1, h=2 minus the prism {x >= 0.5, |y| <= 0.5, 0.5 <= z <= 1.5}.
-  CHECK(mass.value().volume == doctest::Approx(5.826573829689068).epsilon(2e-4));
-  CHECK(mass.value().centroid[0] == doctest::Approx(-0.057209149506498476).epsilon(2e-4));
+  // Closed-form reference (pocket integral by Simpson quadrature); all tensor
+  // components are about the centroid.
+  CHECK(mass.value().volume == doctest::Approx(5.8265738297177867).epsilon(1e-7));
+  CHECK(mass.value().centroid[0] == doctest::Approx(-0.057209149501289074).epsilon(1e-9));
   CHECK(mass.value().centroid[1] == doctest::Approx(0.0).epsilon(1e-7));
   CHECK(mass.value().centroid[2] == doctest::Approx(1.0).epsilon(1e-7));
-  CHECK(mass.value().inertia[0][0] == doctest::Approx(3.5920340332341665).epsilon(2e-4));
-  // The brief's Iyy (3.5729643167320004) is a transcription error: the window
-  // sits at x ~ 0.73, far from the y axis, so removing it lowers Iyy well below
-  // Ixx. Independent band quadrature of the pocket gives 3.3564579629722258.
-  CHECK(mass.value().inertia[1][1] == doctest::Approx(3.3564579629722258).epsilon(2e-4));
-  CHECK(mass.value().inertia[2][2] == doctest::Approx(2.8358037071487563).epsilon(2e-4));
+  CHECK(mass.value().inertia[0][0] == doctest::Approx(3.5920340332365619).epsilon(1e-7));
+  // Parallel-axis check: the full cylinder's centroidal Iyy is 3.6651914, the
+  // pocket removes 0.2896637 about its own centroid, and the volume shift
+  // contributes V*Cx^2 = 0.0190705; 3.6651914 - 0.2896637 - 0.0190705 =
+  // 3.3564579658. Ixx is unaffected (Cy = 0), which is why only Iyy disagreed
+  // with the original brief value 3.5729643167320004 (that was the pre-shift,
+  // origin-plane value).
+  CHECK(mass.value().inertia[1][1] == doctest::Approx(3.3564579658203764).epsilon(1e-7));
+  CHECK(mass.value().inertia[2][2] == doctest::Approx(2.8358037071808475).epsilon(1e-7));
   CHECK(mass.value().inertia[0][1] == doctest::Approx(0.0).epsilon(1e-6));
   CHECK(mass.value().inertia[0][2] == doctest::Approx(0.0).epsilon(1e-6));
-  // All tensor components are about the centroid. Cx is the parallel-axis
-  // derivation -0.057209149506498476 (the pocket's first moment over the solid
-  // volume); the tensor must be exactly symmetric.
-  CHECK(mass.value().centroid[0] == doctest::Approx(-0.057209149506498476).epsilon(1e-9));
+  CHECK(mass.value().inertia[1][2] == doctest::Approx(0.0).epsilon(1e-6));
+  // The tensor must be exactly symmetric.
   CHECK(mass.value().inertia[0][1] == mass.value().inertia[1][0]);
   CHECK(mass.value().inertia[0][2] == mass.value().inertia[2][0]);
   CHECK(mass.value().inertia[1][2] == mass.value().inertia[2][1]);
@@ -536,7 +557,27 @@ TEST_CASE("mass properties: trimmed volume agrees with the volume integrator") {
   REQUIRE(reference.has_value());
   const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
   REQUIRE(mass.has_value());
-  CHECK(mass.value().volume == doctest::Approx(reference.value()).epsilon(2e-4));
+  CHECK(mass.value().volume == doctest::Approx(reference.value()).epsilon(1e-7));
+}
+
+TEST_CASE("mass properties: a scaled trimmed face stays accurate at the default") {
+  // r=10, h=5 cylinder minus the seam-crossing window {x >= 5, |y| <= 5,
+  // 1 <= z <= 4}: the trim boundary is still rectilinear, so this is the large
+  // counterpart of the r=1 fixture. The exact volume is the closed form
+  // pi*100*5 - 3*(integral of 2*min(sqrt(100-x^2), 5) for x in [5,10]).
+  const geom::Brep brep = scaled_window_brep();
+  const geom::Result<double> reference =
+      geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9);
+  REQUIRE(reference.has_value());
+  CHECK(reference.value() == doctest::Approx(1433.8128835477412).epsilon(1e-9));
+  for (const double deflection : {1e-5, 1e-7}) {
+    const auto mass =
+        geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, deflection});
+    REQUIRE(mass.has_value());
+    const double relative =
+        std::abs(mass.value().volume - reference.value()) / reference.value();
+    CHECK(relative < 1e-5);
+  }
 }
 
 TEST_CASE("mass properties: trimmed sampling deflection stays at the quadrature floor") {
@@ -564,8 +605,9 @@ TEST_CASE("mass properties: trimmed sampling deflection stays at the quadrature 
 
 TEST_CASE("mass properties: trimmed dents and holes report their limitation") {
   {
-    // A window that crosses the seam becomes two loops, which the parametric
-    // integration does not support yet (deferred to M3c-2).
+    // The window at +y (u in [45, 135] deg) does not cross the seam, so it
+    // closes in uv and the trimmed face has an outer ring plus a hole loop; the
+    // parametric integration does not support holes yet (deferred to M3c-2).
     const geom::Brep brep = hole_window_brep();
     const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
     REQUIRE(!mass.has_value());
@@ -585,10 +627,16 @@ TEST_CASE("mass properties: trimmed dents and holes report their limitation") {
 }
 
 TEST_CASE("mass properties: trimmed sampling deflection is validated") {
-  const geom::Brep brep = windowed_cylinder_brep();
+  // A plain full cylinder has no trimmed face, so the option check cannot be
+  // masked by a face_uv_projection error.
+  const geom::Brep brep =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                          1e-9)
+          .value();
   for (const double deflection : {0.0, -1.0, std::numeric_limits<double>::quiet_NaN()}) {
     const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, deflection});
     REQUIRE(!mass.has_value());
     CHECK(mass.error().code == geom::Errc::tolerance_violation);
+    CHECK(std::string(mass.error().message) == "mass_properties: options are out of range");
   }
 }
