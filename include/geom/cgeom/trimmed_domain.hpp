@@ -45,6 +45,10 @@ inline constexpr double kTrimmedPi = 3.141592653589793238462643383279502884;
 inline constexpr double kTrimmedTwoPi = 2.0 * kTrimmedPi;
 inline constexpr std::size_t kTrimmedMaxSamples = 1000000u;
 inline constexpr double kTrimmedTolerance = 1e-12;
+// Angular contiguity between two arc spans is a difference of circle
+// parameters (radians), so it is an absolute angle tolerance and must not be
+// scaled by the circle radius.
+inline constexpr double kTrimmedArcMergeTolerance = 1e-9;
 
 inline bool trimmed_point_finite(const Point2d& p) noexcept {
   return std::isfinite(p[0]) && std::isfinite(p[1]);
@@ -117,9 +121,8 @@ inline std::vector<TrimmedRingRun> trimmed_ring_runs(
     std::size_t last = i;
     while (last + 1 < n && arcs[last + 1] &&
            trimmed_same_circle(run.circle, arcs[last + 1]->circle)) {
-      const double merge_tolerance = 1e-9 * std::max(1.0, run.circle.radius);
       const double next_t0 = trimmed_unwrap_u(arcs[last + 1]->t0, t_end);
-      if (std::abs(next_t0 - t_end) > merge_tolerance) break;
+      if (std::abs(next_t0 - t_end) > kTrimmedArcMergeTolerance) break;
       const double next_t1 = trimmed_unwrap_u(arcs[last + 1]->t1, next_t0);
       const double sweep = next_t1 - next_t0;
       // Do not merge a span that retraces the run: the merged arc would have

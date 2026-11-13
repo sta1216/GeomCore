@@ -77,6 +77,27 @@ geom::Brep plate_with_hole() {
   return result.value().brep;
 }
 
+geom::detail::FaceUvProjection uv_projection(const geom::Brep& brep, geom::FaceId face) {
+  const geom::Result<geom::detail::FaceUvProjection> projection =
+      geom::detail::face_uv_projection(brep, brep.face(face), 1e-9);
+  REQUIRE(projection.has_value());
+  return projection.value();
+}
+
+// Drives the extraction/orientation path directly: no triangulation in
+// between, so the winding normalization in trimmed_build_ring is what is
+// actually asserted.
+geom::Result<geom::TrimmedBoundary> build_ring_direct(
+    const geom::FaceUvLoop& loop, const geom::detail::FaceUvProjection& projection,
+    geom::FaceId face) {
+  const std::vector<geom::detail::TrimmedRingRun> runs =
+      geom::detail::trimmed_ring_runs(loop.arcs);
+  const geom::Result<std::size_t> planned = geom::detail::trimmed_plan_ring(runs, 1e-2, face);
+  if (!planned) return planned.error();
+  return geom::detail::trimmed_build_ring(loop, projection, 1e-2, runs, planned.value(),
+                                          loop.outer, face);
+}
+
 }  // namespace
 
 TEST_CASE("trimmed domain: a side window leaves one notched outer ring") {
@@ -214,24 +235,94 @@ TEST_CASE("trimmed domain: duplicate or non-finite rings are rejected") {
   CHECK(too_fine.error().code == geom::Errc::numeric_failure);
 }
 
-TEST_CASE("trimmed domain: reversed outer ring still triangulates counter-clockwise") {
-  geom::TrimmedBoundary outer;
-  outer.outer = true;
-  outer.points = {{0.0, 0.0}, {0.0, 4.0}, {4.0, 4.0}, {4.0, 0.0}};  // CW on purpose
-  outer.arcs.resize(outer.points.size());
+TEST_CASE("trimmed domain: extraction normalizes ring winding directly") {
+  const geom::Brep brep =
+      geom::make_box(geom::Point3d{0.0, 0.0, 0.0}, geom::Point3d{4.0, 4.0, 4.0}, 1e-9).value();
+  const geom::FaceId face = brep.face_ids().front();
+  const geom::detail::FaceUvProjection projection = uv_projection(brep, face);
 
-  const std::vector<geom::TrimmedBoundary> rings{outer};
-  const auto triangulation = geom::triangulate_trimmed_domain(rings);
-  REQUIRE(triangulation.has_value());
-  CHECK(triangulation.value().points.size() == 4);
-  REQUIRE(!triangulation.value().triangles.empty());
-  for (const std::array<std::uint32_t, 3>& triangle : triangulation.value().triangles) {
-    const geom::Point2d& a = triangulation.value().points[triangle[0]];
-    const geom::Point2d& b = triangulation.value().points[triangle[1]];
-    const geom::Point2d& c = triangulation.value().points[triangle[2]];
-    CHECK(geom::sign_orient2d(a[0], a[1], b[0], b[1], c[0], c[1]) > 0);
+  // Clockwise in the face's own uv frame: the outer ring must come back CCW.
+  geom::FaceUvLoop clockwise_outer;
+  clockwise_outer.outer = true;
+  clockwise_outer.points = {{0.0, 0.0}, {0.0, 1.0}, {1.0, 1.0}, {1.0, 0.0}};
+  clockwise_outer.arcs.resize(clockwise_outer.points.size());
+  const geom::Result<geom::TrimmedBoundary> outer_ring =
+      build_ring_direct(clockwise_outer, projection, face);
+  REQUIRE(outer_ring.has_value());
+  CHECK(outer_ring.value().points.size() == 4);
+  CHECK(geom::ring_orientation2(outer_ring.value().points) > 0);
+  CHECK(geom::signed_area2(outer_ring.value().points) > 0.0);
+
+  // Counter-clockwise hole input must come back clockwise.
+  geom::FaceUvLoop counter_clockwise_hole;
+  counter_clockwise_hole.outer = false;
+  counter_clockwise_hole.points = {{0.0, 0.0}, {1.0, 0.0}, {1.0, 1.0}, {0.0, 1.0}};
+  counter_clockwise_hole.arcs.resize(counter_clockwise_hole.points.size());
+  const geom::Result<geom::TrimmedBoundary> hole_ring =
+      build_ring_direct(counter_clockwise_hole, projection, face);
+  REQUIRE(hole_ring.has_value());
+  CHECK(hole_ring.value().points.size() == 4);
+  CHECK(geom::ring_orientation2(hole_ring.value().points) < 0);
+  CHECK(geom::signed_area2(hole_ring.value().points) < 0.0);
+}
+
+TEST_CASE("trimmed domain: extraction rejects zero-area and collapsing rings") {
+  const geom::Brep brep =
+      geom::make_box(geom::Point3d{0.0, 0.0, 0.0}, geom::Point3d{4.0, 4.0, 4.0}, 1e-9).value();
+  const geom::FaceId face = brep.face_ids().front();
+  const geom::detail::FaceUvProjection projection = uv_projection(brep, face);
+
+  geom::FaceUvLoop collinear;
+  collinear.outer = true;
+  collinear.points = {{0.0, 0.0}, {1.0, 1.0}, {2.0, 2.0}};
+  collinear.arcs.resize(collinear.points.size());
+  const geom::Result<geom::TrimmedBoundary> zero_area =
+      build_ring_direct(collinear, projection, face);
+  REQUIRE(!zero_area.has_value());
+  CHECK(zero_area.error().code == geom::Errc::degenerate);
+
+  // Three identical vertices collapse in the duplicate pass and leave fewer
+  // than three points.
+  geom::FaceUvLoop collapsing;
+  collapsing.outer = true;
+  collapsing.points = {{0.0, 0.0}, {0.0, 0.0}, {0.0, 0.0}};
+  collapsing.arcs.resize(collapsing.points.size());
+  const geom::Result<geom::TrimmedBoundary> collapsed =
+      build_ring_direct(collapsing, projection, face);
+  REQUIRE(!collapsed.has_value());
+  CHECK(collapsed.error().code == geom::Errc::invalid_topology);
+}
+
+TEST_CASE("trimmed domain: full-period ring closes across the seam modulo 2*pi") {
+  const geom::Brep brep =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0, 1e-9)
+          .value();
+  geom::FaceId lateral = brep.face_ids().front();
+  for (const geom::FaceId id : brep.face_ids()) {
+    const geom::Face& face = brep.face(id);
+    if (std::holds_alternative<geom::Cylinder3>(brep.geometry().surfaces[face.surface])) {
+      lateral = id;
+      break;
+    }
   }
-  CHECK(triangle_area(triangulation.value()) == doctest::Approx(16.0).epsilon(1e-12));
+  const geom::detail::FaceUvProjection projection = uv_projection(brep, lateral);
+
+  // Synthetic full-period loop on the barrel that starts at u = 0.5 (off the
+  // seam); its closing vertex is the front vertex one period later, so only the
+  // modulo-2*pi closure path can accept it.
+  geom::FaceUvLoop loop;
+  loop.outer = true;
+  loop.points = {{0.5, 0.0}, {2.5, 0.5}, {4.5, 0.5}, {6.5, 0.5}};
+  loop.arcs.resize(loop.points.size());
+  const geom::Result<geom::TrimmedBoundary> ring = build_ring_direct(loop, projection, lateral);
+  REQUIRE(ring.has_value());
+  CHECK(ring.value().points.size() == 4);
+  CHECK(geom::ring_orientation2(ring.value().points) > 0);
+  for (std::size_t i = 0; i < ring.value().points.size(); ++i) {
+    const geom::Point2d& a = ring.value().points[i];
+    const geom::Point2d& b = ring.value().points[(i + 1) % ring.value().points.size()];
+    CHECK(std::abs(a[0] - b[0]) + std::abs(a[1] - b[1]) > 1e-12);  // no zero-length segment
+  }
 }
 
 TEST_CASE("trimmed domain: opposite arc sweeps do not merge into one run") {
