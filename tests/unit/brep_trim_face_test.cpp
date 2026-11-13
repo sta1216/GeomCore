@@ -1559,7 +1559,8 @@ TEST_CASE("trim face: a sphere splits into caps and bands") {
     CHECK(fragment.reversed == false);
     CHECK(fragment.arc_spans.empty());
     // Only cut geometry appears: the synthetic domain sides are stripped.
-    REQUIRE(fragment.loops_uv.front().size() == 65);
+    // 65 samples plus the repeated first point that closes the ring.
+    REQUIRE(fragment.loops_uv.front().size() == 66);
     for (const Point2d& point : fragment.loops_uv.front()) {
       CHECK(point[1] == v);
     }
@@ -1614,7 +1615,8 @@ TEST_CASE("trim face: two latitude cuts split a sphere into three bands") {
   for (const CurvedFragment& fragment : result.value()) {
     areas.push_back(spherical_area(fragment));
     for (const std::vector<Point3d>& ring : fragment.loops) {
-      REQUIRE(ring.size() == 65);
+      // 65 samples plus the repeated first point that closes the ring.
+      REQUIRE(ring.size() == 66);
       check_ring_closes(ring);
       const double z = ring.front()[2];
       CHECK(std::fabs(z) == doctest::Approx(0.8).epsilon(1e-12));
@@ -1784,8 +1786,8 @@ TEST_CASE("trim face: a closed cut tangent to the seam is unsupported") {
       split_face_curved(sphere, face, cuts, kSplitTol);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == Errc::unsupported);
-  CHECK(std::string_view(result.error().message).find("seam") !=
-        std::string_view::npos);
+  CHECK(std::string_view(result.error().message) ==
+        "split_face_curved: closed cut crosses the seam twice");
   check_sphere_face_unchanged(sphere, face);
 }
 
@@ -1810,4 +1812,73 @@ TEST_CASE("trim face: seam run extraction wraps the cut tail") {
   const char all_synthetic[] = {1, 1};
   CHECK(detail::trim_face_seam_runs(std::span<const char>(all_synthetic))
             .empty());
+}
+
+TEST_CASE("trim face: a drifted seam pair still closes a latitude cut") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  // The first and last point are the two parameter copies of one seam point,
+  // but their v values drifted by 1e-13 (rounding in a real driver). Closure
+  // must use the same 1e-12 classification bound as the input check; an exact
+  // v comparison would reject the whole cut as an open chain and fail the
+  // split with a numeric error.
+  FaceCut cut;
+  for (int i = 0; i <= 64; ++i) {
+    cut.uv.push_back(Point2d{2.0 * kPi * i / 64.0, 0.5 + 1e-13 * i / 64.0});
+  }
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE(result.has_value());
+  REQUIRE(result.value().size() == 2);
+  for (const CurvedFragment& fragment : result.value()) {
+    REQUIRE(fragment.loops.size() == 1);
+    const std::vector<Point3d>& ring = fragment.loops.front();
+    CHECK(norm2(ring.front() - ring.back()) <= 2e-12);
+  }
+}
+
+TEST_CASE("trim face: seam ends 1e-3 apart are an open cut") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  // Latitude-like in shape, but the two seam copies differ by 1e-3, far beyond
+  // the 1e-12 classification bound: this is an open chain, not a loop, and the
+  // splitter must say so instead of closing it with a chord.
+  FaceCut cut;
+  for (int i = 0; i <= 64; ++i) {
+    cut.uv.push_back(Point2d{2.0 * kPi * i / 64.0, 0.5 + 1e-3 * i / 64.0});
+  }
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "split_face_curved: open cuts on a seam-only face");
+  check_sphere_face_unchanged(sphere, face);
+}
+
+TEST_CASE("trim face: a closed cut crossing the seam twice is unsupported") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  // A bitwise-closed loop that leaves the seam at v = 0.3 and returns at
+  // v = 0.5: two distinct seam contacts would need several arrangement runs
+  // joined into one ring, which this path does not do.
+  FaceCut cut;
+  cut.uv = {Point2d{0.0, 0.3}, Point2d{1.0, 0.4}, Point2d{0.0, 0.5},
+            Point2d{1.0, 0.6}, Point2d{0.0, 0.3}};
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "split_face_curved: closed cut crosses the seam twice");
+  check_sphere_face_unchanged(sphere, face);
 }

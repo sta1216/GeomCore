@@ -47,8 +47,10 @@ struct CurvedArcSpan {
 // are clockwise. `reversed` is always false here: the boolean driver flips the
 // B-side fragments when it needs the opposite material side.
 // On a seam-only face (a sphere or torus face whose loop is the seam slit) the
-// loops contain only cut geometry, and a seam-closed ring is an open chain
-// whose two parameter copies of the seam point are first and last; such a ring
+// loops contain only cut geometry, and a seam-closed ring is a closed chain
+// whose first point is repeated as last: the repeated first point and the point
+// before it are the two parameter copies of one physical seam point, identified
+// with the same 1e-12 relative bound the parameter projection uses. Such a ring
 // is ordered first as the outer boundary (before any interior closed cut, which
 // is a hole) because its uv area is a chord artefact, not a region area.
 // `arc_spans[l][i]` describes the segment from point i to point (i+1)%size of
@@ -790,49 +792,26 @@ inline bool trim_face_seam_only_on_same_side(
 }
 
 // True when the two endpoints are the two parameter copies of one physical
-// seam point: one at each u side with exactly equal v (a periodic u seam), or
-// one at each v side with exactly equal u (a periodic v seam). Requiring the
-// exact other coordinate keeps a chain whose ends are different seam points
-// from being closed by a chord through the surface, and no rule ever joins the
-// two different poles of a sphere.
+// seam point: one near each u side with the same v (a periodic u seam), or one
+// near each v side with the same u (a periodic v seam). The other coordinate
+// and the side distance use the same relative 1e-12 bound the projection uses
+// for parameters; comparing them exactly would reject a chain whose seam copies
+// drifted by rounding as open. Two different poles never form a pair.
 inline bool trim_face_seam_only_seam_pair(
     const Point2d& a, const Point2d& b, const std::array<double, 4>& domain,
     bool periodic_u, bool periodic_v) noexcept {
-  if (periodic_u && a[1] == b[1] &&
-      ((a[0] == domain[0] && b[0] == domain[1]) ||
-       (a[0] == domain[1] && b[0] == domain[0]))) {
-    return true;
-  }
-  if (periodic_v && a[0] == b[0] &&
-      ((a[1] == domain[2] && b[1] == domain[3]) ||
-       (a[1] == domain[3] && b[1] == domain[2]))) {
-    return true;
-  }
-  return false;
-}
-
-// True when a closed cut is latitude-like: its two ends are the two parameter
-// copies of ONE seam point. The u sides are matched with the same tolerance the
-// projection uses for parameters, and the two v values may differ by at most
-// 1e-12 (relative) because that is how a seam point is identified across its two
-// copies. This tolerance only classifies the cut; ring closure itself stays
-// exact (see trim_face_seam_only_seam_pair): the boolean driver emits polylines
-// whose copies of a seam point are bitwise equal in 3D.
-inline bool trim_face_seam_only_endpoint_seam_pair(
-    const Point2d& a, const Point2d& b, const std::array<double, 4>& domain,
-    bool periodic_u, bool periodic_v) noexcept {
-  const auto same_v = [](double va, double vb) noexcept {
-    return std::fabs(va - vb) <=
-           1e-12 * std::max({1.0, std::fabs(va), std::fabs(vb)});
+  const auto same = [](double lhs, double rhs) noexcept {
+    return std::fabs(lhs - rhs) <=
+           1e-12 * std::max({1.0, std::fabs(lhs), std::fabs(rhs)});
   };
-  if (periodic_u && same_v(a[1], b[1]) &&
+  if (periodic_u && same(a[1], b[1]) &&
       ((trim_face_seam_only_near_side(a[0], domain[0]) &&
         trim_face_seam_only_near_side(b[0], domain[1])) ||
        (trim_face_seam_only_near_side(a[0], domain[1]) &&
         trim_face_seam_only_near_side(b[0], domain[0])))) {
     return true;
   }
-  if (periodic_v && a[0] == b[0] &&
+  if (periodic_v && same(a[0], b[0]) &&
       ((trim_face_seam_only_near_side(a[1], domain[2]) &&
         trim_face_seam_only_near_side(b[1], domain[3])) ||
        (trim_face_seam_only_near_side(a[1], domain[3]) &&
@@ -1029,14 +1008,13 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
       }
     }
     // A cut chain is closed when it ends where it began, or when its two ends
-    // are the two copies of one seam point (identified with the 1e-12 seam
-    // tolerance; ring closure below stays exact). Anything else cannot form a
-    // loop of cut geometry on this face.
+    // are the two copies of one seam point (both tests use the same 1e-12
+    // relative bound; ring closure below uses it too). Anything else cannot
+    // form a loop of cut geometry on this face.
     const bool closed =
         trim_face_same_xy(points.front(), points.back()) ||
-        trim_face_seam_only_endpoint_seam_pair(
-            points.front(), points.back(), domain, projection.periodic_u(),
-            periodic_v);
+        trim_face_seam_only_seam_pair(points.front(), points.back(), domain,
+                                      projection.periodic_u(), periodic_v);
     if (!closed) {
       return Error{Errc::unsupported,
                    "split_face_curved: open cuts on a seam-only face",
@@ -1072,9 +1050,8 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
     }
     if (seam_contacts.size() > 1 ||
         trim_face_same_xy(points.front(), points.back()) ||
-        !trim_face_seam_only_endpoint_seam_pair(
-            points.front(), points.back(), domain, projection.periodic_u(),
-            periodic_v)) {
+        !trim_face_seam_only_seam_pair(points.front(), points.back(), domain,
+                                       projection.periodic_u(), periodic_v)) {
       return Error{Errc::unsupported,
                    "split_face_curved: closed cut crosses the seam twice",
                    face.index(), cut_index};
@@ -1195,9 +1172,9 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
         // run that leaves at (u_lo, v) and returns at (u_hi, v) is one
         // physical loop; the v sides of a torus are one seam in the same way.
         // Two different poles never close: a chain from one pole to the other
-        // is a meridian, not a loop. Closure is exact by design: the boolean
-        // driver emits polylines whose copies of a seam point are bitwise
-        // equal in 3D, so no tolerance is applied here.
+        // is a meridian, not a loop. Closure uses the same 1e-12 relative bound
+        // as the input classification, so a seam copy that drifted by rounding
+        // still closes; the ring is then closed by repeating its first point.
         seam = trim_face_seam_only_seam_pair(front, back, domain,
                                              projection.periodic_u(),
                                              periodic_v);
@@ -1206,29 +1183,28 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
                        "split_face_curved: synthetic boundary chain is open",
                        face.index(), f};
         }
-      }
-      if (identical) {
+        points.push_back(front);
+      } else {
         points.push_back(front);
         if (points.size() < 3) continue;
         trim_face_normalize_ring(points, true);
-      } else if (points.size() < 3) {
-        continue;
       }
-      // A seam pair keeps its two seam copies first and last: the implicit
-      // closing edge is the zero-length seam edge, so the ring does not repeat
-      // its first point and its ends stay the cut chain's ends.
+      if (points.size() < 3) continue;
+      // A seam ring is explicitly closed by the repeated first point, whose
+      // other parameter copy is the point before the last. It keeps the
+      // arrangement's direction and is not rotated.
       rings.push_back(SeamRing{std::move(points), seam});
     }
     if (rings.empty()) continue;
 
-    // A seam ring is a chain whose implicit closing edge is the zero-length
-    // seam edge, so its uv shoelace area is a chord artefact, not a region
-    // area: it must not be used to choose the outer ring. The seam rings are
-    // the boundary of the full uv domain, so they are the outer boundary of a
-    // fragment and come first; interior closed rings are the holes, ordered by
-    // descending |uv area|. Ties among seam rings (a band has two of them) are
-    // broken by the lexicographic minimum point, which does not depend on
-    // where the arrangement's walk started.
+    // A seam ring closes across the periodic seam, so its uv shoelace area is a
+    // chord artefact (the closing edge spans the whole u period at nearly
+    // constant v), not a region area: it must not be used to choose the outer
+    // ring. The seam rings are the boundary of the full uv domain, so they are
+    // the outer boundary of a fragment and come first; interior closed rings
+    // are the holes, ordered by descending |uv area|. Ties among seam rings (a
+    // band has two of them) are broken by the lexicographic minimum point,
+    // which does not depend on where the arrangement's walk started.
     std::stable_sort(rings.begin(), rings.end(),
                      [](const SeamRing& lhs, const SeamRing& rhs) {
                        if (lhs.seam != rhs.seam) return lhs.seam;
@@ -1318,9 +1294,13 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
 // lie anywhere on an ordinary face. On a seam-only face (a sphere or torus face
 // whose boundary loop has zero area) the parameter rectangle is synthesized and
 // the closed cuts must be latitude-like: the two ends must be the two copies of
-// one physical seam point and no other vertex may touch the seam. A closed cut
-// wholly inside the domain ("does not reach the seam"), a closed cut tangent to
-// the seam, a closed cut crossing the seam more than once ("crosses the seam
+// one physical seam point, matched with the same 1e-12 relative bound the
+// parameter projection uses (so a seam point that drifted by rounding still
+// counts as one point), and no other vertex may touch the seam. The contact
+// test and this path inspect the u sides only, so a torus closed cut that meets
+// the v seam is not supported by this path and is rejected. A closed cut wholly
+// inside the domain ("does not reach the seam"), a closed cut tangent to the
+// seam, a closed cut crossing the seam more than once ("crosses the seam
 // twice"), and any cut running along a domain side are rejected as unsupported
 // before any arrangement work. Cut segments shorter than `tolerance` and
 // fragments whose surface area is at most tolerance^2 are dropped. Errors
