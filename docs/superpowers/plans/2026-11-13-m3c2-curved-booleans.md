@@ -191,7 +191,6 @@ Add to `tests/unit/brep_face_uv_test.cpp` (include `<geom/surfaces/analytic.hpp>
 TEST_CASE("curved boolean: a sphere face advertises its full uv domain") {
   const Result<Brep> sphere = make_sphere(Point3d{0, 0, 0}, 1.0, 1e-9);
   REQUIRE(sphere.has_value());
-  const SolidId solid = sphere.value().solid_ids().front();
   const std::vector<FaceId> faces = sphere.value().face_ids();
   REQUIRE(faces.size() == 1u);
   const Result<detail::CurvedBooleanFaceInfo> info =
@@ -236,7 +235,7 @@ TEST_CASE("curved boolean: the cone domain ends at the axial apex") {
 - [ ] **Step 2: Run it and confirm it fails**
 
 Run: `.\build\tests\Debug\geom_tests.exe --test-case="curved boolean: a sphere face advertises its full uv domain"`.
-Expected: `u[1]` is 0 (not 2π) and the bounds are the xz slice `x=y=0`, so the test fails.
+Expected: `u[1]` is 0 (not 2π) and the bounds collapse to the meridian slice (`y=0`, `x` in `[0,1]`), so the test fails.
 
 - [ ] **Step 3: Implement**
 
