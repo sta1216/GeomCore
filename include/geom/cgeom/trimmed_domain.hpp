@@ -4,6 +4,7 @@
 #include <geom/cgeom/polygon2.hpp>
 #include <geom/cgeom/triangulate2.hpp>
 #include <geom/core/result.hpp>
+#include <geom/numeric/predicates2.hpp>
 
 #include <algorithm>
 #include <array>
@@ -61,8 +62,12 @@ inline double trimmed_unwrap_u(double value, double reference) noexcept {
   return value + kTrimmedTwoPi * std::round((reference - value) / kTrimmedTwoPi);
 }
 
+// Circle identity tolerance: scaled by the radius so it is safe for the unit
+// and metre-sized circles the curved primitives produce, and for scaled copies
+// of the same surface. Absolute comparison would be too tight for radii far
+// from 1 and too loose for tiny radii.
 inline bool trimmed_same_circle(const CircleCurve3& a, const CircleCurve3& b) noexcept {
-  const double eps = 1e-12;
+  const double eps = 1e-12 * std::max({1.0, a.radius, b.radius});
   return std::abs(a.radius - b.radius) <= eps &&
          std::abs(a.center[0] - b.center[0]) <= eps &&
          std::abs(a.center[1] - b.center[1]) <= eps &&
@@ -75,10 +80,11 @@ inline bool trimmed_same_circle(const CircleCurve3& a, const CircleCurve3& b) no
          std::abs(a.y_axis[2] - b.y_axis[2]) <= eps;
 }
 
-// A maximal run of segments that share one analytic circle and are contiguous
-// in its angle parameter. Merging the upstream (usually very fine) chain keeps
-// the resampled count tied to the requested deflection instead of the
-// tessellation that produced the face.
+// A maximal run of segments that share one analytic circle, are contiguous in
+// its angle parameter, and traverse that circle in the same direction. Merging
+// the upstream (usually very fine) chain keeps the resampled count tied to the
+// requested deflection instead of the tessellation that produced the face; the
+// direction check keeps a retracing arc (a cusp or a fold) in its own run.
 struct TrimmedRingRun {
   std::size_t first_segment = 0;
   std::size_t last_segment = 0;
@@ -107,12 +113,22 @@ inline std::vector<TrimmedRingRun> trimmed_ring_runs(
     run.circle = arcs[i]->circle;
     run.t0 = arcs[i]->t0;
     double t_end = arcs[i]->t1;
+    double direction = t_end - run.t0;
     std::size_t last = i;
     while (last + 1 < n && arcs[last + 1] &&
            trimmed_same_circle(run.circle, arcs[last + 1]->circle)) {
+      const double merge_tolerance = 1e-9 * std::max(1.0, run.circle.radius);
       const double next_t0 = trimmed_unwrap_u(arcs[last + 1]->t0, t_end);
-      if (std::abs(next_t0 - t_end) > 1e-9) break;
-      t_end = trimmed_unwrap_u(arcs[last + 1]->t1, next_t0);
+      if (std::abs(next_t0 - t_end) > merge_tolerance) break;
+      const double next_t1 = trimmed_unwrap_u(arcs[last + 1]->t1, next_t0);
+      const double sweep = next_t1 - next_t0;
+      // Do not merge a span that retraces the run: the merged arc would have
+      // to fold back on itself and the sample count/ordering assumptions fail.
+      if (sweep != 0.0) {
+        if (direction != 0.0 && ((sweep > 0.0) != (direction > 0.0))) break;
+        if (direction == 0.0) direction = sweep;
+      }
+      t_end = next_t1;
       ++last;
     }
     run.last_segment = last;
@@ -198,10 +214,12 @@ inline Result<TrimmedBoundary> trimmed_build_ring(const FaceUvLoop& loop,
   ring.arcs.reserve(planned);
   ring.points.push_back(loop.points[0]);
   double previous_u = loop.points[0][0];
+  const bool periodic_u = projection.periodic_u();
 
   for (const TrimmedRingRun& run : runs) {
     if (!run.arc) {
-      const Point2d end = loop.points[(run.last_segment + 1u) % n];
+      Point2d end = loop.points[(run.last_segment + 1u) % n];
+      if (periodic_u) end[0] = trimmed_unwrap_u(end[0], previous_u);
       ring.points.push_back(end);
       ring.arcs.push_back(std::nullopt);
       previous_u = end[0];
@@ -228,14 +246,22 @@ inline Result<TrimmedBoundary> trimmed_build_ring(const FaceUvLoop& loop,
                                                         previous_u, true);
       if (!projected) return projected.error();
       Point2d sample = projected.value();
-      sample[0] = trimmed_unwrap_u(sample[0], previous_u);
+      if (!trimmed_point_finite(sample)) {
+        return Error{Errc::non_finite, "trimmed_face_boundaries: projected sample is not finite",
+                     face.index(), 0u};
+      }
+      if (periodic_u) sample[0] = trimmed_unwrap_u(sample[0], previous_u);
       ring.points.push_back(sample);
       ring.arcs.push_back(FaceUvArcRef{run.circle, t_previous, t});
       previous_u = sample[0];
       t_previous = t;
     }
 
-    const Point2d end = loop.points[(run.last_segment + 1u) % n];
+    // Append the exact loop vertex when the last sample is not already it. The
+    // vertex is unwrapped against the running branch before the closeness test,
+    // so a raw loop u that sits 2*pi away cannot look like a distinct point.
+    Point2d end = loop.points[(run.last_segment + 1u) % n];
+    if (periodic_u) end[0] = trimmed_unwrap_u(end[0], previous_u);
     if (!trimmed_points_close(ring.points.back(), end)) {
       ring.points.push_back(end);
       ring.arcs.push_back(std::nullopt);
@@ -243,13 +269,33 @@ inline Result<TrimmedBoundary> trimmed_build_ring(const FaceUvLoop& loop,
     }
   }
 
-  if (ring.points.size() < 2u || !trimmed_points_close(ring.points.back(), ring.points.front())) {
+  if (ring.points.size() < 2u) {
+    return Error{Errc::numeric_failure, "trimmed_face_boundaries: ring is degenerate",
+                 face.index(), 0u};
+  }
+  // The ring is implicitly closed; a ring that wraps the periodic seam closes
+  // with a 2*pi step in u but is still the same 3D point.
+  bool closes = trimmed_points_close(ring.points.back(), ring.points.front());
+  if (!closes && periodic_u) {
+    Point2d wrapped = ring.points.back();
+    wrapped[0] = trimmed_unwrap_u(wrapped[0], ring.points.front()[0]);
+    closes = trimmed_points_close(wrapped, ring.points.front());
+  }
+  if (!closes) {
     return Error{Errc::numeric_failure, "trimmed_face_boundaries: ring did not close",
                  face.index(), 0u};
   }
   ring.points.pop_back();  // implicitly closed ring: drop the repeated first point
 
-  // Drop consecutive duplicates; the arc that encoded the zero-length segment
+  // Re-unwrap the ring so no consecutive u step jumps across the periodic seam.
+  if (periodic_u) {
+    for (std::size_t k = 1u; k < ring.points.size(); ++k) {
+      ring.points[k][0] = trimmed_unwrap_u(ring.points[k][0], ring.points[k - 1u][0]);
+    }
+  }
+
+  // Drop consecutive duplicates (after unwrapping, so 2*pi-shifted copies of
+  // the same point are caught); the arc that encoded the zero-length segment
   // is dropped with the duplicate point so arcs stays parallel to points.
   std::size_t i = 1u;
   while (i < ring.points.size()) {
@@ -264,18 +310,14 @@ inline Result<TrimmedBoundary> trimmed_build_ring(const FaceUvLoop& loop,
     return Error{Errc::invalid_topology,
                  "trimmed_face_boundaries: ring has fewer than three points", face.index(), 0u};
   }
-  if (geom::signed_area2(ring.points) == 0.0) {
+  // Exact winding: the ring is normalized from a predicate sign, never from a
+  // floating-point area that could round a sliver ring to the wrong side.
+  const int winding = geom::ring_orientation2(ring.points);
+  if (winding == 0) {
     return Error{Errc::degenerate, "trimmed_face_boundaries: ring has zero area", face.index(),
                  0u};
   }
-
-  // Re-unwrap the ring so no consecutive u step jumps across the periodic seam.
-  for (std::size_t k = 1u; k < ring.points.size(); ++k) {
-    ring.points[k][0] = trimmed_unwrap_u(ring.points[k][0], ring.points[k - 1u][0]);
-  }
-
-  const double area = geom::signed_area2(ring.points);
-  if ((outer && area < 0.0) || (!outer && area > 0.0)) trimmed_reverse_ring(ring);
+  if ((outer && winding < 0) || (!outer && winding > 0)) trimmed_reverse_ring(ring);
 
   return ring;
 }
@@ -434,8 +476,9 @@ inline Result<TrimmedUvTriangulation> triangulate_trimmed_domain(
     const Point2d& a = polygon.vertices[triangle[0]];
     const Point2d& b = polygon.vertices[triangle[1]];
     const Point2d& c = polygon.vertices[triangle[2]];
-    const double twice = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-    if (!(twice > 0.0) || !std::isfinite(twice)) {
+    // Exact predicate: a thin-but-valid triangle must not be rejected because a
+    // floating-point cross product rounded to zero or the wrong sign.
+    if (geom::sign_orient2d(a[0], a[1], b[0], b[1], c[0], c[1]) <= 0) {
       return Error{Errc::degenerate,
                    "triangulate_trimmed_domain: triangle is not positively oriented",
                    static_cast<std::uint32_t>(i), 0u};
