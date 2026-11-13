@@ -64,7 +64,7 @@ M2 的 `tessellate()` 只处理完整解析面（整圆帽的圆柱带、完整�
   `max(sqrt(8*curved_sampling_deflection), 5e-2 rad)`，默认
   `curved_sampling_deflection = 1e-5`。整面解析面继续走原矩形
   Gauss-Legendre 路径；其输出在 MSVC x64 上逐位不变，其他标准库因
-  sin/cos 末位差异按解析值 `1e-14` 校验（测试的 `_MSC_VER` 分支）。
+  sin/cos 末位差异按解析值 `1e-8` 校验（测试的 `_MSC_VER` 分支）。
 - **选项校验。** `curved_sampling_deflection` 非有限或 `<= 0` 返回
   `Errc::tolerance_violation`“mass_properties: options are out of range”。
 
@@ -92,7 +92,7 @@ M2 的 `tessellate()` 只处理完整解析面（整圆帽的圆柱带、完整�
 - **规范面不变。** 在 MSVC x64 上 box/cylinder/torus 的网格哈希与 14a89df
   前逐位一致（`2abc6bb21fd6d800` / `687a72048f8f4296` / `c808f6ee4d9c72db`），
   质量属性也有逐位回归测试；其他标准库因 sin/cos 末位差异改为校验解析值
-  （`1e-14`）与逐次确定性。修剪路径在 `tessellate_face_has_polyline_edge`
+  （`1e-8`）与逐次确定性。修剪路径在 `tessellate_face_has_polyline_edge`
   为真且解析构建失败时启用（任何 `Errc`，只要存在 degree-1 多段线边）。
 - **已知限制（M3c-2）。** 孔洞修剪面（窗口不跨缝合线 -> 外环 + 孔）与斜切
   椭圆边界在三角化之前按域形状确定性地拒绝（与 deflection 无关），错误分别为

@@ -523,9 +523,9 @@ TEST_CASE("QA-13: trimmed tessellation is watertight, finite and deterministic")
   CHECK(std::count(grouped.begin(), grouped.end(), true) == 8);
   for (std::size_t i = 0; i < a.positions.size(); ++i) {
     for (int axis = 0; axis < 3; ++axis) {
-      CHECK(std::isfinite(a.positions[i][static_cast<std::size_t>(axis)]));
-      double left = a.positions[i][static_cast<std::size_t>(axis)];
-      double right = b.positions[i][static_cast<std::size_t>(axis)];
+      CHECK(std::isfinite(a.positions[i][axis]));
+      double left = a.positions[i][axis];
+      double right = b.positions[i][axis];
       CHECK(std::memcmp(&left, &right, sizeof(double)) == 0);
     }
   }
