@@ -96,7 +96,7 @@ TEST_CASE("curved boolean: a failed operation still reports the stage counters")
   REQUIRE(b.has_value());
   const SolidId solid_a = a.value().solid_ids().front();
   const SolidId solid_b = b.value().solid_ids().front();
-  CurvedBooleanReport report;
+  CurvedBooleanReport report{};
   report.face_pairs = 999;  // must be overwritten by the operation
   const Result<CurvedBooleanResult> result =
       boolean_solid_curved(a.value(), solid_a, b.value(), solid_b, SolidBooleanOp::intersection,
@@ -113,7 +113,7 @@ TEST_CASE("curved boolean: a failure after pairing copies the accumulated counte
   const Result<Brep> b = make_box(Point3d{3, 0, 0}, Point3d{4, 1, 1}, 1e-9);
   REQUIRE(a.has_value());
   REQUIRE(b.has_value());
-  CurvedBooleanReport report;
+  CurvedBooleanReport report{};
   const Result<CurvedBooleanResult> result = boolean_solid_curved(
       a.value(), a.value().solid_ids().front(), b.value(), b.value().solid_ids().front(),
       SolidBooleanOp::union_, CurvedBooleanOptions{}, &report);
@@ -128,7 +128,7 @@ TEST_CASE("curved boolean: success leaves the failure report untouched") {
   const Result<Brep> b = make_box(Point3d{1, 1, 1}, Point3d{3, 3, 3}, 1e-9);
   REQUIRE(a.has_value());
   REQUIRE(b.has_value());
-  CurvedBooleanReport report;
+  CurvedBooleanReport report{};
   const Result<CurvedBooleanResult> result = boolean_solid_curved(
       a.value(), a.value().solid_ids().front(), b.value(), b.value().solid_ids().front(),
       SolidBooleanOp::union_, CurvedBooleanOptions{}, &report);
@@ -150,7 +150,7 @@ Expected: compile error — `boolean_solid_curved` takes 6 arguments.
 
 - [ ] **Step 3: Implement**
 
-Add the parameter, zero it on entry (`*failure_report = CurvedBooleanReport{};`), and replace every `return Error{...}` in the function body with a two-line form that copies the locally accumulated counters (the variables ending up in `report` today) into `*failure_report` before returning. Keep the counters in one `CurvedBooleanReport report;` local used both for the success return and the failure copy; do not add a second set of counters.
+Add the parameter, zero it on entry (`*failure_report = CurvedBooleanReport{};`), and replace every `return Error{...}` in the function body with a two-line form that copies the locally accumulated counters (the variables ending up in `report` today) into `*failure_report` before returning. Keep the counters in one `CurvedBooleanReport report{};` local used both for the success return and the failure copy; do not add a second set of counters.
 
 - [ ] **Step 4: Verify**
 

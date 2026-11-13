@@ -12,7 +12,7 @@ TEST_CASE("curved boolean: a failed operation still reports the stage counters")
   REQUIRE(b.has_value());
   const SolidId a_solid = a.value().solid_ids().front();
   const SolidId b_solid = b.value().solid_ids().front();
-  CurvedBooleanReport report;
+  CurvedBooleanReport report{};
   report.face_pairs = 999;  // must be overwritten by the operation
   const Result<CurvedBooleanResult> result =
       boolean_solid_curved(a.value(), a_solid, b.value(), b_solid, SolidBooleanOp::intersection,
@@ -31,7 +31,7 @@ TEST_CASE("curved boolean: a failure after pairing copies the accumulated counte
   REQUIRE(b.has_value());
   const SolidId a_solid = a.value().solid_ids().front();
   const SolidId b_solid = b.value().solid_ids().front();
-  CurvedBooleanReport report;
+  CurvedBooleanReport report{};
   const Result<CurvedBooleanResult> result =
       boolean_solid_curved(a.value(), a_solid, b.value(), b_solid, SolidBooleanOp::union_,
                            CurvedBooleanOptions{}, &report);
@@ -48,7 +48,14 @@ TEST_CASE("curved boolean: success leaves the failure report untouched") {
   REQUIRE(b.has_value());
   const SolidId a_solid = a.value().solid_ids().front();
   const SolidId b_solid = b.value().solid_ids().front();
-  CurvedBooleanReport report;
+  CurvedBooleanReport report{};
+  report.face_pairs = 999;
+  report.cuts = 999;
+  report.fragments = 999;
+  report.kept = 999;
+  report.dropped = 999;
+  report.flipped = 999;
+  report.max_cut_residual = 1.0;
   const Result<CurvedBooleanResult> result =
       boolean_solid_curved(a.value(), a_solid, b.value(), b_solid, SolidBooleanOp::union_,
                            CurvedBooleanOptions{}, &report);
