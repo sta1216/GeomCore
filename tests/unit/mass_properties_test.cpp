@@ -493,7 +493,9 @@ std::array<std::uint64_t, 10> mass_bits(const geom::MassProperties& mass) {
 
 TEST_CASE("mass properties: canonical paths stay bit-identical") {
   // Pins the exact rectangular Gauss-Legendre output of the untrimmed paths so
-  // the trimmed-face work cannot perturb them.
+  // the trimmed-face work cannot perturb them. The cylinder coefficients come
+  // from sin/cos, whose last bits differ between standard libraries; there the
+  // exact bits are an MSVC pin and other platforms check the analytic values.
   {
     const geom::Brep cylinder =
         geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
@@ -501,11 +503,25 @@ TEST_CASE("mass properties: canonical paths stay bit-identical") {
             .value();
     const auto mass = geom::mass_properties(cylinder);
     REQUIRE(mass.has_value());
+#if defined(_MSC_VER)
     const std::array<std::uint64_t, 10> expected = {
         0x401921fb541433a0ull, 0xbdde8ac000000000ull, 0xbcc100b76a374858ull, 0x3ff0000000000006ull,
         0x400d524fe1f92f62ull, 0x400d524fe1ef9732ull, 0x400921fb5401033eull, 0x3ca091760dcabfd0ull,
         0xbcf89b18e670b3aaull, 0xbc70342f650004a5ull};
     CHECK(mass_bits(mass.value()) == expected);
+#else
+    const double pi = std::numbers::pi_v<double>;
+    CHECK(mass.value().volume == doctest::Approx(2.0 * pi).epsilon(1e-14));
+    CHECK(mass.value().centroid[0] == doctest::Approx(0.0).epsilon(1e-14));
+    CHECK(mass.value().centroid[1] == doctest::Approx(0.0).epsilon(1e-14));
+    CHECK(mass.value().centroid[2] == doctest::Approx(1.0).epsilon(1e-14));
+    CHECK(mass.value().inertia[0][0] == doctest::Approx(7.0 * pi / 6.0).epsilon(1e-14));
+    CHECK(mass.value().inertia[1][1] == doctest::Approx(7.0 * pi / 6.0).epsilon(1e-14));
+    CHECK(mass.value().inertia[2][2] == doctest::Approx(pi).epsilon(1e-14));
+    CHECK(std::fabs(mass.value().inertia[0][1]) < 1e-12);
+    CHECK(std::fabs(mass.value().inertia[0][2]) < 1e-12);
+    CHECK(std::fabs(mass.value().inertia[1][2]) < 1e-12);
+#endif
   }
   {
     const geom::Brep box =

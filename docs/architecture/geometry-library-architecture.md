@@ -1256,7 +1256,7 @@ provenance 也延后（ADR-0026 记录了该 §4.6 偏差）。
 不是逐面统一细分。质量属性用同一份 uv 三角化，按 7 点 Dunavant 在精确曲面上
 积分（步长 `max(sqrt(8*curved_sampling_deflection), 5e-2 rad)`，默认
 `curved_sampling_deflection = 1e-5`）；整面解析面保持原矩形 Gauss-Legendre
-路径与逐位输出不变。**验收状态（2026-11-13 实测，见
+路径，MSVC x64 上输出逐位不变（其他标准库按解析值 1e-14 校验）。**验收状态（2026-11-13 实测，见
 `docs/benchmarks/m3c1.md`）**：QA-13 通过——60 度开窗圆柱（8 面/57 边/51
 顶点）在 `deflection = 2e-3` 下水密、有限、逐面分组，两次运行逐字节一致；
 1e-2/2e-3/1e-3/1e-4 的三角形数为 468/894/1268/3744，侧面 uv 面积和
