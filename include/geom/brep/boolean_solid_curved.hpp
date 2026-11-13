@@ -192,12 +192,11 @@ inline std::optional<std::array<double, 4>> curved_boolean_surface_uv_domain(
     return std::array<double, 4>{0.0, kCurvedBooleanTwoPi, 0.0, kCurvedBooleanTwoPi};
   }
   if (const auto* cone = std::get_if<Cone3>(&surface)) {
-    // Cone3's v is axial, so the apex sits at v = radius / tan(half_angle), the
-    // primitive's height; the task contract stores the ruling length
-    // hypot(radius, height) as the upper bound instead.
-    const double height = cone->radius / std::tan(cone->half_angle);
+    // Cone3::eval takes v as the axial distance from the base: the apex sits at
+    // v = radius / tan(half_angle), which is the primitive's height, so the
+    // parameter rectangle ends there (not at the ruling length).
     return std::array<double, 4>{0.0, kCurvedBooleanTwoPi, 0.0,
-                                 std::hypot(cone->radius, height)};
+                                 cone->radius / std::tan(cone->half_angle)};
   }
   return std::nullopt;
 }

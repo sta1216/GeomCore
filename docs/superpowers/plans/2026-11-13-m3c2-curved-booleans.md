@@ -167,7 +167,7 @@ Expected: all green; the existing curved boolean tests compile unchanged.
 
 **Files:**
 - Modify: `include/geom/brep/boolean_solid_curved.hpp:182-273`
-- Test: `tests/unit/brep_boolean_curved_test.cpp`
+- Test: `tests/unit/brep_face_uv_test.cpp`
 
 **Interfaces:**
 - Produces (in `geom::v1::detail`):
@@ -181,11 +181,11 @@ inline std::optional<std::array<double, 4>>
 curved_boolean_surface_uv_domain(const SurfaceGeometry& surface) noexcept;
 ```
 
-Values: `Sphere3` → `{0, 2π, -π/2, π/2}`; `Torus3` → `{0, 2π, 0, 2π}`; `Cone3` → `{0, 2π, 0, slant_height}` (slant height = `std::hypot(base_radius, height)`); everything else → `nullopt`.
+Values: `Sphere3` → `{0, 2π, -π/2, π/2}`; `Torus3` → `{0, 2π, 0, 2π}`; `Cone3` → `{0, 2π, 0, radius / tan(half_angle)}` (axial, i.e. the primitive height; `Cone3::eval` is axial, not ruling-length); everything else → `nullopt`.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/unit/brep_boolean_curved_test.cpp`:
+Add to `tests/unit/brep_face_uv_test.cpp` (include `<geom/surfaces/analytic.hpp>`):
 
 ```cpp
 TEST_CASE("curved boolean: a sphere face advertises its full uv domain") {
@@ -201,28 +201,43 @@ TEST_CASE("curved boolean: a sphere face advertises its full uv domain") {
   CHECK(info.value().u[1] == doctest::Approx(2.0 * 3.14159265358979323846));
   CHECK(info.value().v[0] == doctest::Approx(-1.5707963267948966));
   CHECK(info.value().v[1] == doctest::Approx(1.5707963267948966));
-  CHECK(info.value().bounds.x[0] == doctest::Approx(-1.0));
-  CHECK(info.value().bounds.x[1] == doctest::Approx(1.0));
-  CHECK(info.value().bounds.y[0] == doctest::Approx(-1.0));
-  CHECK(info.value().bounds.y[1] == doctest::Approx(1.0));
+  CHECK(info.value().bounds.lo[0] == doctest::Approx(-1.0));
+  CHECK(info.value().bounds.hi[0] == doctest::Approx(1.0));
+  CHECK(info.value().bounds.lo[1] == doctest::Approx(-1.0));
+  CHECK(info.value().bounds.hi[1] == doctest::Approx(1.0));
+}
+
+TEST_CASE("curved boolean: the cone domain ends at the axial apex") {
+  Cone3 cone;
+  cone.origin = Point3d{0, 0, 0};
+  cone.axis = Vec3d{0, 0, 1};
+  cone.x_axis = Vec3d{1, 0, 0};
+  cone.radius = 1.0;
+  cone.half_angle = std::atan(0.5);  // height 2
+  const auto domain = detail::curved_boolean_surface_uv_domain(cone);
+  REQUIRE(domain.has_value());
+  CHECK((*domain)[2] == 0.0);
+  CHECK((*domain)[3] == doctest::Approx(2.0));
 }
 ```
 
 - [ ] **Step 2: Run it and confirm it fails**
 
-Expected: `info.u[1] == 0`, `bounds.y[0] == bounds.y[1] == 0`.
+Run: `.\build\tests\Debug\geom_tests.exe --test-case="curved boolean: a failed operation still reports the stage counters"`
+Expected: compile error — `boolean_solid_curved` takes 6 arguments.
 
 - [ ] **Step 3: Implement**
 
-In `curved_boolean_face_info`, after the loop-derived `u_lo/u_hi/v_lo/v_hi` are computed, query `curved_boolean_surface_uv_domain`. If it returns a value **and** `u_hi - u_lo <= 1e-12 * std::max(1.0, std::abs(u_lo), std::abs(u_hi))`, replace all four bounds with the analytic domain and recompute `info.bounds` from the existing 5×5 `surface_eval` loop. Non-degenerate domains keep their old range byte for byte.
+Add the parameter, zero it on entry (`*failure_report = CurvedBooleanReport{};`), and replace every `return Error{...}` in the function body with a two-line form that copies the locally accumulated counters (the variables ending up in `report` today) into `*failure_report` before returning. Keep the counters in one `CurvedBooleanReport report{};` local used both for the success return and the failure copy; do not add a second set of counters.
 
 - [ ] **Step 4: Verify**
 
-Debug and Release green; specifically `sphere ∩ box` still returns "result is empty" at this point (the splitter is not fixed yet) but `sphere ∩ sphere` now has `pairs ≥ 1`. Add a temporary probe (not committed) or rely on Task 5.
+Run Debug and Release: `.\build\tests\Debug\geom_tests.exe` and `.\build-rel\tests\Release\geom_tests.exe --test-case="*curved*"`.
+Expected: all green; the existing curved boolean tests compile unchanged.
 
 - [ ] **Step 5: Commit**
 
-`git commit -m "feat(m3c2): synthesize the full uv domain of seam-only faces"`
+`git add -A; git commit -m "feat(m3c2): report curved boolean counters on failure"`
 
 ---
 
@@ -341,7 +356,7 @@ The unit sphere volume test passes at `1e-12`; the existing cylinder/torus/trimm
 **Files:**
 - Modify: `include/geom/brep/boolean_solid_curved.hpp:152-200` (gate), `:1500-1800` (pair circle healing)
 - Modify: `include/geom/brep/split_solid.hpp` (expose the plane/sphere circle helper if not already public in `detail`)
-- Test: `tests/unit/brep_boolean_curved_test.cpp`
+- Test: `tests/unit/brep_face_uv_test.cpp`
 
 **Interfaces:**
 - Consumes: Task 1-4.
@@ -403,7 +418,7 @@ All five new cases pass on Debug and Release; existing curved/planar boolean sui
 
 **Files:**
 - Modify: `include/geom/brep/boolean_solid_curved.hpp:187-190` (gate), `:679` (`curved_boolean_split_at_seam`), `:845`, `:1091`, `:1205`
-- Test: `tests/unit/brep_boolean_curved_test.cpp`
+- Test: `tests/unit/brep_face_uv_test.cpp`
 
 **Interfaces:**
 - Produces: `curved_boolean_split_at_seam(..., int axis)` where `axis == 0` splits on u and `axis == 1` on v; call sites pass `detail::FaceUvProjection::periodic_v() ? 1 : 0` (u for every periodic surface, v additionally for a torus). `curved_boolean_clip_pair` wraps the foreign uv coordinate selected by the same axis.

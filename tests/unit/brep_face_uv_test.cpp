@@ -463,6 +463,19 @@ TEST_CASE("curved boolean: a sphere face advertises its full uv domain") {
   CHECK(info.value().bounds.hi[1] == doctest::Approx(1.0));
 }
 
+TEST_CASE("curved boolean: the cone domain ends at the axial apex") {
+  geom::Cone3 cone;
+  cone.origin = geom::Point3d{0.0, 0.0, 0.0};
+  cone.axis = geom::Vec3d{0.0, 0.0, 1.0};
+  cone.x_axis = geom::Vec3d{1.0, 0.0, 0.0};
+  cone.radius = 1.0;
+  cone.half_angle = std::atan(0.5);  // axial height 2
+  const auto domain = geom::detail::curved_boolean_surface_uv_domain(cone);
+  REQUIRE(domain.has_value());
+  CHECK((*domain)[2] == 0.0);
+  CHECK((*domain)[3] == doctest::Approx(2.0));
+}
+
 TEST_CASE("a torus seam loop covers both parameter periods") {
   const double major = 2.0;
   const double minor = 0.5;
