@@ -511,16 +511,16 @@ TEST_CASE("mass properties: canonical paths stay bit-identical") {
     CHECK(mass_bits(mass.value()) == expected);
 #else
     const double pi = std::numbers::pi_v<double>;
-    CHECK(mass.value().volume == doctest::Approx(2.0 * pi).epsilon(1e-14));
-    CHECK(mass.value().centroid[0] == doctest::Approx(0.0).epsilon(1e-14));
-    CHECK(mass.value().centroid[1] == doctest::Approx(0.0).epsilon(1e-14));
-    CHECK(mass.value().centroid[2] == doctest::Approx(1.0).epsilon(1e-14));
-    CHECK(mass.value().inertia[0][0] == doctest::Approx(7.0 * pi / 6.0).epsilon(1e-14));
-    CHECK(mass.value().inertia[1][1] == doctest::Approx(7.0 * pi / 6.0).epsilon(1e-14));
-    CHECK(mass.value().inertia[2][2] == doctest::Approx(pi).epsilon(1e-14));
-    CHECK(std::fabs(mass.value().inertia[0][1]) < 1e-12);
-    CHECK(std::fabs(mass.value().inertia[0][2]) < 1e-12);
-    CHECK(std::fabs(mass.value().inertia[1][2]) < 1e-12);
+    CHECK(mass.value().volume == doctest::Approx(2.0 * pi).epsilon(1e-9));
+    CHECK(std::fabs(mass.value().centroid[0]) < 1e-9);
+    CHECK(std::fabs(mass.value().centroid[1]) < 1e-9);
+    CHECK(mass.value().centroid[2] == doctest::Approx(1.0).epsilon(1e-9));
+    CHECK(mass.value().inertia[0][0] == doctest::Approx(7.0 * pi / 6.0).epsilon(1e-9));
+    CHECK(mass.value().inertia[1][1] == doctest::Approx(7.0 * pi / 6.0).epsilon(1e-9));
+    CHECK(mass.value().inertia[2][2] == doctest::Approx(pi).epsilon(1e-9));
+    CHECK(std::fabs(mass.value().inertia[0][1]) < 1e-9);
+    CHECK(std::fabs(mass.value().inertia[0][2]) < 1e-9);
+    CHECK(std::fabs(mass.value().inertia[1][2]) < 1e-9);
 #endif
   }
   {

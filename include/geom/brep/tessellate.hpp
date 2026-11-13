@@ -1096,12 +1096,13 @@ inline bool tessellate_ring_rectilinear(const std::vector<Point2d>& points) {
   return true;
 }
 
+inline constexpr double kStripEps = 1e-12;
+
 inline Result<bool> tessellate_trimmed_strip_triangles(
     TessellateState& state, const FaceUvProjection& projection, const TessellateTrimmedRing& ring,
     FaceId id, std::vector<std::array<std::uint32_t, 3>>& triangles) {
   const std::size_t count = ring.points.size();
   if (count < 4) return false;
-  constexpr double kStripEps = 1e-12;
 
   struct Horizontal {
     double v;
@@ -1133,7 +1134,7 @@ inline Result<bool> tessellate_trimmed_strip_triangles(
       verticals.push_back(Vertical{a[0], std::min(a[1], b[1]), std::max(a[1], b[1])});
     }
   }
-  auto sort_unique = [kStripEps](std::vector<double>& values) {
+  auto sort_unique = [](std::vector<double>& values) {
     std::sort(values.begin(), values.end());
     std::vector<double> unique;
     unique.reserve(values.size());
@@ -1196,7 +1197,7 @@ inline Result<bool> tessellate_trimmed_strip_triangles(
     }
     std::sort(chain.u.begin(), chain.u.end());
     chain.u.erase(std::unique(chain.u.begin(), chain.u.end(),
-                              [kStripEps](double a, double b) { return b - a <= kStripEps; }),
+                              [](double a, double b) { return b - a <= kStripEps; }),
                   chain.u.end());
     if (chain.u.size() < 2) return std::nullopt;
     if (std::fabs(chain.u.front() - u0) > 1e-9 || std::fabs(chain.u.back() - u1) > 1e-9) {
