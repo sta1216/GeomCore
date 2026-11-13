@@ -1651,8 +1651,8 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
 
   // A cheap upper bound on the triangles the generic path can emit is checked
   // before that path allocates its triangulation: a simple polygon of n vertices
-  // produces at most n - 2 triangles, plus at most two per bridged hole, and the
-  // fan expansion never adds more triangles than the ring has samples.
+  // produces at most n - 2 triangles, and the fan expansion never adds more
+  // triangles than the ring has samples. Holes are rejected above.
   std::size_t triangle_bound = 2u * rings.size();
   for (const TessellateTrimmedRing& ring : rings) {
     triangle_bound += ring.points.size();
@@ -1688,7 +1688,6 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
     } else {
       std::vector<TessellateTrimmedRing> polygon;
       polygon.push_back(std::move(outer.front()));
-      for (TessellateTrimmedRing& hole : holes) polygon.push_back(std::move(hole));
       const Result<std::vector<std::array<std::uint32_t, 3>>> part =
           tessellate_trimmed_polygon_triangles(std::move(polygon), id);
       if (!part.has_value()) return part.error();
@@ -1710,7 +1709,6 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
     }
   };
   for (const TessellateTrimmedRing& ring : outer) add_ring_uvs(ring);
-  for (const TessellateTrimmedRing& ring : holes) add_ring_uvs(ring);
   const Result<void> refined = tessellate_refine_trimmed_edges(
       state, projection, triangles, std::move(constrained), deflection, id);
   if (!refined.has_value()) return refined.error();

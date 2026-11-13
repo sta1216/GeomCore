@@ -555,7 +555,8 @@ TEST_CASE("mass properties: trimmed output is pinned at the quadrature floor") {
   // The floor is load-bearing: with curved_sampling_deflection below 3.125e-4
   // the interior step stays at 5e-2 rad, so the output is a fixed, reproducible
   // value. These checks are tight enough to fail if the std::max floor is
-  // removed (the unfloored 1e-5 step changes every digit below).
+  // removed (the unfloored 1e-5 step changes the centroid and inertia; the
+  // volume is subdivision-invariant).
   const geom::Brep brep = windowed_cylinder_brep();
   const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
   REQUIRE(mass.has_value());

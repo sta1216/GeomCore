@@ -53,10 +53,11 @@ M2 的 `tessellate()` 只处理完整解析面（整圆帽的圆柱带、完整�
   预算和 2e6 上限保证弦高网格即使不收敛也不会失控；实测 2e-3/1e-3/1e-4 的
   三角形数为 894/1268/3744。
 - **错误契约。** 有 NURBS 多段线边界的修剪面只报修剪路径的错误（不再把
-  “cylinder face is missing a cap circle” 透出）；孔洞（两个环）与斜切
-  （椭圆 uv 边界）返回 `Errc::unsupported`“tessellate: trimmed face does not
-  follow the surface”；纯直线/圆弧边界的非整面仍走解析路径的既有错误，保持
-  覆盖测试不变。
+  “cylinder face is missing a cap circle” 透出）；孔洞（第二环）在三角化前
+  返回 `Errc::unsupported` “tessellate: trimmed curved face has a hole”，
+  非轴对齐（斜切/椭圆）uv 边界返回 `... boundary is not rectilinear`，
+  两者都与 deflection 无关；纯直线/圆弧边界的非整面仍走解析路径的既有错误，
+  保持覆盖测试不变。
 - **质量属性。** 用同一份 uv 环与三角化（角点简化后 12 个三角形），在每个
   uv 三角形上按 7 点 Dunavant 在精确曲面上取 `eval/du/dv` 与面 Jacobian，
   体积/一阶矩/二阶矩沿用 `mass_add_surface_element` 的符号约定；步长
@@ -89,8 +90,8 @@ M2 的 `tessellate()` 只处理完整解析面（整圆帽的圆柱带、完整�
   不限制可测精度（上列 4.4e-10 / 4.4e-11 就是默认步长下的结果）。
 - **规范面不变。** box/cylinder/torus 的网格哈希与 14a89df 前逐位一致
   （`2abc6bb21fd6d800` / `687a72048f8f4296` / `c808f6ee4d9c72db`）；
-  质量属性也有逐位回归测试。修剪路径只在 `tessellate_face_has_polyline_edge`
-  为真且解析域查找返回 `unsupported` 时启用。
+  质量属性也有逐位回归测试。修剪路径在 `tessellate_face_has_polyline_edge`
+  为真且解析构建失败时启用（任何 `Errc`，只要存在 degree-1 多段线边）。
 - **已知限制（M3c-2）。** 孔洞修剪面（窗口不跨缝合线 -> 外环 + 孔）与斜切
   椭圆边界在三角化之前按域形状确定性地拒绝（与 deflection 无关），错误分别为
   `tessellate: trimmed curved face has a hole` 与 `... boundary is not
