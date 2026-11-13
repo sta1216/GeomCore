@@ -4,6 +4,7 @@
 #include <geom/brep/detail/curved_volume.hpp>
 #include <geom/brep/face_uv.hpp>
 #include <geom/brep/primitives.hpp>
+#include <geom/brep/solid_editor.hpp>
 #include <geom/brep/split_solid.hpp>
 #include <geom/brep/tessellate.hpp>
 #include <geom/brep/validate.hpp>
@@ -369,4 +370,72 @@ TEST_CASE("trimmed tessellation: a hole loop is rejected with the trimmed-path e
     CHECK(std::string(mesh.error().message) ==
           "tessellate: trimmed face does not follow the surface");
   }
+}
+TEST_CASE("trimmed tessellation: smaller deflection refines the trimmed band") {
+  const geom::Brep brep = cut_cylinder();
+  const auto coarse = geom::tessellate(brep, geom::TessellationOptions{5e-2, 0.35});
+  const auto fine = geom::tessellate(brep, geom::TessellationOptions{2e-3, 0.35});
+  REQUIRE(coarse.has_value());
+  REQUIRE(fine.has_value());
+  CHECK(fine.value().triangles.size() > coarse.value().triangles.size());
+  check_watertight(coarse.value());
+  check_watertight(fine.value());
+}
+
+TEST_CASE("trimmed tessellation: chord height of the windowed band meets deflection") {
+  const geom::Brep brep = cut_cylinder();
+  const double deflection = 2e-3;
+  const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});
+  REQUIRE(mesh.has_value());
+  const geom::FaceId lateral = lateral_face(brep);
+  REQUIRE(!lateral.is_null());
+  double worst = 0.0;
+  for (std::size_t t = 0; t < mesh.value().triangles.size(); ++t) {
+    if (mesh.value().triangle_face[t] != lateral.index()) continue;
+    const geom::Point3d& a = mesh.value().positions[mesh.value().triangles[t][0]];
+    const geom::Point3d& b = mesh.value().positions[mesh.value().triangles[t][1]];
+    const geom::Point3d& c = mesh.value().positions[mesh.value().triangles[t][2]];
+    const geom::Point3d points[3] = {a, b, c};
+    for (int e = 0; e < 3; ++e) {
+      const geom::Point3d& p = points[e];
+      const geom::Point3d& q = points[(e + 1) % 3];
+      const double mid[2] = {(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0};
+      worst = std::max(worst, std::abs(std::hypot(mid[0], mid[1]) - 1.0));
+    }
+  }
+  CHECK(worst <= deflection * 1.05);
+}
+
+TEST_CASE("trimmed tessellation: analytic failure does not fall back without a polyline edge") {
+  // A curved face bounded only by line edges: the analytic cylinder builder
+  // rejects it, and the dispatcher must surface that analytic error instead of
+  // silently trying the uv path (which would fail with a different message).
+  geom::SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(
+      geom::Cylinder3{geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                      geom::Vec3d{1.0, 0.0, 0.0}, 1.0});
+  const geom::Point3d corners[3] = {geom::Point3d{1.0, 0.0, 0.0}, geom::Point3d{0.0, 1.0, 0.0},
+                                    geom::Point3d{0.0, 0.0, 1.0}};
+  std::vector<geom::VertexId> vertices;
+  for (const geom::Point3d& corner : corners) {
+    vertices.push_back(editor.add_vertex(corner, 0.0).value());
+  }
+  std::vector<geom::CoedgeSpec> specs;
+  for (std::size_t i = 0; i < 3; ++i) {
+    const geom::Point3d from = corners[i];
+    const geom::Point3d to = corners[(i + 1) % 3];
+    const geom::Vec3d delta = to - from;
+    const double length = std::hypot(delta[0], delta[1], delta[2]);
+    const std::uint32_t curve = editor.add_curve(
+        geom::LineCurve3{from, geom::Vec3d{delta[0] / length, delta[1] / length, delta[2] / length}});
+    const geom::EdgeId edge =
+        editor.add_edge(vertices[i], vertices[(i + 1) % 3], curve, 0.0, length, 0.0).value();
+    specs.push_back(geom::CoedgeSpec{edge, false});
+  }
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  REQUIRE(editor.add_loop(face, specs, true).has_value());
+  const auto mesh = geom::tessellate(editor.brep(), {});
+  REQUIRE(!mesh.has_value());
+  CHECK(mesh.error().code == geom::Errc::invalid_topology);
+  CHECK(std::string(mesh.error().message) == "tessellate: cylinder face is missing a cap circle");
 }

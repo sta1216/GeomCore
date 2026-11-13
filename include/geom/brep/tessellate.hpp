@@ -1830,10 +1830,15 @@ inline bool tessellate_supported_surface(const SurfaceGeometry& surface) {
 // solid has no cracks along shared edges. Every edge is sampled once in
 // edge-parameter order and the samples are shared by both coedges.
 //
-// `angle_tolerance` does not resample the curved grids: the edge chord rule fixes
-// every seam sample, and re-deriving interior columns from a normal angle would
-// break the bit-identical weld to those seams. It is validated here and reserved
-// for a future adaptive pass.
+// A trimmed analytic face (a curved-boolean face whose boundary carries degree-1
+// polyline trim edges) first tries its analytic builder; when that fails it is
+// triangulated from its boundary uv rings and refined in uv until the chord
+// deviation is under `deflection`.
+//
+// `angle_tolerance` does not resample the curved grids or the trimmed bands: the
+// edge chord rule fixes every boundary sample, and re-deriving interior columns
+// from a normal angle would break the bit-identical weld to those seams. It is
+// validated here and reserved for a future adaptive pass.
 inline Result<TriMesh> tessellate(const Brep& brep, const TessellationOptions& options) {
   if (!std::isfinite(options.deflection) || !(options.deflection > 0.0)) {
     return Error{Errc::tolerance_violation, "tessellate: deflection must be finite and positive",
