@@ -148,8 +148,9 @@ inline Result<std::uint32_t> tessellate_circle_segments(const CircleCurve3& circ
 
 // A degree-1 NURBS edge whose control polygon starts and ends exactly on the edge
 // vertices is the polyline the curved boolean writes for a split: it can be
-// sampled and welded. Any other NURBS edge keeps the historical unsupported
-// result, so the trimmed-path gate and the sampler agree on what is usable.
+// sampled and welded. Degree >= 2 trim edges are a documented limitation: they are
+// unsupported. Any other NURBS edge keeps the historical unsupported result, so the
+// trimmed-path gate and the sampler agree on what is usable.
 inline bool tessellate_polyline_edge_supported(const Brep& brep, const Edge& edge) {
   if (edge.curve == kNoGeometry || edge.curve >= brep.geometry().curves.size()) return false;
   const CurveGeometry& curve = brep.geometry().curves[edge.curve];
@@ -201,6 +202,43 @@ inline Result<std::vector<Point3d>> tessellate_sample_edge(const Brep& brep, Edg
     const std::size_t count = std::max<std::size_t>(2, nurbs->control_count());
     const std::size_t sample_count = closed ? count - 1 : count;
     samples.reserve(sample_count);
+    if (nurbs->degree() == 1) {
+      // A degree-1 polyline edge is a chord chain. Its control points can sit a
+      // few ulps off the straight chord between the edge vertices, which would
+      // put boundary samples off the line a neighbouring planar face uses. When
+      // the control polygon is straight, interpolate the exact vertices instead.
+      const double chord[3] = {end[0] - start[0], end[1] - start[1], end[2] - start[2]};
+      const double chord_length =
+          std::sqrt(chord[0] * chord[0] + chord[1] * chord[1] + chord[2] * chord[2]);
+      bool straight = chord_length > 0.0;
+      for (std::size_t k = 0; straight && k < count; ++k) {
+        const double fraction = static_cast<double>(k) / static_cast<double>(count - 1);
+        const Point3d point = nurbs->eval(edge.t0 + (edge.t1 - edge.t0) * fraction);
+        const double relative[3] = {point[0] - start[0], point[1] - start[1], point[2] - start[2]};
+        const double offset[3] = {relative[1] * chord[2] - relative[2] * chord[1],
+                                  relative[2] * chord[0] - relative[0] * chord[2],
+                                  relative[0] * chord[1] - relative[1] * chord[0]};
+        const double offset_length = std::sqrt(offset[0] * offset[0] + offset[1] * offset[1] +
+                                               offset[2] * offset[2]);
+        straight = offset_length <= 1e-9 * chord_length * chord_length;
+      }
+      if (straight) {
+        for (std::size_t k = 0; k < sample_count; ++k) {
+          if (k == 0) {
+            samples.push_back(start);
+            continue;
+          }
+          if (!closed && k + 1 == count) {
+            samples.push_back(end);
+            continue;
+          }
+          const double fraction = static_cast<double>(k) / static_cast<double>(count - 1);
+          samples.push_back(Point3d{start[0] + chord[0] * fraction, start[1] + chord[1] * fraction,
+                                    start[2] + chord[2] * fraction});
+        }
+        return samples;
+      }
+    }
     for (std::size_t k = 0; k < sample_count; ++k) {
       if (k == 0) {
         samples.push_back(start);
@@ -1394,12 +1432,19 @@ inline Result<void> tessellate_refine_trimmed_edges(
           static_cast<std::uint32_t>(i));
     }
   }
+  std::size_t splits = 0;
+  const std::size_t split_budget = 8 * triangles.size() + 64;
   std::vector<std::uint64_t> queue;
   for (const auto& entry : adjacency) {
     if (is_boundary(entry.first)) continue;
     queue.push_back(entry.first);
   }
   while (!queue.empty()) {
+    // Refinement is bounded: a domain whose base triangulation is chordal cannot
+    // be healed by splitting, so stop after a fixed budget of splits. The caller
+    // then rejects the mesh through its deflection check instead of running to
+    // the global triangle limit.
+    if (splits >= split_budget) break;
     const std::uint64_t edge = queue.back();
     queue.pop_back();
     const auto found = adjacency.find(edge);
@@ -1407,15 +1452,28 @@ inline Result<void> tessellate_refine_trimmed_edges(
     if (is_boundary(edge)) continue;
     const std::uint32_t a = static_cast<std::uint32_t>(edge >> 32);
     const std::uint32_t b = static_cast<std::uint32_t>(edge & 0xffffffffu);
-    // The split point is the chord midpoint projected onto the surface. Working
-    // from 3D positions avoids the periodic branch ambiguity of a seam vertex.
+    // The split point is the chord midpoint projected onto the surface. The
+    // midpoint parameter is estimated from the two endpoint parameters so a
+    // periodic seam cannot send the projection to the far side of the face;
+    // the estimate is clamped to the segment's parameter box.
     const Point3d& pa = state.mesh.positions[a];
     const Point3d& pb = state.mesh.positions[b];
+    const Result<Point2d> first = face_uv_project(projection, pa, 0.0, false);
+    if (!first.has_value()) continue;
+    const Point2d ua = first.value();
+    const Result<Point2d> second = face_uv_project(projection, pb, ua[0], true);
+    if (!second.has_value()) continue;
+    Point2d ub = second.value();
+    if (projection.periodic_u()) ub[0] = face_uv_unwrap(ub[0], ua[0]);
+    if (projection.periodic_v()) ub[1] = face_uv_unwrap(ub[1], ua[1]);
+    Point2d middle_uv{0.5 * (ua[0] + ub[0]), 0.5 * (ua[1] + ub[1])};
+    middle_uv[0] = std::min(std::max(middle_uv[0], std::min(ua[0], ub[0])),
+                            std::max(ua[0], ub[0]));
+    middle_uv[1] = std::min(std::max(middle_uv[1], std::min(ua[1], ub[1])),
+                            std::max(ua[1], ub[1]));
     const Point3d chord_middle{0.5 * (pa[0] + pb[0]), 0.5 * (pa[1] + pb[1]),
                                0.5 * (pa[2] + pb[2])};
-    const Result<Point2d> middle_uv = face_uv_project(projection, chord_middle, 0.0, false);
-    if (!middle_uv.has_value()) continue;
-    const Point3d surface_middle = face_uv_eval(projection, middle_uv.value());
+    const Point3d surface_middle = face_uv_eval(projection, middle_uv);
     double sag_square = 0.0;
     for (int k = 0; k < 3; ++k) {
       const double d = chord_middle[k] - surface_middle[k];
@@ -1429,6 +1487,7 @@ inline Result<void> tessellate_refine_trimmed_edges(
         !(edge_length(mid, b) < 0.999 * edge_length(a, b))) {
       continue;
     }
+    ++splits;
     const std::vector<std::uint32_t> adjacent = found->second;
     adjacency.erase(found);
     for (const std::uint32_t t : adjacent) {
@@ -1655,6 +1714,43 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
                  "tessellate: trimmed face exceeds the triangle limit", id.index(),
                  static_cast<std::uint32_t>(kTrimmedMaxTriangles)};
   }
+  // Every kept triangle must follow the surface: the surface point above the
+  // triangle centroid has to stay within the requested deflection of the
+  // centroid. A chordal triangulation of a domain that the strip decomposition
+  // cannot cover is rejected here instead of silently breaking the contract.
+  for (const std::array<std::uint32_t, 3>& triangle : triangles) {
+    const Point3d& p0 = state.mesh.positions[triangle[0]];
+    const Point3d& p1 = state.mesh.positions[triangle[1]];
+    const Point3d& p2 = state.mesh.positions[triangle[2]];
+    const Result<Point2d> uv0 = face_uv_project(projection, p0, 0.0, false);
+    if (!uv0.has_value()) continue;
+    const Result<Point2d> uv1 = face_uv_project(projection, p1, uv0.value()[0], true);
+    if (!uv1.has_value()) continue;
+    const Result<Point2d> uv2 = face_uv_project(projection, p2, uv0.value()[0], true);
+    if (!uv2.has_value()) continue;
+    Point2d second = uv1.value();
+    Point2d third = uv2.value();
+    if (projection.periodic_u()) {
+      second[0] = face_uv_unwrap(second[0], uv0.value()[0]);
+      third[0] = face_uv_unwrap(third[0], uv0.value()[0]);
+    }
+    if (projection.periodic_v()) {
+      second[1] = face_uv_unwrap(second[1], uv0.value()[1]);
+      third[1] = face_uv_unwrap(third[1], uv0.value()[1]);
+    }
+    const Point2d centroid_uv{(uv0.value()[0] + second[0] + third[0]) / 3.0,
+                              (uv0.value()[1] + second[1] + third[1]) / 3.0};
+    const Point3d surface = face_uv_eval(projection, centroid_uv);
+    const Point3d centroid{(p0[0] + p1[0] + p2[0]) / 3.0, (p0[1] + p1[1] + p2[1]) / 3.0,
+                           (p0[2] + p1[2] + p2[2]) / 3.0};
+    const double dx = surface[0] - centroid[0];
+    const double dy = surface[1] - centroid[1];
+    const double dz = surface[2] - centroid[2];
+    if (std::sqrt(dx * dx + dy * dy + dz * dz) > deflection) {
+      return Error{Errc::unsupported,
+                   "tessellate: trimmed face does not follow the surface", id.index(), 0u};
+    }
+  }
 
   std::size_t kept = 0;
   for (const std::array<std::uint32_t, 3>& triangle : triangles) {
@@ -1745,13 +1841,15 @@ inline Result<void> sample_curved_face(TessellateState& state, const Brep& brep,
   }
   // The generic uv triangulation only serves trim faces whose boundary carries
   // polyline trim edges. Faces with pure line/circle boundaries keep the analytic
-  // error so an unsupported shape is not silently remeshed.
+  // error so an unsupported shape is not silently remeshed. A polyline-bounded
+  // face that the trimmed path also rejects surfaces the trimmed-path error: the
+  // analytic error would describe a primitive the face is not.
   if (!tessellate_face_has_polyline_edge(brep, id)) return canonical_status.error();
   const Result<FaceUvProjection> projection = face_uv_projection(brep, face, options.deflection);
-  if (!projection.has_value()) return canonical_status.error();
+  if (!projection.has_value()) return projection.error();
   const Result<void> trimmed =
       tessellate_trimmed_face(state, brep, id, projection.value(), options.deflection);
-  if (!trimmed.has_value()) return canonical_status.error();
+  if (!trimmed.has_value()) return trimmed.error();
   return trimmed;
 }
 

@@ -3,6 +3,7 @@
 #include <geom/brep/boolean_solid_curved.hpp>
 #include <geom/brep/detail/curved_volume.hpp>
 #include <geom/brep/primitives.hpp>
+#include <geom/brep/split_solid.hpp>
 #include <geom/brep/tessellate.hpp>
 #include <geom/brep/validate.hpp>
 
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <map>
 #include <numbers>
+#include <string>
 #include <utility>
 #include <variant>
 
@@ -101,6 +103,33 @@ geom::Brep half_cylinder() {
                                     geom::CurvedBooleanOptions{1e-9})
       .value()
       .brep;
+}
+
+// A cylinder cut by a slanted plane: the trim curve is an ellipse that is not
+// rectilinear in the cylinder uv chart, so the strip decomposition cannot cover it.
+geom::Brep slanted_cylinder(bool upper) {
+  const geom::Brep cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                          1e-9)
+          .value();
+  const geom::Vec3d normal{0.3, 0.0, 1.0};
+  const double length = std::sqrt(geom::dot(normal, normal));
+  const geom::Plane3 plane{geom::Vec3d{normal[0] / length, normal[1] / length, normal[2] / length},
+                           1.0 / length};
+  const auto split =
+      geom::split_solid_by_plane(cylinder, cylinder.solid_ids().front(), plane, 1e-9);
+  REQUIRE(split.has_value());
+  return upper ? split.value().above : split.value().below;
+}
+
+double max_wall_offset(const geom::TriMesh& mesh, int axis, double value) {
+  double worst = 0.0;
+  for (const geom::Point3d& point : mesh.positions) {
+    const double offset = std::abs(point[axis] - value);
+    if (offset > 1e-6) continue;
+    if (offset > worst) worst = offset;
+  }
+  return worst;
 }
 
 }  // namespace
@@ -258,4 +287,49 @@ TEST_CASE("trimmed tessellation: a half cylinder sliver stays watertight") {
     CHECK(std::abs(mesh_volume(mesh.value()) - exact.value()) <=
           2.0 * deflection * exact.value());
   }
+}
+TEST_CASE("trimmed tessellation: a slanted trim reports the trimmed-path error") {
+  // The ellipse boundary is not rectilinear in the uv chart, so this domain is
+  // rejected by the surface-following check. The error must describe the trimmed
+  // path, never the analytic primitive.
+  for (const bool upper : {true, false}) {
+    const geom::Brep brep = slanted_cylinder(upper);
+    REQUIRE(geom::validate_topology(brep).ok());
+    for (const double deflection : {1e-2, 1e-3}) {
+      const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});
+      REQUIRE(!mesh.has_value());
+      CHECK(mesh.error().code == geom::Errc::unsupported);
+      CHECK(std::string(mesh.error().message) ==
+            "tessellate: trimmed face does not follow the surface");
+      CHECK(std::string(mesh.error().message) != "tessellate: cylinder face is missing a cap circle");
+    }
+  }
+}
+
+TEST_CASE("trimmed tessellation: trim samples sit exactly on the wall planes") {
+  const geom::Brep windowed = cut_cylinder();
+  const auto window_mesh = geom::tessellate(windowed, geom::TessellationOptions{1e-3, 0.35});
+  REQUIRE(window_mesh.has_value());
+  CHECK(max_wall_offset(window_mesh.value(), 1, 0.5) <= 1e-12);
+  CHECK(max_wall_offset(window_mesh.value(), 1, -0.5) <= 1e-12);
+  CHECK(max_wall_offset(window_mesh.value(), 2, 0.5) <= 1e-12);
+  CHECK(max_wall_offset(window_mesh.value(), 2, 1.5) <= 1e-12);
+
+  const geom::Brep sliver = half_cylinder();
+  const auto sliver_mesh = geom::tessellate(sliver, geom::TessellationOptions{1e-3, 0.35});
+  REQUIRE(sliver_mesh.has_value());
+  CHECK(max_wall_offset(sliver_mesh.value(), 0, 0.5) <= 1e-12);
+}
+
+TEST_CASE("trimmed tessellation: the sag refinement subdivides the sliver band") {
+  // Refinement is live: grinding the band from 1e-2 to 1e-3 must add triangles
+  // beyond what the coarser sampling alone produces. Disabling the refinement
+  // leaves the count unchanged and fails this check.
+  const geom::Brep brep = half_cylinder();
+  const auto coarse = geom::tessellate(brep, geom::TessellationOptions{1e-2, 0.35});
+  const auto fine = geom::tessellate(brep, geom::TessellationOptions{1e-3, 0.35});
+  REQUIRE(coarse.has_value());
+  REQUIRE(fine.has_value());
+  CHECK(fine.value().triangles.size() >=
+        static_cast<std::size_t>(1.5 * static_cast<double>(coarse.value().triangles.size())));
 }
