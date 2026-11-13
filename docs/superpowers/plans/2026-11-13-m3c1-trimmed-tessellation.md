@@ -71,7 +71,7 @@ Result<TrimmedUvTriangulation> triangulate_trimmed_domain(
     std::span<const TrimmedBoundary> boundaries);
 ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `tests/unit/trimmed_domain_test.cpp`:
 
@@ -265,7 +265,7 @@ TEST_CASE("trimmed domain: duplicate or non-finite rings are rejected") {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run:
 ```powershell
@@ -274,7 +274,7 @@ cmake --build build --config Debug --target geom_tests
 ```
 Expected: `trimmed_domain.hpp: No such file or directory` (C1083).
 
-- [ ] **Step 3: Implement the domain and triangulation**
+- [x] **Step 3: Implement the domain and triangulation**
 
 Implementation notes (signature and tests leave the body open, these points are not):
 - Call `face_loops_uv(brep, face, projection.tolerance)`; require one `outer` loop and that every other loop is a hole; otherwise `Errc::invalid_topology`.
@@ -282,11 +282,11 @@ Implementation notes (signature and tests leave the body open, these points are 
 - Drop consecutive duplicates (within `1e-12`) and a closing duplicate; require at least 3 points per ring and a non-zero area; re-unwrap each ring so consecutive `u` differ by less than `pi` (add or subtract `2*pi` as needed, keeping the seam-crossing ring connected); normalize outer to CCW and holes to CW.
 - `triangulate_trimmed_domain`: reject fewer than one outer ring, more than one outer ring, non-finite points, or duplicate rings (same first point and vertex count); build `Polygon2d` with `ring_starts` (outer first), translate by the first vertex before calling `triangulate_polygon2` only if needed for the predicate range (keep a mapping back); return `Errc::degenerate` when `!triangulation.ok`. Verify every returned triangle has positive orientation and non-zero area.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run the same command; expected: all four cases pass, plus the whole suite still green in Debug and Release.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add include/geom/brep/trimmed_domain.hpp tests/unit/trimmed_domain_test.cpp tests/CMakeLists.txt
@@ -313,7 +313,7 @@ Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& brep, F
 }
 ```
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `tests/unit/tessellate_trimmed_test.cpp`:
 
@@ -415,11 +415,11 @@ TEST_CASE("trimmed tessellation: canonical primitives are unchanged") {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Expected: the windowed case fails with the current `unsupported` error (the canonical builder rejects the trimmed band), and the canonical-primitives case still passes.
 
-- [ ] **Step 3: Implement the trimmed builder**
+- [x] **Step 3: Implement the trimmed builder**
 
 Implementation notes:
 - Build one ring per face loop by walking coedges in loop order. For each coedge, call `tessellate_edge_positions(state, brep, coedge.edge, deflection)`, reverse the sample order when `coedge.reversed`, and project each position with `face_uv_project(projection, point, previous_u, has_previous_u)`. Append the sample positions (not freshly sampled points) to the ring and remember the pool index, so shared edges reuse the neighbour's indices.
@@ -428,11 +428,11 @@ Implementation notes:
 - For each triangle, append the three pool indices; reverse the winding when `face.reversed`; drop triangles whose 3D area is zero; return `Errc::degenerate` if fewer than one triangle remains.
 - Do not touch `sample_curved_face` yet; Task 3 wires the fallback.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Same command; expected: all three cases pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add include/geom/brep/tessellate.hpp tests/unit/tessellate_trimmed_test.cpp tests/CMakeLists.txt
@@ -451,7 +451,7 @@ git commit -m "feat(m3c1): tessellate trimmed curved faces from shared boundary 
 - Consumes: `tessellate_trimmed_face` from Task 2.
 - Produces: no new public name; `tessellate()` now succeeds on trimmed analytic faces.
 
-- [ ] **Step 1: Add the failing refinement tests**
+- [x] **Step 1: Add the failing refinement tests**
 
 Append to `tests/unit/tessellate_trimmed_test.cpp`:
 
@@ -486,11 +486,11 @@ TEST_CASE("trimmed tessellation: chord height of the windowed band meets deflect
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Expected: the windowed fixture still fails at the dispatch (or the refinement case fails because the coarse and fine meshes have the same triangle count).
 
-- [ ] **Step 3: Implement fallback and refinement**
+- [x] **Step 3: Implement fallback and refinement**
 
 Implementation notes:
 - In `sample_curved_face`, first build into a scratch copy of the state (`TessellateState attempt = state;`). Run the existing analytic builder on the copy; on success assign `state = std::move(attempt)` and return. On failure, discard the copy, obtain the projection with `face_uv_projection`, call `tessellate_trimmed_face` on `state`, and if that fails return the original analytic error (deterministic message).
@@ -498,7 +498,7 @@ Implementation notes:
 - Keep the `TessellateState.edges` cache authoritative: refinement only adds interior points.
 - Update the doc comment of `tessellate()` to state that trimmed analytic faces use the UV triangulation path, and that `angle_tolerance` is still validated but not used for sampling.
 
-- [ ] **Step 4: Run Debug and Release suites**
+- [x] **Step 4: Run Debug and Release suites**
 
 ```powershell
 cmake --build build --config Debug --target geom_tests
@@ -508,7 +508,7 @@ cmake --build build-rel --config Release --target geom_tests
 ```
 Expected: all cases pass, including the existing `tessellate_curved_test.cpp` cases unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add include/geom/brep/tessellate.hpp tests/unit/tessellate_trimmed_test.cpp
@@ -536,7 +536,7 @@ struct MassPropertiesOptions {
 };
 ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `tests/unit/mass_properties_test.cpp`:
 
@@ -596,11 +596,11 @@ TEST_CASE("mass properties: trimmed volume agrees with the volume integrator") {
 
 Both cases need `#include <geom/brep/boolean_solid_curved.hpp>`, `<geom/brep/primitives.hpp>` and `<geom/brep/detail/curved_volume.hpp>` at the top of `mass_properties_test.cpp` if they are not already there.
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Expected: `Errc::unsupported` "curved face is not an untrimmed full rectangle".
 
-- [ ] **Step 3: Implement trimmed integration**
+- [x] **Step 3: Implement trimmed integration**
 
 Implementation notes:
 - In `mass_add_face`, keep the existing untrimmed path. When it would return `mass_unsupported_rectangle`, build the face's trimmed boundaries with `trimmed_face_boundaries(brep, id, projection, options.curved_sampling_deflection)` and `triangulate_trimmed_domain`; if either fails return that error.
@@ -609,11 +609,11 @@ Implementation notes:
 - If a face's rings are not representable (multiple outer loops, non-finite, degenerate), return `Errc::invalid_topology`/`degenerate` naming the face; do not fall back to the old unsupported message.
 - Document in the header that trimmed curved faces are integrated by UV triangulation with `curved_sampling_deflection` (default 1e-5, relative accuracy ~1e-5) and that the untrimmed rectangle path remains exact.
 
-- [ ] **Step 4: Run the suites**
+- [x] **Step 4: Run the suites**
 
 Expected: the two new cases pass and every existing mass-properties case is unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add include/geom/brep/mass_properties.hpp tests/unit/mass_properties_test.cpp
@@ -634,7 +634,7 @@ git commit -m "feat(m3c1): integrate mass properties over trimmed curved faces"
 
 **Interfaces:** no code interface; the deliverable is evidence and documentation.
 
-- [ ] **Step 1: Add the QA-13 test**
+- [x] **Step 1: Add the QA-13 test**
 
 ```cpp
 TEST_CASE("QA-13: trimmed tessellation is watertight, finite and deterministic") {
@@ -657,19 +657,19 @@ TEST_CASE("QA-13: trimmed tessellation is watertight, finite and deterministic")
 
 Add the matching `tessellate` include and a `is_finite` helper as needed.
 
-- [ ] **Step 2: Run and record the numbers**
+- [x] **Step 2: Run and record the numbers**
 
 Run the Debug and Release suites and record: total cases/assertions, the trimmed-cylinder triangle count at `deflection = 2e-3`, the mesh-volume error against `3*pi/2`, and the trimmed mass-properties errors against the analytic values. Put them in `docs/benchmarks/m3c1.md` with the machine/compiler line, and in the ADR evidence section.
 
-- [ ] **Step 3: Write ADR-0027**
+- [x] **Step 3: Write ADR-0027**
 
 Record: trimmed analytic faces are meshed by UV triangulation of the projected ring set (not by extending the per-surface grids); boundary indices are shared with neighbouring faces; refinement is uniform per face; mass properties integrate the same triangulation with Dunavant quadrature at `curved_sampling_deflection = 1e-5` (relative accuracy ~1e-5); sphere/torus/cone operands and NURBS trim contours are M3c-2; canonical primitives keep the old grids.
 
-- [ ] **Step 4: Update §16.3 and the plan boxes**
+- [x] **Step 4: Update §16.3 and the plan boxes**
 
 Add an M3c-1 row: "trimmed cylinder tessellation + trimmed mass properties: PASS (QA-13, QA-11 extended); limits: M3c-2 for sphere/torus/cone operands and NURBS". Check the task boxes in this plan.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add docs tests/unit/tessellate_trimmed_test.cpp
@@ -680,11 +680,11 @@ git commit -m "docs(m3c1): record trimmed tessellation evidence and limits"
 
 ## M3c-1 Exit Criteria
 
-- [ ] `tessellate()` returns a watertight, finite, per-face-grouped mesh for the seam-crossing window fixture and every canonical primitive test stays green.
-- [ ] The trimmed band meets the chord-height bound at `deflection = 2e-3`; a smaller deflection produces more triangles.
-- [ ] `mass_properties()` returns volume/centroid/inertia for the half-trimmed cylinder within the documented 1e-5 relative accuracy, matching both the analytic values and `detail::curved_solid_volume`.
-- [ ] QA-13 exists and is deterministic; the ADR and `docs/benchmarks/m3c1.md` record the measured evidence.
-- [ ] Sphere, torus, cone and NURBS remain explicit `unsupported`/deferred and are listed for M3c-2.
+- [x] `tessellate()` returns a watertight, finite, per-face-grouped mesh for the seam-crossing window fixture and every canonical primitive test stays green.
+- [x] The trimmed band meets the chord-height bound at `deflection = 2e-3`; a smaller deflection produces more triangles.
+- [x] `mass_properties()` returns volume/centroid/inertia for the half-trimmed cylinder within the documented 1e-5 relative accuracy, matching both the analytic values and `detail::curved_solid_volume`.
+- [x] QA-13 exists and is deterministic; the ADR and `docs/benchmarks/m3c1.md` record the measured evidence.
+- [x] Sphere, torus, cone and NURBS remain explicit `unsupported`/deferred and are listed for M3c-2.
 
 ## Review Focus Notes for the Implementer
 

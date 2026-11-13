@@ -11,6 +11,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <map>
 #include <numbers>
 #include <string>
@@ -438,4 +439,32 @@ TEST_CASE("trimmed tessellation: analytic failure does not fall back without a p
   REQUIRE(!mesh.has_value());
   CHECK(mesh.error().code == geom::Errc::invalid_topology);
   CHECK(std::string(mesh.error().message) == "tessellate: cylinder face is missing a cap circle");
+}
+
+TEST_CASE("QA-13: trimmed tessellation is watertight, finite and deterministic") {
+  const geom::Brep brep = cut_cylinder();
+  const geom::TessellationOptions options{2e-3, 0.35};
+  const auto first = geom::tessellate(brep, options);
+  const auto second = geom::tessellate(brep, options);
+  REQUIRE(first.has_value());
+  REQUIRE(second.has_value());
+  const geom::TriMesh& a = first.value();
+  const geom::TriMesh& b = second.value();
+  check_watertight(a);
+  CHECK(a.triangles == b.triangles);
+  CHECK(a.triangle_face == b.triangle_face);
+  CHECK(a.positions.size() == b.positions.size());
+  for (const auto& triangle : a.triangles) {
+    for (const std::uint32_t index : triangle) {
+      CHECK(index < a.positions.size());
+    }
+  }
+  for (std::size_t i = 0; i < a.positions.size(); ++i) {
+    for (int axis = 0; axis < 3; ++axis) {
+      CHECK(std::isfinite(a.positions[i][static_cast<std::size_t>(axis)]));
+      double left = a.positions[i][static_cast<std::size_t>(axis)];
+      double right = b.positions[i][static_cast<std::size_t>(axis)];
+      CHECK(std::memcmp(&left, &right, sizeof(double)) == 0);
+    }
+  }
 }
