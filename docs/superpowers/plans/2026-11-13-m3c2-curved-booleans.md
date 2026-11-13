@@ -262,7 +262,7 @@ Run Debug and Release full suites plus `--test-case="*curved*"`. Expected 898+ c
 
 **Interfaces:**
 - Consumes: `detail::FaceUvProjection`, `face_uv_eval`, `Arrangement2`, `detail::split_segments`.
-- Produces: unchanged `CurvedFragment` structure. New contract: for a face whose loop-derived uv area is zero, `split_face_curved` synthesizes the parameter rectangle and emits fragments whose loops contain **only** cut geometry; synthetic seam/pole chains never appear. Open cuts on such a face return `Errc::unsupported` with message `"split_face_curved: open cuts on a seam-only face"`.
+- Produces: unchanged `CurvedFragment` structure. New contract: for a face whose loop-derived uv area is zero, `split_face_curved` synthesizes the parameter rectangle and emits fragments whose loops contain **only** cut geometry; synthetic seam/pole chains never appear. Open cuts return `unsupported "split_face_curved: open cuts on a seam-only face"`; a cut that runs along a domain side (meridian or pole ring) returns `unsupported "split_face_curved: cut lies on the parameter domain boundary"`; a cycle set that yields no material fragment returns `numeric_failure "split_face_curved: no fragments"`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -275,9 +275,9 @@ TEST_CASE("trim face: a sphere splits into caps and bands") {
   // z = 0.5, CCW seen from +z. Only the uv loop is consumed by the splitter.
   const double v = std::asin(0.5);
   std::vector<Point2d> uv;
-  for (int i = 0; i < 64; ++i) {
+  for (int i = 0; i <= 64; ++i) {
     const double t = 2.0 * 3.14159265358979323846 * i / 64.0;
-    uv.emplace_back(t, v);
+    uv.emplace_back(t, v);  // includes u = 2*pi so both ends land on the seam copies
   }
   FaceCut cut;
   cut.uv = uv;
@@ -293,7 +293,7 @@ TEST_CASE("trim face: a sphere splits into caps and bands") {
 
 - [ ] **Step 2: Run it and confirm it fails**
 
-Expected: `fragments.value().size() == 0`.
+Expected: the splitter emits degenerate sliver fragments (or an error), not 2 clean caps: the failing assertion is `fragments.value().size() == 2u`.
 
 - [ ] **Step 3: Implement**
 
@@ -301,15 +301,15 @@ Expected: `fragments.value().size() == 0`.
 2. Get the full domain from `curved_boolean_surface_uv_domain`; synthesize four boundary chains in uv with a provenance tag `synthetic = true`: bottom `v = v_lo`, top `v = v_hi`, left `u = u_lo`, right `u = u_hi`. Sample each side at the same spacing used for cuts (at most `π/32`), and mark the four corners.
 3. Build the `segments` vector exactly as today, but append the four synthetic chains (with a per-segment `synthetic` flag carried alongside).
 4. Normalize every cut into the domain before use: walk the polyline and add whole `2π` multiples so consecutive `u` differ by at most `π` (the same unwrap the face projection uses), then shift the whole chain into `[u_lo, u_hi)`; shift `v` by whole `2π` only when the surface is periodic in `v` (torus). A cut with any `v` outside `[v_lo, v_hi]` by more than `1e-9 * max(1, |v|)` returns `unsupported "split_face_curved: cut leaves the parameter domain"`. If a cut has an endpoint that is **not** on the synthetic rectangle and is not closed, return `unsupported "split_face_curved: open cuts on a seam-only face"`.
-5. Run `detail::split_segments` + `Arrangement2::build` as today. When walking a cycle ring, split it into maximal runs of non-synthetic vertices; drop synthetic runs. Each remaining run is a chain of cut points:
-   - if its two 3D endpoints are bitwise equal, close it into a ring;
-   - else, if both endpoints project to the same synthetic seam side or to the same pole value (`v == v_lo` / `v == v_hi`), close it by appending the first point;
-   - otherwise return `numeric_failure "split_face_curved: synthetic boundary chain is open"`.
+5. Run `detail::split_segments` + `Arrangement2::build` as today. For every cycle array, rotate to a cut-run head (`synthetic[k] == false && synthetic[(k+n-1) % n] == true`) and walk exactly `n` edges modulo `n`; split into maximal non-synthetic runs, drop synthetic runs, and skip all-synthetic cycles. A run that does not start at a head is a bug, not a fragment.
+6. Close a run only by one of: bitwise-equal 3D endpoints; the two u-seam copies (`u_lo`/`u_hi`) with **exactly** equal `v` when periodic in `u`; the two v-seam copies with exactly equal `u` when periodic in `v`. Two different poles must never close each other. Otherwise return `numeric_failure "split_face_curved: synthetic boundary chain is open"`.
+7. Reject side-coincident cuts before any arrangement work: a cut with a maximal run of at least two consecutive points within `1e-12 * max(1, |coord|)` of one domain side (meridian ring, pole ring, or any segment along a side) returns `unsupported "split_face_curved: cut lies on the parameter domain boundary"`. Do not rely on geometric stripping to hide them: a real cut half that coincides with the synthetic side would be dropped.
+8. Emit one `CurvedFragment` per material cycle with exactly those closed rings (outer first by descending |uv area|, the rest as holes). `arc_spans` stays empty. If no material cycle yields a fragment, return `numeric_failure "split_face_curved: no fragments"` instead of an empty success.
 6. Emit one `CurvedFragment` per material cycle with exactly those closed rings (outer first by descending |uv area|, the rest as holes). `arc_spans` stays empty: cuts are polylines, not analytic arcs. `reversed` stays false.
 
 - [ ] **Step 4: Verify**
 
-Debug/Release: the new test yields exactly 2 fragments; add a second case with two latitude cuts (`v = ±asin(0.8)`) expecting 3 fragments with loop counts `{1, 2, 1}` and total sphere area `4π` within `1e-12` when each loop is lifted and its spherical area integrated numerically (or assert the uv areas of the caps `0.4π`, band `2π`, cap `0.4π`).
+Debug/Release: the new test yields exactly 2 fragments; add a second case with two latitude cuts (`v = ±asin(0.8)`) expecting 3 fragments with loop counts `{1, 2, 1}` and total sphere area `4π` within `1e-12` when each loop is lifted and its spherical area integrated numerically (or assert the uv areas: cut at `asin(0.5)` gives caps `π`, `π` and band `2π`; two cuts at `±asin(0.8)` give `0.4π`, `3.2π`, `0.4π` — both total `4π`). Also assert every fragment's uv loop has positive signed area and closes in 3D within `1e-12` across the seam copy, and add the meridian/pole/open-cut rejection cases.
 
 - [ ] **Step 5: Commit**
 
