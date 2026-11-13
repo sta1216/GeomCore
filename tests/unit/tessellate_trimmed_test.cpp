@@ -357,6 +357,11 @@ TEST_CASE("trimmed tessellation: a hole loop is rejected with the trimmed-path e
   // with a chordal patch. This pins the honest error for the 2-loop fixture.
   const geom::Brep brep = hole_window_cylinder();
   REQUIRE(geom::validate_topology(brep).ok());
+  const geom::FaceId lateral = lateral_face(brep);
+  REQUIRE(!lateral.is_null());
+  const auto loops = geom::face_loops_uv(brep, lateral, 1e-9);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 2);
   for (const double deflection : {1e-2, 1e-3}) {
     const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});
     REQUIRE(!mesh.has_value());
