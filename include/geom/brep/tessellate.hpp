@@ -6,13 +6,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <utility>
 #include <variant>
 #include <vector>
 
+#include <geom/brep/face_uv.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/cgeom/polygon2.hpp>
+#include <geom/cgeom/trimmed_domain.hpp>
 #include <geom/core/result.hpp>
 #include <geom/cgeom/triangulate2.hpp>
 #include <geom/curves/analytic_curve.hpp>
@@ -54,6 +57,16 @@ inline bool tessellate_point_finite(const Point3d& point) noexcept {
 
 inline bool tessellate_vec_finite(const Vec3d& value) noexcept {
   return std::isfinite(value[0]) && std::isfinite(value[1]) && std::isfinite(value[2]);
+}
+
+// Endpoint agreement between a sampled curve and the edge's vertices. The mesh
+// is welded through the vertex pool, so a curve that does not meet its vertices
+// cannot contribute a consistent boundary ring.
+inline bool tessellate_point_close(const Point3d& a, const Point3d& b) noexcept {
+  const double scale = std::max({1.0, std::fabs(a[0]), std::fabs(a[1]), std::fabs(a[2]),
+                                 std::fabs(b[0]), std::fabs(b[1]), std::fabs(b[2])});
+  return std::fabs(a[0] - b[0]) <= 1e-9 * scale && std::fabs(a[1] - b[1]) <= 1e-9 * scale &&
+         std::fabs(a[2] - b[2]) <= 1e-9 * scale;
 }
 
 // Samples of one edge in edge-parameter order. The cache is keyed by the edge slot
@@ -159,8 +172,37 @@ inline Result<std::vector<Point3d>> tessellate_sample_edge(const Brep& brep, Edg
   }
   const CircleCurve3* circle = std::get_if<CircleCurve3>(&curve);
   if (circle == nullptr) {
-    return Error{Errc::unsupported, "tessellate: only line and circle edges are supported",
-                 id.index(), 0u};
+    const NurbsCurve* nurbs = std::get_if<NurbsCurve>(&curve);
+    if (nurbs == nullptr || nurbs->degree() != 1 || !nurbs->is_valid() ||
+        !std::isfinite(edge.t0) || !std::isfinite(edge.t1) || !(edge.t1 > edge.t0)) {
+      return Error{Errc::unsupported, "tessellate: only line and circle edges are supported",
+                   id.index(), 0u};
+    }
+    // The curved boolean stores every split as a degree-1 polyline, so sampling
+    // at the uniform control parameters reproduces the control polygon exactly.
+    // A curve whose endpoints disagree with the edge vertices cannot be welded
+    // and keeps the historical unsupported result.
+    if (!tessellate_point_close(nurbs->eval(edge.t0), start) ||
+        !tessellate_point_close(nurbs->eval(edge.t1), end)) {
+      return Error{Errc::unsupported, "tessellate: only line and circle edges are supported",
+                   id.index(), 0u};
+    }
+    const std::size_t count = std::max<std::size_t>(2, nurbs->control_count());
+    const std::size_t sample_count = closed ? count - 1 : count;
+    samples.reserve(sample_count);
+    for (std::size_t k = 0; k < sample_count; ++k) {
+      if (k == 0) {
+        samples.push_back(start);
+        continue;
+      }
+      if (!closed && k + 1 == count) {
+        samples.push_back(end);
+        continue;
+      }
+      const double fraction = static_cast<double>(k) / static_cast<double>(count - 1);
+      samples.push_back(nurbs->eval(edge.t0 + (edge.t1 - edge.t0) * fraction));
+    }
+    return samples;
   }
 
   const Result<std::uint32_t> segments =
@@ -219,6 +261,99 @@ inline Result<std::vector<std::uint32_t>> tessellate_edge_positions(TessellateSt
     slot.sampled = true;
   }
   return slot.positions;
+}
+
+// Point layout of the concatenated boundary rings of a face.
+struct TessellateTrimmedRingLayout {
+  std::vector<std::uint32_t> ring_of;
+  std::vector<std::uint32_t> ring_begin;
+  std::vector<std::uint32_t> ring_count;
+};
+
+// Returns the ring points strictly between `from` and `to` when every one of
+// them is exactly collinear with the chord and strictly inside it. `std::nullopt`
+// means the ring path is not a straight run. The ear clipper removes exactly
+// collinear uv vertices, so this recovers the boundary samples it merged.
+inline std::optional<std::vector<std::uint32_t>> tessellate_trimmed_run(
+    const std::vector<Point2d>& points, std::uint32_t begin, std::uint32_t count,
+    std::uint32_t from, std::uint32_t to) {
+  const Point2d& a = points[from];
+  const Point2d& b = points[to];
+  const double dx = b[0] - a[0];
+  const double dy = b[1] - a[1];
+  const double length2 = dx * dx + dy * dy;
+  if (!(length2 > 1e-30)) return std::nullopt;
+  std::vector<std::uint32_t> run;
+  std::uint32_t offset = (from - begin + 1u) % count;
+  for (std::uint32_t step = 0; step + 1u < count; ++step) {
+    if (begin + offset == to) return run;
+    const std::uint32_t index = begin + offset;
+    const Point2d& point = points[index];
+    if (sign_orient2d(a[0], a[1], b[0], b[1], point[0], point[1]) != 0) {
+      return std::nullopt;
+    }
+    const double t = ((point[0] - a[0]) * dx + (point[1] - a[1]) * dy) / length2;
+    if (!(t > 0.0 && t < 1.0)) return std::nullopt;
+    run.push_back(index);
+    offset = (offset + 1u) % count;
+  }
+  return std::nullopt;
+}
+
+// The ear clipper merges exactly collinear uv boundary runs into one chord. The
+// neighbouring faces keep every sample of a shared trim curve, so each chord that
+// spans a straight boundary run is fanned back into the individual sub-segments.
+inline Result<std::vector<std::array<std::uint32_t, 3>>> tessellate_expand_trimmed_runs(
+    const std::vector<Point2d>& points, const TessellateTrimmedRingLayout& layout,
+    const std::vector<std::array<std::uint32_t, 3>>& triangles, FaceId id) {
+  std::vector<std::array<std::uint32_t, 3>> expanded;
+  std::vector<std::array<std::uint32_t, 3>> pending = triangles;
+  while (!pending.empty()) {
+    const std::array<std::uint32_t, 3> triangle = pending.back();
+    pending.pop_back();
+    bool split = false;
+    for (std::uint32_t edge = 0; edge < 3u && !split; ++edge) {
+      const std::uint32_t a = triangle[edge];
+      const std::uint32_t b = triangle[(edge + 1u) % 3u];
+      const std::uint32_t c = triangle[(edge + 2u) % 3u];
+      if (layout.ring_of[a] != layout.ring_of[b]) continue;
+      const std::uint32_t ring = layout.ring_of[a];
+      const std::uint32_t begin = layout.ring_begin[ring];
+      const std::uint32_t ring_count = layout.ring_count[ring];
+      std::optional<std::vector<std::uint32_t>> run =
+          tessellate_trimmed_run(points, begin, ring_count, a, b);
+      if (run.has_value() && run->empty()) run.reset();
+      if (!run.has_value()) {
+        run = tessellate_trimmed_run(points, begin, ring_count, b, a);
+      }
+      if (!run.has_value() || run->empty()) continue;
+      const Point2d& pa = points[a];
+      const Point2d& pb = points[b];
+      const double dx = pb[0] - pa[0];
+      const double dy = pb[1] - pa[1];
+      std::sort(run->begin(), run->end(), [&](std::uint32_t lhs, std::uint32_t rhs) {
+        const Point2d& pl = points[lhs];
+        const Point2d& pr = points[rhs];
+        return ((pl[0] - pa[0]) * dx + (pl[1] - pa[1]) * dy) <
+               ((pr[0] - pa[0]) * dx + (pr[1] - pa[1]) * dy);
+      });
+      std::uint32_t previous = a;
+      for (const std::uint32_t point : *run) {
+        // The run points lie on the chord, so every fan triangle keeps the
+        // winding of the triangle it replaces.
+        if (sign_orient2d(points[previous][0], points[previous][1], points[point][0],
+                          points[point][1], points[c][0], points[c][1]) <= 0) {
+          return Error{Errc::degenerate, "tessellate: boundary fan is not convex", id.index(), 0u};
+        }
+        pending.push_back({previous, point, c});
+        previous = point;
+      }
+      pending.push_back({previous, b, c});
+      split = true;
+    }
+    if (!split) expanded.push_back(triangle);
+  }
+  return expanded;
 }
 
 // One loop of a planar face after projection into the face frame.
@@ -338,6 +473,7 @@ inline Result<void> tessellate_planar_face(TessellateState& state, const Brep& b
 
   Polygon2d polygon;
   polygon.ring_starts.push_back(0u);
+  TessellateTrimmedRingLayout layout;
   std::vector<std::uint32_t> polygon_positions;
   const auto append_ring = [&](const TessellateRing& ring, bool want_outer) -> Errc {
     std::vector<Point2d> points;
@@ -357,6 +493,8 @@ inline Result<void> tessellate_planar_face(TessellateState& state, const Brep& b
       std::reverse(points.begin(), points.end());
       std::reverse(positions.begin(), positions.end());
     }
+    layout.ring_begin.push_back(static_cast<std::uint32_t>(polygon.vertices.size()));
+    layout.ring_count.push_back(static_cast<std::uint32_t>(points.size()));
     for (std::size_t k = 0; k < points.size(); ++k) {
       polygon.vertices.push_back(points[k]);
       polygon_positions.push_back(positions[k]);
@@ -386,7 +524,16 @@ inline Result<void> tessellate_planar_face(TessellateState& state, const Brep& b
   if (!triangulation.ok) {
     return Error{Errc::degenerate, "tessellate: planar face triangulation failed", id.index(), 0u};
   }
-  for (const std::array<std::uint32_t, 3>& triangle : triangulation.triangles) {
+  layout.ring_of.resize(polygon.vertices.size());
+  for (std::uint32_t ring = 0; ring < layout.ring_begin.size(); ++ring) {
+    for (std::uint32_t sample = 0; sample < layout.ring_count[ring]; ++sample) {
+      layout.ring_of[layout.ring_begin[ring] + sample] = ring;
+    }
+  }
+  const Result<std::vector<std::array<std::uint32_t, 3>>> expanded = tessellate_expand_trimmed_runs(
+      polygon.vertices, layout, triangulation.triangles, id);
+  if (!expanded.has_value()) return expanded.error();
+  for (const std::array<std::uint32_t, 3>& triangle : expanded.value()) {
     std::array<std::uint32_t, 3> mapped{polygon_positions[triangle[0]],
                                         polygon_positions[triangle[1]],
                                         polygon_positions[triangle[2]]};
@@ -507,6 +654,20 @@ inline Result<void> tessellate_cylinder_face(TessellateState& state, const Brep&
   if (first_circle == nullptr || second_circle == nullptr) {
     return Error{Errc::invalid_topology, "tessellate: cylinder face is missing a cap circle",
                  id.index(), 0u};
+  }
+  // The full-band grid only covers a face whose boundary is the two closed cap
+  // circles plus straight seam lines. A trimmed band carries the window rim as
+  // open arcs or polyline trim edges and must not be tessellated as if the
+  // window were still there.
+  for (const TessellateBoundaryEdge& boundary : collected.value()) {
+    if (&boundary == first_circle || &boundary == second_circle) continue;
+    const Edge& edge = brep.edge(boundary.edge);
+    const bool line = edge.curve < brep.geometry().curves.size() &&
+                      std::holds_alternative<LineCurve3>(brep.geometry().curves[edge.curve]);
+    if (!line) {
+      return Error{Errc::invalid_topology, "tessellate: cylinder face is not a full band",
+                   id.index(), 0u};
+    }
   }
   const auto axial = [&](const TessellateBoundaryEdge& boundary) {
     const Point3d& point = state.mesh.positions[boundary.positions.front()];
@@ -759,7 +920,317 @@ inline Result<void> tessellate_torus_face(TessellateState& state, const Brep& br
   return {};
 }
 
-// Dispatches one face to its analytic grid. Nurbs faces remain unsupported.
+// One boundary ring of a trimmed analytic face: the uv points and the welded
+// position index of every point. The positions are exactly the edge samples the
+// neighbouring faces see, so the trimmed triangles reuse the shared weld.
+struct TessellateTrimmedRing {
+  std::vector<Point2d> points;
+  std::vector<std::uint32_t> positions;
+  bool outer = false;
+};
+
+// Upper bound on the triangles a single tessellation may produce. The trimmed uv
+// path checks it after triangulating the (already bounded) boundary rings, before
+// appending anything to the mesh.
+constexpr std::size_t kTrimmedMaxTriangles = 2000000u;
+
+// Triangulates one trimmed polygon (outer ring first, then holes) and maps the
+// uv triangle indices back to the shared position pool.
+inline Result<std::vector<std::array<std::uint32_t, 3>>>
+tessellate_trimmed_polygon_triangles(std::vector<TessellateTrimmedRing> rings, FaceId id) {
+  std::vector<TrimmedBoundary> boundaries;
+  TessellateTrimmedRingLayout layout;
+  std::vector<std::uint32_t> positions;
+  boundaries.reserve(rings.size());
+  for (TessellateTrimmedRing& ring : rings) {
+    TrimmedBoundary boundary;
+    boundary.outer = ring.outer;
+    boundary.points = std::move(ring.points);
+    boundary.arcs.resize(boundary.points.size());
+    layout.ring_begin.push_back(static_cast<std::uint32_t>(positions.size()));
+    layout.ring_count.push_back(static_cast<std::uint32_t>(boundary.points.size()));
+    positions.insert(positions.end(), ring.positions.begin(), ring.positions.end());
+    boundaries.push_back(std::move(boundary));
+  }
+  layout.ring_of.resize(positions.size());
+  for (std::uint32_t ring = 0; ring < layout.ring_begin.size(); ++ring) {
+    for (std::uint32_t sample = 0; sample < layout.ring_count[ring]; ++sample) {
+      layout.ring_of[layout.ring_begin[ring] + sample] = ring;
+    }
+  }
+  const Result<TrimmedUvTriangulation> triangulation = triangulate_trimmed_domain(boundaries);
+  if (!triangulation.has_value()) return triangulation.error();
+  const Result<std::vector<std::array<std::uint32_t, 3>>> expanded =
+      tessellate_expand_trimmed_runs(triangulation.value().points, layout,
+                                     triangulation.value().triangles, id);
+  if (!expanded.has_value()) return expanded.error();
+  std::vector<std::array<std::uint32_t, 3>> result;
+  result.reserve(expanded.value().size());
+  for (const std::array<std::uint32_t, 3>& triangle : expanded.value()) {
+    result.push_back({positions[triangle[0]], positions[triangle[1]], positions[triangle[2]]});
+  }
+  return result;
+}
+
+// A periodic trimmed ring repeats its seam vertices: the loop climbs the seam at
+// one end of the unwrapped u range and descends it at the other end. Triangulating
+// the cut rectangle in one piece lets the ear clipper pick diagonals from both
+// copies to the same far vertex, so after welding that 3D edge has four incident
+// triangles. Splitting the ring at a cut placed half a period away from the seam
+// keeps every piece on one side of the weld.
+inline std::optional<std::array<TessellateTrimmedRing, 2>> tessellate_split_periodic_ring(
+    const TessellateTrimmedRing& ring) {
+  const std::size_t count = ring.points.size();
+  if (count < 6) return std::nullopt;
+  std::vector<std::uint32_t> sorted = ring.positions;
+  std::sort(sorted.begin(), sorted.end());
+  bool wrapped = false;
+  for (std::size_t i = 1; i < sorted.size(); ++i) {
+    if (sorted[i] == sorted[i - 1]) {
+      wrapped = true;
+      break;
+    }
+  }
+  if (!wrapped) return std::nullopt;
+  double u_min = ring.points[0][0];
+  double u_max = u_min;
+  double v_min = ring.points[0][1];
+  double v_max = v_min;
+  for (const Point2d& point : ring.points) {
+    u_min = std::min(u_min, point[0]);
+    u_max = std::max(u_max, point[0]);
+    v_min = std::min(v_min, point[1]);
+    v_max = std::max(v_max, point[1]);
+  }
+  if (!(u_max - u_min > 0.0) || u_max - u_min > 2.0 * kPi + 1e-9) return std::nullopt;
+  const double target = u_min + 0.5 * (u_max - u_min);
+  const double band = 0.25 * (v_max - v_min);
+  std::size_t low = count;
+  std::size_t high = count;
+  double low_gap = 0.0;
+  double high_gap = 0.0;
+  for (std::size_t i = 0; i < count; ++i) {
+    const Point2d& point = ring.points[i];
+    const double gap = std::abs(point[0] - target);
+    if (point[1] <= v_min + band && (low == count || gap < low_gap)) {
+      low = i;
+      low_gap = gap;
+    }
+    if (point[1] >= v_max - band && (high == count || gap < high_gap)) {
+      high = i;
+      high_gap = gap;
+    }
+  }
+  if (low == count || high == count || low == high) return std::nullopt;
+  std::array<TessellateTrimmedRing, 2> pieces;
+  pieces[0].outer = true;
+  pieces[1].outer = true;
+  for (std::size_t piece = 0; piece < 2; ++piece) {
+    const std::size_t begin = piece == 0 ? low : high;
+    const std::size_t end = piece == 0 ? high : low;
+    std::size_t index = begin;
+    do {
+      pieces[piece].points.push_back(ring.points[index]);
+      pieces[piece].positions.push_back(ring.positions[index]);
+      if (index == end) break;
+      index = (index + 1) % count;
+    } while (index != begin);
+  }
+  if (pieces[0].points.size() < 3 || pieces[1].points.size() < 3) return std::nullopt;
+  return pieces;
+}
+
+// Triangulates a trimmed analytic face from its boundary samples. Every loop of
+// the face is projected through `projection`, unwrapped along the ring so the
+// seam stays connected, normalised to outer CCW / holes CW, and handed to
+// `triangulate_trimmed_domain`. The uv triangle vertices map back to the shared
+// position pool, so a trim curve welds to the adjacent faces.
+inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& brep, FaceId id,
+                                            const FaceUvProjection& projection,
+                                            double deflection) {
+  const Face& face = brep.face(id);
+  if (face.first_loop.is_null()) {
+    return Error{Errc::degenerate, "tessellate: face has no loop", id.index(), 0u};
+  }
+
+  std::vector<TessellateTrimmedRing> rings;
+  const std::size_t loop_limit = brep.loops().size();
+  const std::size_t coedge_limit = brep.coedges().size();
+  LoopId loop_id = face.first_loop;
+  std::size_t loop_count = 0;
+  while (!loop_id.is_null()) {
+    if (loop_count++ > loop_limit) {
+      return Error{Errc::invalid_topology, "tessellate: loop chain is cyclic", id.index(), 0u};
+    }
+    const Loop& loop = brep.loop(loop_id);
+    TessellateTrimmedRing ring;
+    ring.outer = loop.outer;
+    double previous_u = 0.0;
+    bool has_previous_u = false;
+    CoedgeId coedge_id = loop.start;
+    std::size_t coedge_count = 0;
+    if (coedge_id.is_null()) {
+      return Error{Errc::degenerate, "tessellate: loop has no coedges", id.index(), 0u};
+    }
+    do {
+      if (coedge_count++ > coedge_limit) {
+        return Error{Errc::invalid_topology, "tessellate: coedge cycle is cyclic", id.index(), 0u};
+      }
+      const Coedge& coedge = brep.coedge(coedge_id);
+      const Result<std::vector<std::uint32_t>> samples =
+          tessellate_edge_positions(state, brep, coedge.edge, deflection);
+      if (!samples.has_value()) return samples.error();
+      const std::vector<std::uint32_t>& order = samples.value();
+      for (std::size_t k = 0; k < order.size(); ++k) {
+        const std::uint32_t index = coedge.reversed ? order[order.size() - 1 - k] : order[k];
+        if (!ring.positions.empty() && ring.positions.back() == index) continue;
+        const Result<Point2d> uv =
+            face_uv_project(projection, state.mesh.positions[index], previous_u, has_previous_u);
+        if (!uv.has_value()) return uv.error();
+        Point2d value = uv.value();
+        if (projection.periodic_u() && has_previous_u) {
+          value[0] = face_uv_unwrap(value[0], previous_u);
+        }
+        previous_u = value[0];
+        has_previous_u = true;
+        ring.points.push_back(value);
+        ring.positions.push_back(index);
+      }
+      coedge_id = coedge.next;
+    } while (!coedge_id.is_null() && coedge_id != loop.start);
+    if (coedge_id.is_null()) {
+      return Error{Errc::invalid_topology, "tessellate: loop is not closed", id.index(), 0u};
+    }
+    if (!ring.points.empty() && ring.positions.front() == ring.positions.back()) {
+      ring.points.pop_back();
+      ring.positions.pop_back();
+    }
+    if (ring.points.size() < 3) {
+      return Error{Errc::degenerate, "tessellate: trimmed loop has fewer than three samples",
+                   id.index(), 0u};
+    }
+    const int winding = ring_orientation2(ring.points);
+    if (winding == 0) {
+      return Error{Errc::degenerate, "tessellate: trimmed loop has no area", id.index(), 0u};
+    }
+    if ((winding > 0) != ring.outer) {
+      std::reverse(ring.points.begin(), ring.points.end());
+      std::reverse(ring.positions.begin(), ring.positions.end());
+    }
+    rings.push_back(std::move(ring));
+    loop_id = loop.next;
+  }
+
+  std::size_t outer_count = 0;
+  for (const TessellateTrimmedRing& ring : rings) {
+    if (ring.outer) ++outer_count;
+  }
+  if (outer_count != 1) {
+    return Error{Errc::invalid_topology, "tessellate: trimmed face needs one outer loop",
+                 id.index(), static_cast<std::uint32_t>(outer_count)};
+  }
+
+  // The outer ring is triangulated first, then the holes in ring order. A
+  // periodic outer ring is split away from the seam so the welded seam stays
+  // manifold; rings with holes keep the single-polygon path.
+  std::vector<TessellateTrimmedRing> outer;
+  std::vector<TessellateTrimmedRing> holes;
+  for (TessellateTrimmedRing& ring : rings) {
+    if (ring.outer) {
+      outer.push_back(std::move(ring));
+    } else {
+      holes.push_back(std::move(ring));
+    }
+  }
+
+  std::vector<std::array<std::uint32_t, 3>> triangles;
+  const std::optional<std::array<TessellateTrimmedRing, 2>> pieces =
+      projection.periodic_u() && holes.empty()
+          ? tessellate_split_periodic_ring(outer.front())
+          : std::nullopt;
+  if (pieces.has_value()) {
+    for (const TessellateTrimmedRing& piece : pieces.value()) {
+      const Result<std::vector<std::array<std::uint32_t, 3>>> part =
+          tessellate_trimmed_polygon_triangles(std::vector<TessellateTrimmedRing>{piece}, id);
+      if (!part.has_value()) return part.error();
+      triangles.insert(triangles.end(), part.value().begin(), part.value().end());
+    }
+  } else {
+    std::vector<TessellateTrimmedRing> polygon;
+    polygon.push_back(std::move(outer.front()));
+    for (TessellateTrimmedRing& hole : holes) polygon.push_back(std::move(hole));
+    const Result<std::vector<std::array<std::uint32_t, 3>>> part =
+        tessellate_trimmed_polygon_triangles(std::move(polygon), id);
+    if (!part.has_value()) return part.error();
+    triangles = std::move(part.value());
+  }
+  if (triangles.size() > kTrimmedMaxTriangles ||
+      state.mesh.triangles.size() > kTrimmedMaxTriangles - triangles.size()) {
+    return Error{Errc::numeric_failure,
+                 "tessellate: trimmed face exceeds the triangle limit", id.index(),
+                 static_cast<std::uint32_t>(kTrimmedMaxTriangles)};
+  }
+
+  std::size_t kept = 0;
+  for (const std::array<std::uint32_t, 3>& triangle : triangles) {
+    const std::uint32_t a = triangle[0];
+    const std::uint32_t b = triangle[1];
+    const std::uint32_t c = triangle[2];
+    const Point3d& pa = state.mesh.positions[a];
+    const Point3d& pb = state.mesh.positions[b];
+    const Point3d& pc = state.mesh.positions[c];
+    const Vec3d normal = cross(pb - pa, pc - pa);
+    // A triangle that collapses in 3D (a pole ring, a seam duplicate) has no
+    // normal and would be a zero-area triangle in the mesh.
+    if (!(dot(normal, normal) > 0.0)) continue;
+    tessellate_push_triangle(state, id, face.reversed, a, b, c);
+    ++kept;
+  }
+  if (kept == 0) {
+    return Error{Errc::degenerate, "tessellate: trimmed face has no triangle", id.index(), 0u};
+  }
+  return {};
+}
+
+// A face whose boundary contains a degree-1 NURBS edge is a trimmed face
+// produced by the curved boolean, which rewrites every split as a polyline.
+// Faces bounded only by lines and circles stay on the analytic path: a failure
+// there is a shape the analytic builders do not support, and the generic uv
+// triangulation must not mask it.
+inline bool tessellate_face_has_polyline_edge(const Brep& brep, FaceId id) {
+  const Face& face = brep.face(id);
+  const std::size_t loop_limit = brep.loops().size();
+  const std::size_t coedge_limit = brep.coedges().size();
+  LoopId loop_id = face.first_loop;
+  std::size_t loop_count = 0;
+  while (!loop_id.is_null()) {
+    if (loop_count++ > loop_limit) return false;
+    const Loop& loop = brep.loop(loop_id);
+    CoedgeId coedge_id = loop.start;
+    std::size_t coedge_count = 0;
+    if (coedge_id.is_null()) {
+      loop_id = loop.next;
+      continue;
+    }
+    do {
+      if (coedge_count++ > coedge_limit) return false;
+      const Coedge& coedge = brep.coedge(coedge_id);
+      const Edge& edge = brep.edge(coedge.edge);
+      if (edge.curve < brep.geometry().curves.size() &&
+          std::holds_alternative<NurbsCurve>(brep.geometry().curves[edge.curve])) {
+        return true;
+      }
+      coedge_id = coedge.next;
+    } while (!coedge_id.is_null() && coedge_id != loop.start);
+    loop_id = loop.next;
+  }
+  return false;
+}
+
+// Dispatches one face to its analytic grid. A face that the analytic builder
+// cannot represent as a full primitive (a trimmed band, a cap with a window) is
+// triangulated from its boundary samples in the face uv domain instead. Nurbs
+// faces remain unsupported.
 inline Result<void> sample_curved_face(TessellateState& state, const Brep& brep, FaceId id,
                                            const TessellationOptions& options) {
   const Face& face = brep.face(id);
@@ -767,19 +1238,39 @@ inline Result<void> sample_curved_face(TessellateState& state, const Brep& brep,
     return Error{Errc::unsupported, "tessellate: face has no surface geometry", id.index(), 0u};
   }
   const SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
-  if (const Cylinder3* cylinder = std::get_if<Cylinder3>(&surface)) {
-    return tessellate_cylinder_face(state, brep, id, *cylinder, options.deflection);
+  // The analytic grid runs on a scratch copy so a rejected attempt leaves no
+  // partial samples in the shared pool.
+  TessellateState attempt = state;
+  const auto canonical = [&](TessellateState& target) -> Result<void> {
+    if (const Cylinder3* cylinder = std::get_if<Cylinder3>(&surface)) {
+      return tessellate_cylinder_face(target, brep, id, *cylinder, options.deflection);
+    }
+    if (const Cone3* cone = std::get_if<Cone3>(&surface)) {
+      return tessellate_cone_face(target, brep, id, *cone, options.deflection);
+    }
+    if (const Sphere3* sphere = std::get_if<Sphere3>(&surface)) {
+      return tessellate_sphere_face(target, brep, id, *sphere, options.deflection);
+    }
+    if (const Torus3* torus = std::get_if<Torus3>(&surface)) {
+      return tessellate_torus_face(target, brep, id, *torus, options.deflection);
+    }
+    return Error{Errc::unsupported, "tessellate: unsupported surface type", id.index(), 0u};
+  };
+  const Result<void> canonical_status = canonical(attempt);
+  if (canonical_status.has_value()) {
+    state = std::move(attempt);
+    return canonical_status;
   }
-  if (const Cone3* cone = std::get_if<Cone3>(&surface)) {
-    return tessellate_cone_face(state, brep, id, *cone, options.deflection);
-  }
-  if (const Sphere3* sphere = std::get_if<Sphere3>(&surface)) {
-    return tessellate_sphere_face(state, brep, id, *sphere, options.deflection);
-  }
-  if (const Torus3* torus = std::get_if<Torus3>(&surface)) {
-    return tessellate_torus_face(state, brep, id, *torus, options.deflection);
-  }
-  return Error{Errc::unsupported, "tessellate: unsupported surface type", id.index(), 0u};
+  // The generic uv triangulation only serves trim faces whose boundary carries
+  // polyline trim edges. Faces with pure line/circle boundaries keep the analytic
+  // error so an unsupported shape is not silently remeshed.
+  if (!tessellate_face_has_polyline_edge(brep, id)) return canonical_status.error();
+  const Result<FaceUvProjection> projection = face_uv_projection(brep, face, options.deflection);
+  if (!projection.has_value()) return canonical_status.error();
+  const Result<void> trimmed =
+      tessellate_trimmed_face(state, brep, id, projection.value(), options.deflection);
+  if (!trimmed.has_value()) return canonical_status.error();
+  return trimmed;
 }
 
 inline bool tessellate_supported_surface(const SurfaceGeometry& surface) {
