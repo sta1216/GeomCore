@@ -1430,24 +1430,42 @@ inline Result<std::vector<FaceId>> curved_boolean_operand_faces(const Brep& brep
 inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a_solid,
                                                         const Brep& b, SolidId b_solid,
                                                         SolidBooleanOp op,
-                                                        const CurvedBooleanOptions& options = {}) {
+                                                        const CurvedBooleanOptions& options = {},
+                                                        CurvedBooleanReport* failure_report = nullptr) {
+  if (failure_report != nullptr) *failure_report = CurvedBooleanReport{};
+  // One set of counters serves both the success result and the copy handed to
+  // `failure_report` at every early error return.
+  CurvedBooleanReport report;
+  const auto record_failure = [&report, failure_report]() noexcept {
+    if (failure_report != nullptr) *failure_report = report;
+  };
   if (!detail::curved_boolean_valid_tolerance(options.tolerance)) {
+    record_failure();
     return Error{Errc::tolerance_violation,
                  "boolean_solid_curved: tolerance must be positive and finite", 0u, 0u};
   }
   const double tolerance = options.tolerance;
 
   const Result<std::vector<FaceId>> faces_a = detail::curved_boolean_operand_faces(a, a_solid);
-  if (!faces_a.has_value()) return faces_a.error();
+  if (!faces_a.has_value()) {
+    record_failure();
+    return faces_a.error();
+  }
   const Result<std::vector<FaceId>> faces_b = detail::curved_boolean_operand_faces(b, b_solid);
-  if (!faces_b.has_value()) return faces_b.error();
+  if (!faces_b.has_value()) {
+    record_failure();
+    return faces_b.error();
+  }
 
   std::vector<detail::CurvedBooleanFaceInfo> infos_a;
   infos_a.reserve(faces_a.value().size());
   for (const FaceId id : faces_a.value()) {
     const Result<detail::CurvedBooleanFaceInfo> info =
         detail::curved_boolean_face_info(a, id, tolerance);
-    if (!info.has_value()) return info.error();
+    if (!info.has_value()) {
+      record_failure();
+      return info.error();
+    }
     infos_a.push_back(info.value());
   }
   std::vector<detail::CurvedBooleanFaceInfo> infos_b;
@@ -1455,7 +1473,10 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
   for (const FaceId id : faces_b.value()) {
     const Result<detail::CurvedBooleanFaceInfo> info =
         detail::curved_boolean_face_info(b, id, tolerance);
-    if (!info.has_value()) return info.error();
+    if (!info.has_value()) {
+      record_failure();
+      return info.error();
+    }
     infos_b.push_back(info.value());
   }
 
@@ -1510,6 +1531,7 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
       std::optional<std::uint32_t> flipped = flipped_face(a, infos_a, true);
       if (!flipped.has_value()) flipped = flipped_face(b, infos_b, false);
       if (flipped.has_value()) {
+        record_failure();
         return Error{Errc::unsupported,
                      "boolean_solid_curved: flipped curved fragments are not supported yet",
                      flipped.value(), 0u};
@@ -1519,9 +1541,15 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
 
   // Membership is decided against a triangulated copy of the other operand.
   const Result<TriMesh> mesh_a = detail::curved_boolean_solid_mesh(a, infos_a, tolerance);
-  if (!mesh_a.has_value()) return mesh_a.error();
+  if (!mesh_a.has_value()) {
+    record_failure();
+    return mesh_a.error();
+  }
   const Result<TriMesh> mesh_b = detail::curved_boolean_solid_mesh(b, infos_b, tolerance);
-  if (!mesh_b.has_value()) return mesh_b.error();
+  if (!mesh_b.has_value()) {
+    record_failure();
+    return mesh_b.error();
+  }
 
   double scale = 0.0;
   for (const detail::CurvedBooleanFaceInfo& info : infos_a) {
@@ -1536,7 +1564,6 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
   }
   if (!(scale > 0.0)) scale = 1.0;
 
-  CurvedBooleanReport report;
   SsiOptions ssi_options;
   ssi_options.tolerance = tolerance;
 
@@ -1565,6 +1592,7 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
 
       const Result<SsiResult> intersected = ssi(patch_a, patch_b, ssi_options);
       if (!intersected.has_value()) {
+        record_failure();
         return Error{Errc::numeric_failure, "boolean_solid_curved: cut curve did not converge",
                      face_a.id.index(), face_b.id.index()};
       }
@@ -1573,14 +1601,17 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
         for (const SsiIssue& issue : intersected.value().issues) {
           switch (issue.code) {
             case SsiDiagnostic::coincident:
+              record_failure();
               return Error{Errc::unsupported,
                            "boolean_solid_curved: coplanar face contact is not supported yet",
                            face_a.id.index(), face_b.id.index()};
             case SsiDiagnostic::tangent_contact:
+              record_failure();
               return Error{Errc::unsupported,
                            "boolean_solid_curved: tangent face contact is not supported yet",
                            face_a.id.index(), face_b.id.index()};
             case SsiDiagnostic::no_convergence:
+              record_failure();
               return Error{Errc::numeric_failure,
                            "boolean_solid_curved: cut curve did not converge",
                            face_a.id.index(), face_b.id.index()};
@@ -1663,13 +1694,19 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
       const detail::CurvedBooleanFaceInfo& info = infos[index];
       const Result<std::vector<CurvedFragment>> split =
           split_face_curved(brep, info.id, cuts[index], tolerance);
-      if (!split.has_value()) return split.error();
+      if (!split.has_value()) {
+        record_failure();
+        return split.error();
+      }
       for (CurvedFragment fragment : split.value()) {
         if (fragment.loops.empty()) continue;
         ++report.fragments;
         const Result<void> healed =
             detail::split_solid_heal_fragment(fragment, circles[index], tolerance);
-        if (!healed.has_value()) return healed.error();
+        if (!healed.has_value()) {
+          record_failure();
+          return healed.error();
+        }
 
         const Point2d representative =
             detail::curved_boolean_representative(fragment.loops_uv);
@@ -1677,10 +1714,12 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
         const Result<bool> inside = point_in_tessellation(other, point, tolerance);
         if (!inside.has_value()) {
           if (inside.error().code == Errc::numeric_failure) {
+            record_failure();
             return Error{Errc::numeric_failure,
                          "boolean_solid_curved: fragment representative lies on the other solid",
                          info.id.index(), 0u};
           }
+          record_failure();
           return inside.error();
         }
         const bool other_in = inside.value();
@@ -1732,6 +1771,7 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
         if (flip) {
           const Plane3* plane = std::get_if<Plane3>(&assembled.surface);
           if (plane == nullptr) {
+            record_failure();
             return Error{Errc::unsupported,
                          "boolean_solid_curved: flipped curved fragments are not supported yet",
                          info.id.index(), 0u};
@@ -1742,7 +1782,10 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
               Vec3d{-plane->normal[0], -plane->normal[1], -plane->normal[2]}, -plane->offset};
           assembled.surface = SurfaceGeometry{flipped};
           const Result<PlaneFrame> frame = make_plane_frame(flipped);
-          if (!frame.has_value()) return frame.error();
+          if (!frame.has_value()) {
+            record_failure();
+            return frame.error();
+          }
           detail::FaceUvProjection projection;
           projection.surface = &assembled.surface;
           projection.frame = frame.value();
@@ -1755,7 +1798,10 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
             for (const Point3d& surface_point : assembled.loops[loop]) {
               const Result<Point2d> uv =
                   detail::face_uv_project(projection, surface_point, previous_u, has_previous);
-              if (!uv.has_value()) return uv.error();
+              if (!uv.has_value()) {
+                record_failure();
+                return uv.error();
+              }
               reprojected[loop].push_back(uv.value());
               previous_u = uv.value()[0];
               has_previous = true;
@@ -1773,12 +1819,19 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
 
   const Result<void> harvested_a =
       harvest(a, infos_a, cuts_a, circles_a, mesh_b.value(), true);
-  if (!harvested_a.has_value()) return harvested_a.error();
+  if (!harvested_a.has_value()) {
+    record_failure();
+    return harvested_a.error();
+  }
   const Result<void> harvested_b =
       harvest(b, infos_b, cuts_b, circles_b, mesh_a.value(), false);
-  if (!harvested_b.has_value()) return harvested_b.error();
+  if (!harvested_b.has_value()) {
+    record_failure();
+    return harvested_b.error();
+  }
 
   if (kept.empty()) {
+    record_failure();
     return Error{Errc::numeric_failure, "boolean_solid_curved: result is empty", 0u, 0u};
   }
   std::stable_sort(kept.begin(), kept.end(),
@@ -1797,6 +1850,7 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
   const double weld = std::max(64.0 * tolerance, 1e-9 * scale);
   const std::size_t components = detail::curved_boolean_component_count(assembled_faces, weld);
   if (components > 1) {
+    record_failure();
     return Error{Errc::unsupported,
                  "boolean_solid_curved: result is not a single connected component", 0u, 0u};
   }
@@ -1812,12 +1866,15 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
         assembled.error().message != nullptr &&
         std::string_view{assembled.error().message} ==
             "assemble_curved_solid: edge is used once") {
+      record_failure();
       return Error{Errc::unsupported,
                    "boolean_solid_curved: result touches itself along an edge", 0u, 0u};
     }
+    record_failure();
     return assembled.error();
   }
   if (!validate_topology(assembled.value()).ok()) {
+    record_failure();
     return Error{Errc::numeric_failure,
                  "boolean_solid_curved: assembled result failed validation", 0u, 0u};
   }
