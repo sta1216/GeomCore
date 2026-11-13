@@ -2,6 +2,7 @@
 
 #include <geom/brep/boolean_solid_curved.hpp>
 #include <geom/brep/detail/curved_volume.hpp>
+#include <geom/brep/face_uv.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/split_solid.hpp>
 #include <geom/brep/tessellate.hpp>
@@ -130,6 +131,22 @@ double max_wall_offset(const geom::TriMesh& mesh, int axis, double value) {
     if (offset > worst) worst = offset;
   }
   return worst;
+}
+
+// A window fully inside the lateral face (does not touch the seam), produced by a
+// box that pierces the +y wall: the lateral face then carries an inner hole loop.
+geom::Brep hole_window_cylinder() {
+  const geom::Brep cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                          1e-9)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-0.5, 0.5, 0.5}, geom::Point3d{0.5, 2.0, 1.5}, 1e-9).value();
+  return geom::boolean_solid_curved(cylinder, cylinder.solid_ids().front(), box,
+                                    box.solid_ids().front(), geom::SolidBooleanOp::difference,
+                                    geom::CurvedBooleanOptions{1e-9})
+      .value()
+      .brep;
 }
 
 }  // namespace
@@ -332,4 +349,19 @@ TEST_CASE("trimmed tessellation: the sag refinement subdivides the sliver band")
   REQUIRE(fine.has_value());
   CHECK(fine.value().triangles.size() >=
         static_cast<std::size_t>(1.5 * static_cast<double>(coarse.value().triangles.size())));
+}
+TEST_CASE("trimmed tessellation: a hole loop is rejected with the trimmed-path error") {
+  // The window sits fully inside the lateral face, so the face carries two loops.
+  // The strip path covers rings without holes, and the generic path's chords
+  // exceed the deviation bound, so the domain is rejected rather than remeshed
+  // with a chordal patch. This pins the honest error for the 2-loop fixture.
+  const geom::Brep brep = hole_window_cylinder();
+  REQUIRE(geom::validate_topology(brep).ok());
+  for (const double deflection : {1e-2, 1e-3}) {
+    const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});
+    REQUIRE(!mesh.has_value());
+    CHECK(mesh.error().code == geom::Errc::unsupported);
+    CHECK(std::string(mesh.error().message) ==
+          "tessellate: trimmed face does not follow the surface");
+  }
 }

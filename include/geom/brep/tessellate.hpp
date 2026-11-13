@@ -202,43 +202,6 @@ inline Result<std::vector<Point3d>> tessellate_sample_edge(const Brep& brep, Edg
     const std::size_t count = std::max<std::size_t>(2, nurbs->control_count());
     const std::size_t sample_count = closed ? count - 1 : count;
     samples.reserve(sample_count);
-    if (nurbs->degree() == 1) {
-      // A degree-1 polyline edge is a chord chain. Its control points can sit a
-      // few ulps off the straight chord between the edge vertices, which would
-      // put boundary samples off the line a neighbouring planar face uses. When
-      // the control polygon is straight, interpolate the exact vertices instead.
-      const double chord[3] = {end[0] - start[0], end[1] - start[1], end[2] - start[2]};
-      const double chord_length =
-          std::sqrt(chord[0] * chord[0] + chord[1] * chord[1] + chord[2] * chord[2]);
-      bool straight = chord_length > 0.0;
-      for (std::size_t k = 0; straight && k < count; ++k) {
-        const double fraction = static_cast<double>(k) / static_cast<double>(count - 1);
-        const Point3d point = nurbs->eval(edge.t0 + (edge.t1 - edge.t0) * fraction);
-        const double relative[3] = {point[0] - start[0], point[1] - start[1], point[2] - start[2]};
-        const double offset[3] = {relative[1] * chord[2] - relative[2] * chord[1],
-                                  relative[2] * chord[0] - relative[0] * chord[2],
-                                  relative[0] * chord[1] - relative[1] * chord[0]};
-        const double offset_length = std::sqrt(offset[0] * offset[0] + offset[1] * offset[1] +
-                                               offset[2] * offset[2]);
-        straight = offset_length <= 1e-9 * chord_length * chord_length;
-      }
-      if (straight) {
-        for (std::size_t k = 0; k < sample_count; ++k) {
-          if (k == 0) {
-            samples.push_back(start);
-            continue;
-          }
-          if (!closed && k + 1 == count) {
-            samples.push_back(end);
-            continue;
-          }
-          const double fraction = static_cast<double>(k) / static_cast<double>(count - 1);
-          samples.push_back(Point3d{start[0] + chord[0] * fraction, start[1] + chord[1] * fraction,
-                                    start[2] + chord[2] * fraction});
-        }
-        return samples;
-      }
-    }
     for (std::size_t k = 0; k < sample_count; ++k) {
       if (k == 0) {
         samples.push_back(start);
