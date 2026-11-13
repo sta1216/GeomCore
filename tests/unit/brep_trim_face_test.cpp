@@ -1739,3 +1739,75 @@ TEST_CASE("trim face: an open meridian cut on a seam-only face is unsupported") 
         "split_face_curved: open cuts on a seam-only face");
   check_sphere_face_unchanged(sphere, face);
 }
+
+TEST_CASE("trim face: a closed cut inside the seam-only domain is unsupported") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  // A small closed circle around (pi, 0) never touches the seam. Its two sides
+  // are both cut geometry, so the splitter would need to join the two arcs into
+  // one ring; it does not, and must say so instead of losing one side.
+  FaceCut cut;
+  for (int i = 0; i < 64; ++i) {
+    const double a = 2.0 * kPi * i / 63.0;
+    cut.uv.push_back(Point2d{kPi + 0.1 * std::cos(a), 0.1 * std::sin(a)});
+  }
+  cut.uv.back() = cut.uv.front();
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "split_face_curved: closed cut does not reach the seam");
+  check_sphere_face_unchanged(sphere, face);
+}
+
+TEST_CASE("trim face: a closed cut tangent to the seam is unsupported") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();
+  const FaceId face = sphere.face_ids().front();
+
+  // A small closed circle touching u = 0 at one point: it has a seam contact,
+  // but its ends are not the two copies of one seam point, so it is a tangent
+  // loop rather than a latitude.
+  FaceCut cut;
+  for (int i = 0; i < 64; ++i) {
+    const double a = kPi + 2.0 * kPi * i / 63.0;
+    cut.uv.push_back(
+        Point2d{0.1 + 0.1 * std::cos(a), 0.5 + 0.1 * std::sin(a)});
+  }
+  cut.uv.back() = cut.uv.front();
+  const std::vector<FaceCut> cuts{cut};
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(sphere, face, cuts, kSplitTol);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message).find("seam") !=
+        std::string_view::npos);
+  check_sphere_face_unchanged(sphere, face);
+}
+
+TEST_CASE("trim face: seam run extraction wraps the cut tail") {
+  // 1 marks a synthetic edge, 0 a cut edge. Edge 0 is the tail of the run that
+  // wraps around the end of the cycle, so a non-wrapping walk would lose it.
+  const char flags[] = {0, 1, 1, 0, 0, 1, 0, 0};
+  const std::vector<std::vector<std::size_t>> runs =
+      detail::trim_face_seam_runs(std::span<const char>(flags));
+  REQUIRE(runs.size() == 2);
+  CHECK(runs[0] == std::vector<std::size_t>{3, 4});
+  CHECK(runs[1] == std::vector<std::size_t>{6, 7, 0});
+
+  // A cycle with no synthetic edge is one closed run; an all-synthetic cycle
+  // has no runs at all.
+  const char all_cut[] = {0, 0, 0};
+  const std::vector<std::vector<std::size_t>> closed =
+      detail::trim_face_seam_runs(std::span<const char>(all_cut));
+  REQUIRE(closed.size() == 1);
+  CHECK(closed[0] == std::vector<std::size_t>{0, 1, 2});
+
+  const char all_synthetic[] = {1, 1};
+  CHECK(detail::trim_face_seam_runs(std::span<const char>(all_synthetic))
+            .empty());
+}
