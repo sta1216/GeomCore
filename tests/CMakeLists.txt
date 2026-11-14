@@ -57,6 +57,7 @@ set(GEOM_TEST_SOURCES
   unit/brep_boolean_solid_test.cpp
   unit/brep_boolean_solid_errors_test.cpp
   unit/brep_boolean_curved_test.cpp
+  unit/curved_boolean_qa14_test.cpp
   unit/boolean_solid_curved_report_test.cpp
   unit/brep_tolerance_test.cpp
   unit/brep_face_intersect_test.cpp

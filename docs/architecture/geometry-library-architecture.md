@@ -1268,23 +1268,50 @@ provenance 也延后（ADR-0026 记录了该 §4.6 偏差）。
 NURBS 修剪轮廓、布尔留下的 190 个同面 `7e-13` 擦边点（`1e-12` 绝对容差下 0
 个 T 型接缝）都记录为 M3c-2/布尔精度范围（ADR-0027）。
 
-**M3c-2（球操作数：明确不支持）**：球面是单条缝合线围成的闭曲面，其 uv 环面积为
-0，因此球操作数的布尔除需要裁剪能处理零面积环外，还需要极点绕行的 cap 环、
-`split_solid_heal_fragment` 不把绕行经线折进切割圆弧跨度，以及 `球 ∩ 球` 两条缝
-接触的跨链接合；四处缺口都超出 M3c-2。因此 `boolean_solid_curved` 对 `Sphere3`
-操作数在入口返回 `unsupported`，消息为 `"boolean_solid_curved: sphere operands need
-cap topology; booleans are deferred to M3c-3"`，且失败报告不消耗配对计数
-（`CurvedBooleanReport::face_pairs == 0`）；其余行为不变。
+**M3c-2（圆环操作数：支持；球/锥：明确不支持）**：`boolean_solid_curved` 现在
+接受 `Torus3` 操作数，`Sphere3`/`Cone3` 仍在入口返回 `unsupported`（取舍见
+ADR-0028，实测见 `docs/benchmarks/m3c2.md`）。
 
-**M3c-2（锥操作数：明确不支持）**：锥面/平面切割只可能产生两类轮廓，而 seam-only
-分割器两类都接不住：垂直于轴、位于顶点下方的平面给出不接触缝合线的内部闭环（前后
-点重合，被判为 `"closed cut crosses the seam twice"`）；含轴平面给出以底圆为真实边界
-的一条或两条开放经线链（被判为 open cuts），且还需要顶点焊接与顶点扇形体积；此外
-`curved_solid_volume(cone)` 目前在顶点投影处失败。因此 `boolean_solid_curved` 对
-`Cone3` 操作数在入口返回 `unsupported`，消息为 `"boolean_solid_curved: cone operands
-need closed-cut and apex topology; booleans are deferred to M3c-3"`，失败报告不消耗
-配对/片段/保留计数（`face_pairs == 0`、`fragments == 0`、`kept == 0`）；其余行为
-不变，锥布尔留待 M3c-3。
+圆环面是单条缝合线环围成的闭曲面，uv 环面积为零；M3c-2 先对 seam-only 面合成
+解析参数矩形（环为 `[0, 2π]²`），在合成域上跑既有 arrangement，再剥掉落在合成
+矩形边上的链（`curved_boolean_chain_on_domain_side`，容差
+`max(64·tol, 1e-6·2π)`）；闭链按 3D 端点恒等闭合，因此合成边不进入任何
+`CurvedFragment::loops`。切链只接受**经过缝合线的闭环**：开放链返回
+`"split_face_curved: open cuts on a seam-only face"`，不接触缝合线的内部闭环
+返回 `"closed cut crosses the seam twice"`。环的 `v` 图卡从 `(-π, π]` 包装进
+`[0, 2π]` 并在该轴缝合线处切分（`curved_boolean_window_chains`），跨
+`v = 0/2π` 的切链不会留下 `2π` 跳变。
+
+环面切平面受限制：必须垂直于环轴（归一化后 `|n·axis|` 在 8 ulp 内为 1）或
+包含环轴（`|n·axis|` 在 8 ulp 内为 0，且 `|n·center − offset| <= tolerance`），
+否则在配对前返回 `unsupported`
+`"boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus axis"`。
+`make_torus` 只把轴保存在 `kAnalyticSurfaceUnitTolerance = 1e-12` 的单位长容差内，
+所以两处入口都先归一化轴再比较；近轴/近垂直平面不做几何吸附，偏移平行与倾斜
+平面留给 M3c-3。环面交线按 SSI 折线切分（弦逼近），残差由
+`CurvedBooleanReport::max_cut_residual` 报告，QA-14 要求 `<= 1e-3`；平面帽上的
+切圆仍解析愈合（垂直轴两圆 `R ± sqrt(r² − d²)`、含轴两个管截面圆），因此 QA-14
+三条行的体积都到 `1e-6` 相对。
+
+**球面缺口**：零面积缝合环的裁剪、极点绕行的 cap 环、`split_solid_heal_fragment`
+把绕行经线折进切割弧跨度、`球 ∩ 球` 两条缝接触的跨链接合。消息为
+`"boolean_solid_curved: sphere operands need cap topology; booleans are deferred to M3c-3"`，
+`CurvedBooleanReport::face_pairs == 0`。
+
+**锥面缺口**：垂直轴、顶点下方的平面给出不接触缝合线的内部闭环（判
+`"closed cut crosses the seam twice"`）；含轴平面给出终止在底圆的开放经线链
+（判 open cuts），且需要顶点焊接与顶点扇形体积；`curved_solid_volume(cone)` 目前
+在顶点投影处失败。消息为
+`"boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are deferred to M3c-3"`，
+`face_pairs == fragments == kept == 0`。
+
+**QA-14**（`tests/unit/curved_boolean_qa14_test.cpp`）三行：`torus ∩ z ≥ 0` 与
+`torus ∩ x ≥ 0`（跨 v 缝）体积各 `2.4674011002723395`，`torus ⊂ 盒` 体积
+`4.934802200544679`、`cuts == 0`；两次运行体积逐位相同。Debug 与 Release 各
+932 个用例、659,156 条断言全绿，`/W4 /WX /utf-8` 零警告。
+
+待 M3c-3：布尔结果的一般修剪网格化、偏移平行/倾斜环切、内部闭环与开放切链、
+锥顶点与球 cap、NURBS 操作数、精确 torus/cone 愈合。
 
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外

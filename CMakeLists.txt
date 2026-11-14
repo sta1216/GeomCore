@@ -96,4 +96,7 @@ if(GEOM_BUILD_BENCH)
 
   add_executable(geom_bench_m3b2 bench/bench_boolean_curved.cpp)
   target_link_libraries(geom_bench_m3b2 PRIVATE geom_core)
+
+  add_executable(geom_bench_m3c2 bench/bench_m3c2.cpp)
+  target_link_libraries(geom_bench_m3c2 PRIVATE geom_core)
 endif()
