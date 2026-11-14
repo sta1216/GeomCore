@@ -602,6 +602,137 @@ TEST_CASE("curved volume: a sphere integrates through its poles") {
         doctest::Approx(4.0 * 3.14159265358979323846 / 3.0).epsilon(1e-12));
 }
 
+TEST_CASE("curved volume: a spherical wedge closes both pole fans") {
+  // A lune solid: one spherical face plus the two flat meridian half-disks that
+  // close it along u = 0 and u = alpha. Both meridian edges run south -> north,
+  // so the lune loop carries exactly one vertex at each pole and the pole-fan
+  // branch has to close there. The exact volume is (2/3) * alpha.
+  constexpr double alpha = 0.7;
+  constexpr double tol = 1e-9;
+  const geom::Point3d south{0.0, 0.0, -1.0};
+  const geom::Point3d north{0.0, 0.0, 1.0};
+  const geom::Vec3d axis{0.0, 0.0, 1.0};
+
+  geom::SolidEditor editor;
+  const std::uint32_t sphere_surface = editor.add_surface(
+      geom::Sphere3{geom::Point3d{0.0, 0.0, 0.0}, axis, geom::Vec3d{1.0, 0.0, 0.0}, 1.0});
+  const std::uint32_t disk0_surface =
+      editor.add_surface(geom::Plane3{geom::Vec3d{0.0, -1.0, 0.0}, 0.0});
+  const std::uint32_t disk_alpha_surface = editor.add_surface(
+      geom::Plane3{geom::Vec3d{-std::sin(alpha), std::cos(alpha), 0.0}, 0.0});
+
+  const geom::VertexId south_vertex = editor.add_vertex(south, 0.0).value();
+  const geom::VertexId north_vertex = editor.add_vertex(north, 0.0).value();
+
+  const geom::EdgeId meridian0 =
+      editor
+          .add_edge(south_vertex, north_vertex,
+                    editor.add_curve(geom::CircleCurve3{
+                        geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{1.0, 0.0, 0.0}, axis, 1.0}),
+                    -kPi / 2.0, kPi / 2.0, 0.0)
+          .value();
+  const geom::EdgeId meridian_alpha =
+      editor
+          .add_edge(
+              south_vertex, north_vertex,
+              editor.add_curve(geom::CircleCurve3{
+                  geom::Point3d{0.0, 0.0, 0.0},
+                  geom::Vec3d{std::cos(alpha), std::sin(alpha), 0.0}, axis, 1.0}),
+              -kPi / 2.0, kPi / 2.0, 0.0)
+          .value();
+  const geom::EdgeId axis_edge =
+      editor
+          .add_edge(south_vertex, north_vertex,
+                    editor.add_curve(geom::LineCurve3{south, axis}), 0.0, 2.0, 0.0)
+          .value();
+
+  const geom::FaceId lune = editor.add_face(sphere_surface, false, tol).value();
+  const geom::FaceId disk0 = editor.add_face(disk0_surface, false, tol).value();
+  const geom::FaceId disk_alpha = editor.add_face(disk_alpha_surface, false, tol).value();
+
+  // Loops run counter-clockwise as seen from outside each face, so every flux
+  // comes out positive.
+  const std::array lune_loop{geom::CoedgeSpec{meridian_alpha, false},
+                             geom::CoedgeSpec{meridian0, true}};
+  editor.add_loop(lune, lune_loop, true).value();
+  const std::array disk0_loop{geom::CoedgeSpec{meridian0, false},
+                              geom::CoedgeSpec{axis_edge, true}};
+  editor.add_loop(disk0, disk0_loop, true).value();
+  const std::array disk_alpha_loop{geom::CoedgeSpec{meridian_alpha, true},
+                                   geom::CoedgeSpec{axis_edge, false}};
+  editor.add_loop(disk_alpha, disk_alpha_loop, true).value();
+
+  const std::array faces{lune, disk0, disk_alpha};
+  const geom::ShellId shell = editor.add_shell(faces, true).value();
+  const geom::SolidId solid = editor.add_solid(std::array{shell}, tol).value();
+  const geom::Brep brep = editor.commit().value();
+
+  const geom::Result<double> volume = geom::detail::curved_solid_volume(brep, solid, tol);
+  REQUIRE(volume.has_value());
+  MESSAGE("sphere wedge volume: " << std::setprecision(17) << volume.value());
+  // Without the fan the uv polygon cuts the corner at each pole and loses a
+  // triangle of area about 0.5 * alpha * (pi / 32) ~= 0.034, some 7% of the
+  // total. Landing on 1e-12 therefore proves both fans closed.
+  CHECK(relative_error(volume.value(), (2.0 / 3.0) * alpha) <= 1e-12);
+
+  const geom::Result<std::vector<geom::FaceUvLoop>> loops =
+      geom::face_loops_uv(brep, lune, tol);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  std::size_t south_poles = 0;
+  std::size_t north_poles = 0;
+  for (const geom::Point2d& point : loops.value().front().points) {
+    if (point[1] == -kPi / 2.0) ++south_poles;
+    if (point[1] == kPi / 2.0) ++north_poles;
+  }
+  // One shared vertex per pole: the fan adds the opposite-azimuth corner instead
+  // of duplicating the pole vertex, so no zero-area triangle is emitted there.
+  CHECK(south_poles == 1u);
+  CHECK(north_poles == 1u);
+}
+
+TEST_CASE("curved volume: a latitude loop is not the seam slit") {
+  // A zero-shoelace latitude ring bounds a spherical cap, a legitimate trimmed
+  // domain. Only the degenerate seam slit may widen to the full parameter
+  // rectangle; a cap would otherwise be integrated as the whole sphere.
+  geom::FaceUvLoop latitude;
+  latitude.outer = true;
+  for (int i = 0; i < 64; ++i) {
+    latitude.points.push_back(geom::Point2d{2.0 * kPi * static_cast<double>(i) / 64.0, 0.5});
+  }
+  CHECK_FALSE(geom::detail::curved_volume_sphere_seam_loop(latitude));
+
+  geom::FaceUvLoop seam;
+  seam.outer = true;
+  for (int i = 0; i <= 32; ++i) {
+    seam.points.push_back(geom::Point2d{0.0, -kPi / 2.0 + kPi * static_cast<double>(i) / 32.0});
+  }
+  for (int i = 31; i >= 0; --i) {
+    seam.points.push_back(geom::Point2d{0.0, -kPi / 2.0 + kPi * static_cast<double>(i) / 32.0});
+  }
+  CHECK(geom::detail::curved_volume_sphere_seam_loop(seam));
+
+  geom::FaceUvLoop patch;
+  patch.outer = true;
+  patch.points = {geom::Point2d{0.1, -0.4}, geom::Point2d{0.6, -0.4},
+                  geom::Point2d{0.6, 0.4}, geom::Point2d{0.1, 0.4}};
+  CHECK_FALSE(geom::detail::curved_volume_sphere_seam_loop(patch));
+}
+
+TEST_CASE("curved volume: a translated sphere keeps its pole fan") {
+  // The same exact quadrature at absolute coordinates: subtracting the center
+  // leaves about 1e-10 of coordinate noise in every evaluation, so the volume
+  // reaches only ~5e-12 relative. The fan itself still has to be right.
+  const geom::Result<geom::Brep> sphere =
+      geom::make_sphere(geom::Point3d{1.0e6, 0.0, 0.0}, 1.0, 1e-9);
+  REQUIRE(sphere.has_value());
+  const geom::Result<double> volume = geom::detail::curved_solid_volume(
+      sphere.value(), sphere.value().solid_ids().front(), 1e-9);
+  REQUIRE(volume.has_value());
+  MESSAGE("translated sphere volume: " << std::setprecision(17) << volume.value());
+  CHECK(relative_error(volume.value(), 4.0 * kPi / 3.0) <= 1e-11);
+}
+
 TEST_CASE("curved_solid_volume: reversed top face") {
   const geom::Brep brep = make_reversed_top_box();
   const geom::Result<double> volume =
