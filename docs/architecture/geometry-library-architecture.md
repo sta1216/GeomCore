@@ -1276,6 +1276,16 @@ NURBS 修剪轮廓、布尔留下的 190 个同面 `7e-13` 擦边点（`1e-12` �
 cap topology; booleans are deferred to M3c-3"`，且失败报告不消耗配对计数
 （`CurvedBooleanReport::face_pairs == 0`）；其余行为不变。
 
+**M3c-2（锥操作数：明确不支持）**：锥面/平面切割只可能产生两类轮廓，而 seam-only
+分割器两类都接不住：垂直于轴、位于顶点下方的平面给出不接触缝合线的内部闭环（前后
+点重合，被判为 `"closed cut crosses the seam twice"`）；含轴平面给出以底圆为真实边界
+的一条或两条开放经线链（被判为 open cuts），且还需要顶点焊接与顶点扇形体积；此外
+`curved_solid_volume(cone)` 目前在顶点投影处失败。因此 `boolean_solid_curved` 对
+`Cone3` 操作数在入口返回 `unsupported`，消息为 `"boolean_solid_curved: cone operands
+need closed-cut and apex topology; booleans are deferred to M3c-3"`，失败报告不消耗
+配对/片段/保留计数（`face_pairs == 0`、`fragments == 0`、`kept == 0`）；其余行为
+不变，锥布尔留待 M3c-3。
+
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外
 无全局 epsilon。

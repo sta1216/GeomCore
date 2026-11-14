@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <numbers>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -440,7 +441,35 @@ TEST_CASE("brep: boolean_solid_curved rejects cone operands") {
   REQUIRE(!result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
   CHECK(message_of(result.error()) ==
-        "boolean_solid_curved: cone operands are not supported (apex-touching loops are deferred)");
+        "boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are "
+        "deferred to M3c-3");
+}
+
+TEST_CASE("curved boolean: cone operands are deferred with a diagnostic") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance);
+  const geom::Result<geom::Brep> box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, -1.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(cone.has_value());
+  REQUIRE(box.has_value());
+  for (const geom::SolidBooleanOp op : {geom::SolidBooleanOp::union_,
+                                        geom::SolidBooleanOp::intersection,
+                                        geom::SolidBooleanOp::difference}) {
+    geom::CurvedBooleanReport report{};
+    report.face_pairs = 999;
+    const geom::Result<geom::CurvedBooleanResult> out = geom::boolean_solid_curved(
+        cone.value(), only_solid(cone.value()), box.value(), only_solid(box.value()), op,
+        geom::CurvedBooleanOptions{tolerance}, &report);
+    REQUIRE_FALSE(out.has_value());
+    CHECK(out.error().code == geom::Errc::unsupported);
+    const std::string message(out.error().message);
+    CHECK(message.find("deferred to M3c-3") != std::string::npos);
+    CHECK(report.face_pairs == 0);
+    CHECK(report.fragments == 0);
+    CHECK(report.kept == 0);
+  }
 }
 
 TEST_CASE("brep: boolean_solid_curved rejects coplanar face contact") {
@@ -1270,8 +1299,8 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
   // documents:
   //   sphere   "boolean_solid_curved: sphere operands need cap topology;
   //             booleans are deferred to M3c-3"
-  //   cone     "boolean_solid_curved: cone operands are not supported
-  //             (apex-touching loops are deferred)"
+  //   cone     "boolean_solid_curved: cone operands need closed-cut and apex
+  //             topology; booleans are deferred to M3c-3"
   //   NURBS    "boolean_solid_curved: NURBS operands are not supported"
   //   tangent  "boolean_solid_curved: tangent face contact is not supported yet"
   //   coplanar "boolean_solid_curved: coplanar face contact is not supported yet"
@@ -1307,8 +1336,8 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
        "boolean_solid_curved: sphere operands need cap topology; booleans are deferred to "
        "M3c-3"},
       {"cone box", &cone, &wide_box, geom::SolidBooleanOp::union_,
-       "boolean_solid_curved: cone operands are not supported (apex-touching loops are "
-       "deferred)"},
+       "boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are "
+       "deferred to M3c-3"},
       {"NURBS box", &nurbs, &wide_box, geom::SolidBooleanOp::union_,
        "boolean_solid_curved: NURBS operands are not supported"},
       {"tangent box", &tangent_box, &cylinder, geom::SolidBooleanOp::union_,
