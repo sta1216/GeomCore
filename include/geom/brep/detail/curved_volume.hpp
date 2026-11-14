@@ -19,6 +19,7 @@
 #include <geom/core/result.hpp>
 #include <geom/primitives/point.hpp>
 #include <geom/primitives/vec.hpp>
+#include <geom/surfaces/analytic.hpp>
 #include <geom/surfaces/nurbs_surface.hpp>
 #include <geom/surfaces/plane.hpp>
 
@@ -158,6 +159,63 @@ inline Result<double> curved_volume_planar_area(const std::vector<FaceUvLoop>& l
   return area;
 }
 
+// The full parameter rectangle of a sphere. These four values duplicate
+// curved_boolean_surface_uv_domain() in boolean_solid_curved.hpp: that header
+// owns the boolean driver and must stay out of detail/, so the domain is
+// repeated here with the same convention. The u period is 2*pi (u = 0 and
+// u = 2*pi are the same seam meridian) and v runs from the south pole to the
+// north pole.
+inline constexpr double kCurvedVolumePi = 3.14159265358979323846;
+inline constexpr double kCurvedVolumeTwoPi = 2.0 * kCurvedVolumePi;
+inline constexpr double kCurvedVolumeSouthPoleV = -0.5 * kCurvedVolumePi;
+inline constexpr double kCurvedVolumeNorthPoleV = 0.5 * kCurvedVolumePi;
+
+// Number of latitude bands for the synthetic full-sphere grid. With
+// nu = 2*nv the u step is pi/nv, so one panel's chord sagitta is
+// radius * (1 - cos(pi / (2*nv))). Bands are doubled from 128 until that
+// sagitta is below 1e-4; 128 already gives 7.5e-5 for the unit sphere. The
+// result is a power of two so the seam column lands exactly on u = 2*pi. The
+// upper clamp bounds the panel count for very large spheres, where the absolute
+// sagitta bound would otherwise demand millions of bands; the seven-point rule
+// stays accurate there because the sphere integrand varies only with v.
+inline int curved_volume_sphere_bands(double radius) noexcept {
+  constexpr double kMaxSagitta = 1e-4;
+  constexpr int kMinBands = 128;
+  constexpr int kMaxBands = 1024;
+  if (!(radius > kMaxSagitta)) return kMinBands;
+  const double cosine = std::clamp(1.0 - kMaxSagitta / radius, -1.0, 1.0);
+  const double step = 2.0 * std::acos(cosine);
+  if (!(step > 0.0)) return kMaxBands;
+  int bands = kMinBands;
+  while (bands < kMaxBands && !(static_cast<double>(bands) * step > kCurvedVolumePi)) {
+    bands *= 2;
+  }
+  return bands;
+}
+
+// A sphere face whose loop is the degenerate seam slit projects to one meridian
+// traversed up and back: every projected point shares the same azimuth and the
+// enclosed uv area is zero. A latitude ring (a spherical cap fragment) also
+// projects to a zero-area line, but its v varies and it is a legitimate trimmed
+// face, so requiring a single meridian keeps this predicate from widening a
+// trimmed domain to the full sphere. The unwrapped uv loop may place the seam
+// at any azimuth, so the comparison is relative to the first point.
+inline bool curved_volume_sphere_seam_loop(const FaceUvLoop& loop) noexcept {
+  if (loop.points.size() < 3u) return false;
+  const double first_u = loop.points.front()[0];
+  const std::size_t count = loop.points.size();
+  double twice_area = 0.0;
+  double extent = 0.0;
+  for (std::size_t i = 0; i < count; ++i) {
+    const Point2d& a = loop.points[i];
+    const Point2d& b = loop.points[(i + 1u) % count];
+    twice_area += a[0] * b[1] - b[0] * a[1];
+    extent = std::max({extent, std::fabs(a[0]), std::fabs(a[1])});
+    if (!(std::fabs(a[0] - first_u) <= 1e-12)) return false;
+  }
+  return std::fabs(0.5 * twice_area) <= 1e-12 * extent * extent;
+}
+
 inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, double tolerance) {
   if (!std::isfinite(tolerance) || tolerance <= 0.0) {
     return Error{Errc::tolerance_violation,
@@ -258,33 +316,7 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
         continue;
       }
 
-      Polygon2d polygon;
-      polygon.ring_starts.push_back(0u);
-      const auto append_ring = [&polygon](const FaceUvLoop& loop) {
-        polygon.vertices.insert(polygon.vertices.end(), loop.points.begin(),
-                                loop.points.end());
-        polygon.ring_starts.push_back(static_cast<std::uint32_t>(polygon.vertices.size()));
-      };
-      append_ring(loops[outer_index]);
-      for (std::size_t i = 0; i < loops.size(); ++i) {
-        if (i != outer_index) append_ring(loops[i]);
-      }
-
-      // Translate the polygon so that its first vertex is the origin. The
-      // shoelace sums and the triangulation predicates then work on the small
-      // offsets instead of the absolute parameters, which may be of order 1e9.
-      const Point2d shift = polygon.vertices.front();
-      for (Point2d& point : polygon.vertices) {
-        point[0] -= shift[0];
-        point[1] -= shift[1];
-      }
-
-      const Triangulation2 triangulation = triangulate_polygon2(polygon);
-      if (!triangulation.ok) {
-        return Error{Errc::degenerate, "curved_solid_volume: face triangulation failed",
-                     face_id.index(), 0u};
-      }
-
+      Point2d shift{0.0, 0.0};
       double face_volume = 0.0;
 
       // Integrates the seven-point rule over one uv subtriangle. `area` is the
@@ -311,6 +343,113 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
         }
         return sum;
       };
+
+      const Sphere3* sphere = std::get_if<Sphere3>(&surface);
+      if (sphere != nullptr && loops.size() == 1u &&
+          curved_volume_sphere_seam_loop(loops[outer_index])) {
+        // The seam-slit loop retraces one meridian, so it encloses no uv area
+        // and the polygon triangulation has nothing to work with. The face is
+        // the whole sphere, whose parameter domain is the full rectangle
+        // [0, 2*pi] x [-pi/2, pi/2]; cover it with nu = 2*nv quads. Every
+        // vertex on the v = +/-pi/2 rows maps to the single south or north pole
+        // (surface_eval drops the azimuth there because cos(v) = 0), and the
+        // u = 0 and u = 2*pi columns map to the same seam meridian because the
+        // surface is 2*pi-periodic. Collapsing the poles and welding the seam
+        // are therefore properties of that map; the parameter grid itself must
+        // stay rectangular, since moving the pole vertices onto one azimuth
+        // would halve the uv area, and with it the quadrature weight, near the
+        // poles. Only the triangle topology is synthesized.
+        //
+        // The full-sphere face is its own closed shell, so measuring from the
+        // center is an exact change of origin; it also makes the integrand
+        // exactly (radius^3 / 3) * cos(v), independent of u.
+        if (!has_reference) {
+          reference = sphere->center;
+          has_reference = true;
+        }
+        const int bands = curved_volume_sphere_bands(sphere->radius);
+        const int columns = 2 * bands;
+        const double du = kCurvedVolumeTwoPi / static_cast<double>(columns);
+        const double dv = kCurvedVolumePi / static_cast<double>(bands);
+        const double half_cell = 0.5 * du * dv;
+        for (int j = 0; j < bands; ++j) {
+          const double v0 = kCurvedVolumeSouthPoleV + static_cast<double>(j) * dv;
+          const double v1 = v0 + dv;
+          for (int i = 0; i < columns; ++i) {
+            const double u_left = static_cast<double>(i) * du;
+            // The rectangle closes on itself: the last column is the welded
+            // copy of u = 0, evaluated at u = 2*pi so the panel area stays
+            // positive.
+            const double u_right =
+                (i + 1 == columns) ? kCurvedVolumeTwoPi : static_cast<double>(i + 1) * du;
+            const Point2d p00{u_left, v0};
+            const Point2d p10{u_right, v0};
+            const Point2d p01{u_left, v1};
+            const Point2d p11{u_right, v1};
+            const Result<double> lower = integrate(p00, p10, p01, half_cell);
+            if (!lower.has_value()) return lower.error();
+            face_volume += lower.value();
+            const Result<double> upper = integrate(p10, p11, p01, half_cell);
+            if (!upper.has_value()) return upper.error();
+            face_volume += upper.value();
+          }
+        }
+        total += face.reversed ? -face_volume : face_volume;
+        continue;
+      }
+
+      Polygon2d polygon;
+      polygon.ring_starts.push_back(0u);
+      const auto append_ring = [&polygon, sphere](const FaceUvLoop& loop) {
+        const std::size_t count = loop.points.size();
+        for (std::size_t i = 0; i < count; ++i) {
+          const Point2d& point = loop.points[i];
+          if (sphere == nullptr) {
+            polygon.vertices.push_back(point);
+            continue;
+          }
+          const bool at_pole =
+              point[1] == kCurvedVolumeSouthPoleV || point[1] == kCurvedVolumeNorthPoleV;
+          if (!at_pole) {
+            polygon.vertices.push_back(point);
+            continue;
+          }
+          // A sphere loop that passes through a pole projects that single point
+          // onto one azimuth, so the projected ring cuts the corner between the
+          // two meridians that meet there. Insert the missing pole corners so
+          // the fan closes along the neighbouring meridians; both corners
+          // evaluate to the same pole point, so no surface is invented.
+          const Point2d& previous = loop.points[(i + count - 1u) % count];
+          const Point2d& next = loop.points[(i + 1u) % count];
+          if (previous[1] != point[1] && std::fabs(previous[0] - point[0]) > 1e-12) {
+            polygon.vertices.push_back(Point2d{previous[0], point[1]});
+          }
+          polygon.vertices.push_back(point);
+          if (next[1] != point[1] && std::fabs(next[0] - point[0]) > 1e-12) {
+            polygon.vertices.push_back(Point2d{next[0], point[1]});
+          }
+        }
+        polygon.ring_starts.push_back(static_cast<std::uint32_t>(polygon.vertices.size()));
+      };
+      append_ring(loops[outer_index]);
+      for (std::size_t i = 0; i < loops.size(); ++i) {
+        if (i != outer_index) append_ring(loops[i]);
+      }
+
+      // Translate the polygon so that its first vertex is the origin. The
+      // shoelace sums and the triangulation predicates then work on the small
+      // offsets instead of the absolute parameters, which may be of order 1e9.
+      shift = polygon.vertices.front();
+      for (Point2d& point : polygon.vertices) {
+        point[0] -= shift[0];
+        point[1] -= shift[1];
+      }
+
+      const Triangulation2 triangulation = triangulate_polygon2(polygon);
+      if (!triangulation.ok) {
+        return Error{Errc::degenerate, "curved_solid_volume: face triangulation failed",
+                     face_id.index(), 0u};
+      }
 
       for (const std::array<std::uint32_t, 3>& triangle : triangulation.triangles) {
         const Point2d& a = polygon.vertices[triangle[0]];

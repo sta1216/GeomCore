@@ -591,6 +591,17 @@ TEST_CASE("curved_solid_volume: torus") {
   CHECK(relative_error(volume.value(), expected) <= 1e-8);
 }
 
+TEST_CASE("curved volume: a sphere integrates through its poles") {
+  const geom::Result<geom::Brep> sphere = geom::make_sphere(geom::Point3d{0, 0, 0}, 1.0, 1e-9);
+  REQUIRE(sphere.has_value());
+  const geom::SolidId solid = sphere.value().solid_ids().front();
+  const geom::Result<double> volume =
+      geom::detail::curved_solid_volume(sphere.value(), solid, 1e-9);
+  REQUIRE(volume.has_value());
+  CHECK(volume.value() ==
+        doctest::Approx(4.0 * 3.14159265358979323846 / 3.0).epsilon(1e-12));
+}
+
 TEST_CASE("curved_solid_volume: reversed top face") {
   const geom::Brep brep = make_reversed_top_box();
   const geom::Result<double> volume =
