@@ -87,8 +87,8 @@ M3b-2 的 `boolean_solid_curved` 只接受 `Plane3`/`Cylinder3` 面：圆柱面�
 - **QA-14（实测）。** `tests/unit/curved_boolean_qa14_test.cpp` 三行：
   `torus ∩ z ≥ 0` 与 `torus ∩ x ≥ 0`（跨 v 缝）体积各
   `2.4674011002723395`，残差 `<= 1e-3`，两次运行体积逐位相同；
-  `torus ⊂ 盒` 体积 `4.934802200544679`、`cuts == 0`。单用例 67 条断言通过；
-  全量 Debug 与 Release 各 932 个用例、659,156 条断言全绿，`/W4 /WX /utf-8`
+  `torus ⊂ 盒` 体积 `4.934802200544679`、`cuts == 0`。单用例 74 条断言通过；
+  全量 Debug 与 Release 各 932 个用例、659,163 条断言全绿，`/W4 /WX /utf-8`
   零警告。
 - **基准（`geom_bench_m3c2`，Release，100 次/操作）。** 三个操作分别计时
   `boolean_solid_curved` 与 `detail::curved_solid_volume`，无时间门禁；实测

@@ -76,7 +76,9 @@ Measured measure(const geom::Brep& torus, const geom::Brep& box, geom::SolidBool
   CHECK(geom::validate_topology(brep).ok());
   const std::vector<geom::SolidId> solids = brep.solid_ids();
   REQUIRE(solids.size() == 1);
-  for (const geom::ShellId shell : brep.solid_shells(solids.front())) {
+  const std::span<const geom::ShellId> shells = brep.solid_shells(solids.front());
+  REQUIRE(shells.size() == 1);
+  for (const geom::ShellId shell : shells) {
     CHECK(brep.shell(shell).closed);
   }
   const geom::Result<double> volume =
@@ -107,7 +109,7 @@ TEST_CASE("QA-14: curved booleans of analytic primitives") {
   }};
 
   for (const HalvedBox& row : rows) {
-    CAPTURE(row.name);
+    CAPTURE(std::string(row.name));
     const geom::Brep box = make_box_or_fail(row.lower, row.upper);
 
     const Measured first =
@@ -126,8 +128,6 @@ TEST_CASE("QA-14: curved booleans of analytic primitives") {
     CHECK(second.volume == first.volume);
     CHECK(second.report.cuts == first.report.cuts);
     CHECK(second.report.kept == first.report.kept);
-    if (row.cut) {
-      CHECK(second.report.max_cut_residual == first.report.max_cut_residual);
-    }
+    CHECK(second.report.max_cut_residual == first.report.max_cut_residual);
   }
 }

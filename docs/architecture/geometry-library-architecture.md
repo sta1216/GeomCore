@@ -1124,7 +1124,7 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
 
 依赖关系：M1 依赖 M0 的谓词、曲线曲面与测试设施；M2 依赖 M1 的 arrangement/CDT/索引；M3 强依赖 M2 的拓扑、网格化与容差模型；M4 在 M3 之上；M5 依赖前五者的 API 稳定。
 
-### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3/M3c-1 出口状态（2026-11-13）
+### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3/M3c-1/M3c-2 出口状态（2026-11-14）
 
 **M0 地基：已满足。** 谓词以独立整数/Fraction oracle 对拍（1e6 随机 + 共线、1 ulp、
 抵消、1e±200、次正规语料），NURBS 求值与导数对解析解校验，三平台 CI 矩阵已配置；
@@ -1308,7 +1308,7 @@ ADR-0028，实测见 `docs/benchmarks/m3c2.md`）。
 **QA-14**（`tests/unit/curved_boolean_qa14_test.cpp`）三行：`torus ∩ z ≥ 0` 与
 `torus ∩ x ≥ 0`（跨 v 缝）体积各 `2.4674011002723395`，`torus ⊂ 盒` 体积
 `4.934802200544679`、`cuts == 0`；两次运行体积逐位相同。Debug 与 Release 各
-932 个用例、659,156 条断言全绿，`/W4 /WX /utf-8` 零警告。
+932 个用例、659,163 条断言全绿，`/W4 /WX /utf-8` 零警告。
 
 待 M3c-3：布尔结果的一般修剪网格化、偏移平行/倾斜环切、内部闭环与开放切链、
 锥顶点与球 cap、NURBS 操作数、精确 torus/cone 愈合。
