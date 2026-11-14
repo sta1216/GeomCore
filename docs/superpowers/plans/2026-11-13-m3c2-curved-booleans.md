@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make `boolean_solid_curved` accept torus and cone operands, so the curved B-rep kernel can intersect, unite and subtract those analytic primitives; sphere operands stay explicitly unsupported with the cap topology they need deferred to M3c-3.
+**Goal:** Make `boolean_solid_curved` accept torus operands, so the curved B-rep kernel can intersect, unite and subtract that analytic primitive; sphere and cone operands stay explicitly unsupported with the topology they need deferred to M3c-3.
 
-**Architecture:** The driver already owns pairing, SSI cut extraction, classification, fragment healing and assembly. A cone face whose only real loop is the seam slit has a degenerate uv domain, so SSI never sees a patch; `split_face_curved` cannot cut a face whose outer boundary has zero uv area; `curved_solid_volume` cannot triangulate a face with poles. Torus needs the gate plus v-seam handling; cone additionally needs an apex-tolerant projection. Sphere booleans hit four further gaps (clip against the zero-area loop, cap ring pole detour, meridian folded into the cut arc span, and two seam contacts for sphere/sphere), so they are pinned as explicitly unsupported and deferred to M3c-3. Each remaining gap is closed in its own task, then the torus/cone gates are opened and pinned by end-to-end volume tests.
+**Architecture:** The driver already owns pairing, SSI cut extraction, classification, fragment healing and assembly. A cone face whose only real loop is the seam slit has a degenerate uv domain, so SSI never sees a patch; `split_face_curved` cannot cut a face whose outer boundary has zero uv area; `curved_solid_volume` cannot triangulate a face with poles. Torus needs the gate plus v-seam handling. Cone and sphere booleans hit further gaps (clip against the zero-area loop, cap ring pole detour, meridian folded into the cut arc span, and two seam contacts for sphere/sphere), so they are pinned as explicitly unsupported and deferred to M3c-3. The torus gate is opened and pinned by end-to-end volume tests; cone and sphere are pinned by failure diagnostics that name the missing topology.
 
 **Tech Stack:** C++20, CMake, MSVC 19.44 / GCC / Clang, doctest 2.4.11, existing `geom::v1` headers only (no new dependency).
 
@@ -23,22 +23,21 @@
 
 ## Scope and deviations (need review approval)
 
-M3c-2 covers **torus and cone operands of `boolean_solid_curved`**, plus the pole-aware sphere volume needed for measurement. Sphere *booleans* are deferred to M3c-3 and pinned by a diagnostic. The milestone is deliberately split from general trimmed-face tessellation:
+M3c-2 covers **torus operands of `boolean_solid_curved`**, plus the pole-aware sphere volume needed for measurement. Sphere and cone *booleans* are deferred to M3c-3 and pinned by diagnostics. The milestone is deliberately split from general trimmed-face tessellation:
 
-1. **Closed cuts only on seam-only faces.** A cone face is split only when every cut is a closed ring (or a ring touching the face's own seam). A cut that ends in the middle of a face still returns `unsupported "split_face_curved: open cuts on a seam-only face"`. Sphere booleans are out of scope (Task 5).
+1. **Closed cuts only on seam-only faces, anchored at one seam point.** A cut that ends in the middle of a face still returns `unsupported "split_face_curved: open cuts on a seam-only face"`; an interior closed ring (front and back points coincide) is rejected as `"closed cut crosses the seam twice"`. This is exactly why cone cuts cannot be delivered here: a cone/plane cut is either an interior closed circle or an open meridian chain ending on the base rim (see Task 7). Sphere booleans are out of scope (Task 5).
 2. **Synthetic parameter boundary.** For a seam-only face the splitter synthesizes the missing rectangle of the parameter domain (`u ∈ [u0,u0+2π]`, `v ∈ [v_lo,v_hi]`), runs the existing arrangement, then strips every chain that came from the synthetic seam/pole edges and closes the remaining cut chain by 3D endpoint identity. The synthetic edges never appear in `CurvedFragment::loops`, so assembly sees only real cut edges.
 3. **Torus cuts stay chordal.** There is no exact torus/plane or torus/cylinder healing (the intersection is quartic in general). Quality is reported by `CurvedBooleanReport::max_cut_residual`; the tests require it below `1e-3` for the chosen corpus.
-4. **Cone support is plane/cylinder cuts**, including cuts through the apex; cuts tangent to the apex or to the base rim remain `unsupported`.
+4. **Cone booleans are deferred.** Every cone/plane cut needs either interior-closed-ring splitting or open-chain-to-real-boundary handling, plus apex welding and an apex volume fan. All of that is M3c-3 work; M3c-2 pins the gate message and zero pairing (Task 7).
 4b. **Torus cut planes are restricted to axis-perpendicular or axis-containing planes.** A torus/plane pair whose plane is neither (offset-parallel or tilted) is rejected before pairing with `unsupported "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus axis"`; offset-parallel and tilted cuts are M3c-3.
 5. **No trimmed tessellation of boolean results in this milestone.** QA-14 checks topology, closedness, volume and determinism; tessellating a result face with a non-rectilinear boundary is M3c-3 work (M3c-1 explicitly rejects those with `"... boundary is not rectilinear"`).
 
 ## Review Focus (feed these to every reviewer)
 
-- Does the sphere/cone uv-domain synthesis ever *widen* a legitimate trimmed domain? A face whose loop-derived area is non-zero must keep exactly its old range.
+- Does the sphere/cone/torus uv-domain synthesis ever *widen* a legitimate trimmed domain? A face whose loop-derived area is non-zero must keep exactly its old range.
 - Are the synthetic seam/pole chains really absent from every emitted `CurvedFragment` loop, and do the cut chains close with bitwise-identical 3D endpoints?
 - Does the pole-aware volume integrate the same surface the tessellator would (no flat-triangle approximation of the sphere)?
 - Do torus cuts that cross `v = 0 / 2π` produce loops with no `2π` jump?
-- Is the apex a single vertex in the assembled Brep (no duplicate apex vertices, no zero-length edges)?
 - Are all error paths preserving the failure report and returning a message that names the stage?
 
 ## File Map
@@ -46,11 +45,10 @@ M3c-2 covers **torus and cone operands of `boolean_solid_curved`**, plus the pol
 | File | Responsibility |
 | --- | --- |
 | `include/geom/brep/boolean_solid_curved.hpp` | failure report, uv-domain synthesis, gate widening, seam split axis, sphere-sphere exact circle |
-| `include/geom/brep/trim_face.hpp` | seam-only boundary synthesis and synthetic-chain stripping; apex collapse |
-| `include/geom/brep/face_uv.hpp` | apex-tolerant cone projection |
+| `include/geom/brep/trim_face.hpp` | seam-only boundary synthesis and synthetic-chain stripping |
 | `include/geom/brep/detail/curved_volume.hpp` | pole-aware face triangulation |
 | `include/geom/brep/split_solid.hpp` | sphere/sphere exact circle helper (plane construction) |
-| `tests/unit/brep_boolean_curved_test.cpp` | end-to-end torus/cone booleans and the sphere cap diagnostic |
+| `tests/unit/brep_boolean_curved_test.cpp` | end-to-end torus booleans and the sphere/cone diagnostics |
 | `tests/unit/brep_trim_face_test.cpp` | seam-only fragment splitting |
 | `tests/unit/brep_curved_volume_test.cpp` | pole-aware volume |
 | `tests/unit/boolean_solid_curved_report_test.cpp` | failure report |
@@ -506,73 +504,59 @@ All four torus cases pass with `max_cut_residual <= 1e-3`; `curved_solid_volume`
 
 ---
 
-### Task 7: Cone projection, apex splitting and gate
+### Task 7: Cone diagnostic (booleans deferred to M3c-3)
 
-**Probe findings (2026-11-14, cone r=1, h=2):** `face_uv_project_cone` rejects the apex at `face_uv.hpp:140-141`, so pairing never starts (pairs=0); `trim_face_seam_only_domain` (`trim_face.hpp:757`) covers sphere/torus only; apex loops need one welded apex vertex with ruling edges and a degenerate apex fan (`outer_area>0` filter at `trim_face.hpp:2223`); `curved_solid_volume(cone)` hits the same projection error. The cone canonical tessellation is already closed (72v/140t).
+**Why deferred:** the seam-only splitter accepts only a closed cut that is anchored at exactly one seam point. A cone/plane cut is either (a) an interior closed circle when the plane is perpendicular to the axis below the apex — rejected because its front and back points coincide (`"closed cut crosses the seam twice"`), or (b) one or two open meridian chains ending on the base rim (plane containing the axis, possibly through the apex) — rejected as open cuts. Delivering cone booleans therefore needs the general cut splitter (closed rings not touching a seam, open chains ending on a real boundary) plus apex welding and an apex volume fan; `curved_solid_volume(cone)` also fails today at the apex projection. All of that moves to M3c-3.
 
 **Files:**
-- Modify: `include/geom/brep/face_uv.hpp:132-158`
-- Modify: `include/geom/brep/trim_face.hpp` (seam-only cone domain, apex collapse)
-- Modify: `include/geom/brep/boolean_solid_curved.hpp` (cone gate)
-- Modify: `include/geom/brep/detail/curved_volume.hpp` (apex fan)
-- Test: `tests/unit/brep_boolean_curved_test.cpp`, `tests/unit/brep_face_uv_test.cpp`, `tests/unit/brep_curved_volume_test.cpp`
+- Modify: `include/geom/brep/boolean_solid_curved.hpp` (cone gate message only)
+- Modify: `tests/unit/brep_boolean_curved_test.cpp`
+- Modify: `docs/architecture/geometry-library-architecture.md` §16.3 (one paragraph)
 
 **Interfaces:**
-- Produces: `face_uv_project_cone(surface, point, previous_u, has_previous_u)` accepts a point within `tolerance` of the apex, returning `{previous_u, v_max}`; points beyond the apex stay `unsupported`. The seam-only cone rectangle is `[0,2π] × [0,v_max]`; its top edge is synthetic and collapses to one apex vertex per fragment. The cell volume integrates a cone with an apex fan.
+- Produces: cone gate returns `unsupported` with `"boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are deferred to M3c-3"`; `report.face_pairs == 0`, `fragments == 0`, `kept == 0`. No projection, splitter or volume code changes.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 1: Write the failing test**
 
 ```cpp
-TEST_CASE("curved boolean: cone and box") {
+TEST_CASE("curved boolean: cone operands are deferred with a diagnostic") {
   const Result<Brep> cone = make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, 1e-9);
-  const Result<Brep> below = make_box(Point3d{-2, -2, -1}, Point3d{2, 2, 1}, 1e-9);
+  const Result<Brep> box = make_box(Point3d{-2, -2, -1}, Point3d{2, 2, 2}, 1e-9);
   REQUIRE(cone.has_value());
-  REQUIRE(below.has_value());
-  const Result<CurvedBooleanResult> frustum =
-      boolean_solid_curved(cone.value(), cone.value().solid_ids().front(), below.value(),
-                           below.value().solid_ids().front(), SolidBooleanOp::intersection, 1e-9);
-  REQUIRE(frustum.has_value());
-  CHECK(validate_topology(frustum.value().brep).ok());
-  CHECK(curved_solid_volume(frustum.value().brep, frustum.value().brep.solid_ids().front(), 1e-9).value() ==
-        doctest::Approx(0.2617993877991494).epsilon(1e-9));
-}
-
-TEST_CASE("curved boolean: cone cut through the apex") {
-  const Result<Brep> cone = make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, 1e-9);
-  const Result<Brep> half = make_box(Point3d{0, -2, -1}, Point3d{2, 2, 3}, 1e-9);
-  REQUIRE(cone.has_value());
-  REQUIRE(half.has_value());
-  const Result<CurvedBooleanResult> kept =
-      boolean_solid_curved(cone.value(), cone.value().solid_ids().front(), half.value(),
-                           half.value().solid_ids().front(), SolidBooleanOp::intersection, 1e-9);
-  REQUIRE(kept.has_value());
-  CHECK(validate_topology(kept.value().brep).ok());
-  CHECK(curved_solid_volume(kept.value().brep, kept.value().brep.solid_ids().front(), 1e-9).value() ==
-        doctest::Approx(1.0471975511965976).epsilon(1e-9));
+  REQUIRE(box.has_value());
+  for (const SolidBooleanOp op : {SolidBooleanOp::union_, SolidBooleanOp::intersection,
+                                  SolidBooleanOp::difference}) {
+    CurvedBooleanReport report{};
+    report.face_pairs = 999;
+    const Result<CurvedBooleanResult> out =
+        boolean_solid_curved(cone.value(), cone.value().solid_ids().front(), box.value(),
+                             box.value().solid_ids().front(), op, 1e-9, &report);
+    REQUIRE_FALSE(out);
+    CHECK(out.error().code == Errc::unsupported);
+    const std::string message(out.error().message);
+    CHECK(message.find("deferred to M3c-3") != std::string::npos);
+    CHECK(report.face_pairs == 0);
+    CHECK(report.fragments == 0);
+    CHECK(report.kept == 0);
+  }
 }
 ```
 
-Also assert the full cone volume `2.0943951023931953` and that exactly one vertex lies within `1e-12` of the apex.
+- [ ] **Step 2: Run and confirm it fails**
 
-- [ ] **Step 2: Run and confirm they fail**
-
-Expected: `"face_loops_uv: cone projection is undefined at or beyond the apex"` before pairing.
+Expected: the current gate message `"boolean_solid_curved: apex-touching loops are deferred"` lacks the M3c-3 wording and is reported after the box/cone faces are counted, so the message and `face_pairs == 0` assertions fail.
 
 - [ ] **Step 3: Implement**
 
-1. `face_uv_project_cone`: add `previous_u`/`has_previous_u` parameters (thread through the dispatch); if the point is within `tolerance` of the apex, return `{previous_u or 0, v_max}`; beyond the apex keep the error.
-2. Seam-only domain: include `Cone3` in `trim_face_seam_only_domain` (`[0,2π] × [0,v_max]`).
-3. Synthetic top edge: drop the top side chain; collapse every remaining point at `v == v_max` to one 3D apex point before closing chains; never emit a zero-length edge.
-4. Volume: when a loop contains the apex, insert a single apex vertex and close the fan; reuse the pole-aware machinery from Task 4.
-5. Cone gate → supported; if duplicate apex vertices survive, weld by 3D identity.
+Replace the cone branch message with the exact diagnostic above; keep the cone pointer null and do not touch any other gate or code path.
 
 - [ ] **Step 4: Verify**
 
-Both cone cases and the full cone volume pass at `1e-9`; exactly one apex vertex; existing cylinder/sphere/torus cases unchanged.
+Debug and Release full suites green (expect +1 case / +3 assertions per operation loop), zero warnings; the three torus `REQUIRE_MESSAGE` diagnostics and all existing tests unchanged.
 
 - [ ] **Step 5: Commit**
 
-`git commit -m "feat(m3c2): support cone operands with a single apex vertex"`
+`git commit -m "test(m3c2): pin the deferred cone diagnostic"`
 
 ---
 
@@ -592,15 +576,14 @@ Both cone cases and the full cone volume pass at `1e-9`; exactly one apex vertex
 | torus ∩ half space `z ≥ 0` (`R=1`, `r=0.5`) | 2.4674011002723395 | 1e-6 rel | ≤ 1e-3 |
 | torus ∩ half space `x ≥ 0` (crosses the v seam) | 2.4674011002723395 | 1e-6 rel | ≤ 1e-3 |
 | torus inside a big box (no cut) | 4.934802200544679 | 1e-6 rel | n/a |
-| cone ∩ box below `z = 1` (`r=1`, `h=2`) | 0.2617993877991494 | 1e-9 rel | ≤ 1e-9 |
-| cone ∩ half space `x ≥ 0` (through the apex) | 1.0471975511965976 | 1e-9 rel | ≤ 1e-9 |
-| whole cone volume (no cut) | 2.0943951023931953 | 1e-9 rel | n/a |
+
+Cone and sphere rows are intentionally absent: both are pinned as `unsupported` diagnostics (Tasks 5 and 7), not measured.
 
 - [ ] **Step 1: Add the QA test**
 
-Create `tests/unit/curved_boolean_qa14_test.cpp` with one `TEST_CASE("QA-14: curved booleans of analytic primitives")` looping the table; require `report.cuts >= 1` for every cut row and `report.kept >= 1`; the two no-cut rows (torus inside a box, whole cone) assert `cuts == 0` and skip the residual bound. Run each operation twice and compare `curved_solid_volume` bitwise.
+Create `tests/unit/curved_boolean_qa14_test.cpp` with one `TEST_CASE("QA-14: curved booleans of analytic primitives")` looping the table; require `report.cuts >= 1` for every cut row and `report.kept >= 1`; the no-cut row (torus inside a box) asserts `cuts == 0` and skips the residual bound. Run each operation twice and compare `curved_solid_volume` bitwise.
 
-- [ ] **Step 2: Confirm it fails before the fixes are merged** (it should, on the torus/cone gates)
+- [ ] **Step 2: Confirm it fails before the fixes are merged** (it should, on the torus gate)
 
 - [ ] **Step 3: Add the benchmark**
 
@@ -608,11 +591,11 @@ Time 100 iterations of each case on a Release build; report median and p95 in `d
 
 - [ ] **Step 4: Write ADR-0028**
 
-Record: synthetic parameter boundary and why it is stripped; closed-cuts-only limit; torus chordal cuts; cone apex handling; what remains for M3c-3 (general trimmed tessellation, open cuts, NURBS operands, exact torus/cone healing).
+Record: synthetic parameter boundary and why it is stripped; the seam-anchored closed-cuts-only limit; torus chordal cuts; why cone needs interior-closed-ring and open-chain splitting plus apex welding/fan; what remains for M3c-3 (general trimmed tessellation, those cut kinds, NURBS operands, exact torus/cone healing).
 
 - [ ] **Step 5: Update §16.3**
 
-Move torus/cone operands from "deferred" to "supported with limits"; record sphere booleans as explicitly unsupported (cap topology deferred to M3c-3) with the Task 5 diagnostic. Link ADR-0028 and the benchmark.
+Move torus operands from "deferred" to "supported with limits"; record sphere (cap topology) and cone (closed-cut/apex topology) as explicitly unsupported with their Task 5/7 diagnostics. Link ADR-0028 and the benchmark.
 
 - [ ] **Step 6: Verify and commit**
 
@@ -623,15 +606,15 @@ Move torus/cone operands from "deferred" to "supported with limits"; record sphe
 ## M3c-2 exit criteria
 
 - [ ] All tasks 1-8 complete; every commit reviewed and approved.
-- [ ] Debug and Release: full suite green, zero warnings; 900+ cases.
-- [ ] QA-14 table passes with the stated tolerances on MSVC; CI on ubuntu/macos passes with the documented relative tolerances (analytic values must not be bit-pinned across libms).
+- [ ] Debug and Release: full suite green, zero warnings; 925+ cases.
+- [ ] QA-14 torus table passes with the stated tolerances on MSVC; CI on ubuntu/macos passes with the documented relative tolerances (analytic values must not be bit-pinned across libms).
 - [ ] Existing planar/cylinder curved boolean tests, `split_solid` tests and trimmed tessellation tests unchanged.
 - [ ] ADR-0028 and §16.3 describe exactly the supported surface/operation matrix and the remaining limits.
 
 ## Self-check
 
 - [ ] Every task names exact files, interfaces and a runnable failing test.
-- [ ] No task depends on code from a later task (Task 5 depends on 1-4; Task 6 and 7 depend on 1 and 3).
+- [ ] No task depends on code from a later task (Task 5 depends on 1-4; Task 6 depends on 1 and 3; Task 7 depends on 1).
 - [ ] No placeholders or TBDs.
 - [ ] QA values are independent analytic formulas, not values read from the implementation.
-- [ ] The plan states the deviations from the architecture (closed cuts, synthetic boundary, chordal torus, sphere-boolean and general-tessellation deferral to M3c-3) explicitly.
+- [ ] The plan states the deviations from the architecture (seam-anchored closed cuts, synthetic boundary, chordal torus, sphere/cone-boolean and general-tessellation deferral to M3c-3) explicitly.
