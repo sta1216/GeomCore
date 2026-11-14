@@ -176,8 +176,8 @@ inline constexpr double kCurvedVolumeNorthPoleV = 0.5 * kCurvedVolumePi;
 // sagitta is below 1e-4; 128 already gives 7.5e-5 for the unit sphere. The
 // result is a power of two so the seam column lands exactly on u = 2*pi. The
 // upper clamp bounds the panel count for very large spheres, where the absolute
-// sagitta bound would otherwise demand thousands of bands (about 7,000 at
-// radius 1e3, where the clamp leaves a sagitta of ~1.2e-3); the seven-point rule
+// sagitta bound would otherwise demand about 3,512 bands at
+// radius 1e3 (about 7,025 columns), where the clamp leaves a sagitta of ~1.2e-3); the seven-point rule
 // stays accurate there because the sphere integrand varies only with v.
 inline int curved_volume_sphere_bands(double radius) noexcept {
   constexpr double kMaxSagitta = 1e-4;

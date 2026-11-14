@@ -671,8 +671,8 @@ TEST_CASE("curved volume: a spherical wedge closes both pole fans") {
   REQUIRE(volume.has_value());
   MESSAGE("sphere wedge volume: " << std::setprecision(17) << volume.value());
   // Without the fan the uv polygon cuts the corner at each pole and loses a
-  // triangle of area about 0.5 * alpha * (pi / 32) ~= 0.034, some 7% of the
-  // total. Landing on 1e-12 therefore proves both fans closed.
+  // triangle of area about 0.5 * alpha * (pi / 32) ~= 0.034, roughly 0.16% of
+  // the total. Landing on 1e-12 therefore proves both fans closed.
   CHECK(relative_error(volume.value(), (2.0 / 3.0) * alpha) <= 1e-12);
 
   const geom::Result<std::vector<geom::FaceUvLoop>> loops =
