@@ -369,7 +369,7 @@ The unit sphere volume test passes at `1e-12`; the existing cylinder/torus/trimm
 **Files:**
 - Modify: `include/geom/brep/boolean_solid_curved.hpp` (gate message for `Sphere3`)
 - Modify: `tests/unit/brep_boolean_curved_test.cpp`
-- Modify: `docs/adr/0028-curved-boolean-surfaces.md`, architecture §16.3
+- Modify: `docs/architecture/geometry-library-architecture.md` §16.3 (ADR-0028 is created in Task 8)
 
 **Interfaces:**
 - Consumes: `curved_boolean_surface_gate` (`:157`), `boolean_solid_curved`
