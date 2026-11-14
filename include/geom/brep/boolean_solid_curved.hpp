@@ -4,10 +4,11 @@
 // in trimmed faces.
 //
 // The driver is the curved counterpart of `boolean_solid` (which is planar
-// only). Operands must be built from planes and cylinders: every other analytic
-// surface kind is reported as `unsupported` before any work is done (cone, sphere
-// and torus operands are deferred to a later milestone, NURBS patches have no
-// analytic parameterization here).
+// only). Operands must be built from planes, cylinders, and tori; a torus can only
+// be cut by a plane (perpendicular to its axis or containing it). Every other
+// analytic surface kind is reported as `unsupported` before any work is done
+// (cone and sphere operands are deferred to a later milestone, NURBS patches
+// have no analytic parameterization here).
 //
 // The driver pairs face bounding boxes, asks the surface/surface intersector for
 // a cut curve per pair, clips each cut to the face it will split, splits every
@@ -50,7 +51,8 @@
 // edge walking it in opposite directions, and keeps `curved_solid_volume`'s
 // planar area positively oriented.
 //
-// Deferred: coplanar and tangent face contact, cone, sphere and torus operands,
+// Deferred: coplanar and tangent face contact, cone and sphere operands,
+// overlapping torus/torus and torus/cylinder pairs (a torus is only cut by a plane),
 // NURBS operands, flipped fragments on curved surfaces (no reparameterization
 // here), results that fall apart into several connected components, and
 // results that touch themselves along an edge (for example the
@@ -1675,6 +1677,40 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
     infos_b.push_back(info.value());
   }
 
+  // A torus is only cut by a plane; overlapping torus/torus and torus/cylinder pairs have no
+  // supported cut loops here. Reject them before the flipped-fragment pre-check
+  // so the caller gets this diagnostic instead of a later trim failure.
+  for (std::size_t ia = 0; ia < infos_a.size(); ++ia) {
+    for (std::size_t ib = 0; ib < infos_b.size(); ++ib) {
+      const detail::CurvedBooleanFaceInfo& face_a = infos_a[ia];
+      const detail::CurvedBooleanFaceInfo& face_b = infos_b[ib];
+      if (!detail::curved_boolean_bounds_overlap(face_a.bounds, face_b.bounds, tolerance)) {
+        continue;
+      }
+      const Torus3* torus = std::get_if<Torus3>(face_a.surface);
+      const SurfaceGeometry* other = face_b.surface;
+      if (torus == nullptr) {
+        torus = std::get_if<Torus3>(face_b.surface);
+        other = face_a.surface;
+      }
+      if (torus == nullptr) continue;
+      const Plane3* plane = std::get_if<Plane3>(other);
+      if (plane == nullptr) {
+        record_failure();
+        return Error{Errc::unsupported,
+                     "boolean_solid_curved: torus operands only support plane cuts; "
+                     "torus/torus and torus/curved pairs are deferred to M3c-3",
+                     face_a.id.index(), face_b.id.index()};
+      }
+      if (detail::curved_boolean_torus_plane_cut_supported(*plane, *torus, tolerance)) continue;
+      record_failure();
+      return Error{Errc::unsupported,
+                   "boolean_solid_curved: torus cut plane must be perpendicular to or contain "
+                   "the torus axis",
+                   face_a.id.index(), face_b.id.index()};
+    }
+  }
+
   // A curved fragment whose result interior lies on the side its own surface
   // normal points to must be emitted with a flipped normal, and this driver has
   // no reparameterization for a curved surface (see the harvest lambda below).
@@ -1767,33 +1803,6 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
   std::vector<std::vector<CircleCurve3>> circles_a(infos_a.size());
   std::vector<std::vector<CircleCurve3>> circles_b(infos_b.size());
 
-  // A torus can only be cut by a plane that is perpendicular to its axis or
-  // contains it; any other orientation has no representable cut loops (see the
-  // helper above). Reject such a pair before face pairing, so the caller gets
-  // this diagnostic instead of a trim failure on a later fragment or a result
-  // that silently loses the torus side fragments.
-  for (std::size_t ia = 0; ia < infos_a.size(); ++ia) {
-    for (std::size_t ib = 0; ib < infos_b.size(); ++ib) {
-      const detail::CurvedBooleanFaceInfo& face_a = infos_a[ia];
-      const detail::CurvedBooleanFaceInfo& face_b = infos_b[ib];
-      if (!detail::curved_boolean_bounds_overlap(face_a.bounds, face_b.bounds, tolerance)) {
-        continue;
-      }
-      const Torus3* torus = std::get_if<Torus3>(face_a.surface);
-      const Plane3* plane = std::get_if<Plane3>(face_b.surface);
-      if (torus == nullptr) {
-        torus = std::get_if<Torus3>(face_b.surface);
-        plane = std::get_if<Plane3>(face_a.surface);
-      }
-      if (torus == nullptr || plane == nullptr) continue;
-      if (detail::curved_boolean_torus_plane_cut_supported(*plane, *torus, tolerance)) continue;
-      record_failure();
-      return Error{Errc::unsupported,
-                   "boolean_solid_curved: torus cut plane must be perpendicular to or contain "
-                   "the torus axis",
-                   face_a.id.index(), face_b.id.index()};
-    }
-  }
 
   for (std::size_t ia = 0; ia < infos_a.size(); ++ia) {
     for (std::size_t ib = 0; ib < infos_b.size(); ++ib) {

@@ -456,7 +456,8 @@ TEST_CASE("curved boolean: cone operands are deferred with a diagnostic") {
   REQUIRE(box.has_value());
   for (const geom::SolidBooleanOp op : {geom::SolidBooleanOp::union_,
                                         geom::SolidBooleanOp::intersection,
-                                        geom::SolidBooleanOp::difference}) {
+                                        geom::SolidBooleanOp::difference,
+                                        geom::SolidBooleanOp::symmetric_difference}) {
     geom::CurvedBooleanReport report{};
     report.face_pairs = 999;
     const geom::Result<geom::CurvedBooleanResult> out = geom::boolean_solid_curved(
@@ -565,13 +566,49 @@ TEST_CASE("curved boolean: sphere operands are rejected with the cap diagnostic"
   geom::CurvedBooleanReport report;
   for (const geom::SolidBooleanOp op : {geom::SolidBooleanOp::union_,
                                         geom::SolidBooleanOp::intersection,
-                                        geom::SolidBooleanOp::difference}) {
+                                        geom::SolidBooleanOp::difference,
+                                        geom::SolidBooleanOp::symmetric_difference}) {
     const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
         sphere.value(), a, box.value(), b, op, geom::CurvedBooleanOptions{tolerance}, &report);
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().code == geom::Errc::unsupported);
     CHECK(message_of(result.error()).find("deferred to M3c-3") != std::string_view::npos);
     CHECK(report.face_pairs == 0);
+  }
+}
+
+TEST_CASE("curved boolean: torus pairs need a plane cut") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> torus_a =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance);
+  const geom::Result<geom::Brep> torus_b =
+      geom::make_torus(geom::Point3d{0.3, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance);
+  const geom::Result<geom::Brep> cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, -2.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.2, 4.0,
+                         tolerance);
+  REQUIRE(torus_a.has_value());
+  REQUIRE(torus_b.has_value());
+  REQUIRE(cylinder.has_value());
+  const std::string expected =
+      "boolean_solid_curved: torus operands only support plane cuts; torus/torus and "
+      "torus/curved pairs are deferred to M3c-3";
+  for (const geom::SolidBooleanOp op : {geom::SolidBooleanOp::union_,
+                                        geom::SolidBooleanOp::intersection,
+                                        geom::SolidBooleanOp::difference,
+                                        geom::SolidBooleanOp::symmetric_difference}) {
+    for (const geom::Brep* other : {&torus_b.value(), &cylinder.value()}) {
+      geom::CurvedBooleanReport report{};
+      report.face_pairs = 999;
+      const geom::Result<geom::CurvedBooleanResult> out = geom::boolean_solid_curved(
+          torus_a.value(), only_solid(torus_a.value()), *other, only_solid(*other), op,
+          geom::CurvedBooleanOptions{tolerance}, &report);
+      REQUIRE_FALSE(out.has_value());
+      CHECK(out.error().code == geom::Errc::unsupported);
+      CHECK(std::string(out.error().message) == expected);
+      CHECK(report.face_pairs == 0);
+    }
   }
 }
 
@@ -595,6 +632,16 @@ TEST_CASE("curved boolean: torus and half space") {
   CHECK(half.value().report.max_cut_residual <= 1e-3);
   CHECK(geom::validate_topology(half.value().brep).ok());
   CHECK(volume_of(half.value().brep) ==
+        doctest::Approx(2.4674011002723395).epsilon(1e-6));
+
+  const geom::Result<geom::CurvedBooleanResult> other_half = geom::boolean_solid_curved(
+      torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::difference,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(other_half.has_value(),
+                  (other_half.has_value() ? std::string_view{}
+                                          : message_of(other_half.error())));
+  CHECK(geom::validate_topology(other_half.value().brep).ok());
+  CHECK(volume_of(other_half.value().brep) ==
         doctest::Approx(2.4674011002723395).epsilon(1e-6));
 }
 

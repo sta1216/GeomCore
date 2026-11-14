@@ -1308,7 +1308,7 @@ ADR-0028，实测见 `docs/benchmarks/m3c2.md`）。
 **QA-14**（`tests/unit/curved_boolean_qa14_test.cpp`）三行：`torus ∩ z ≥ 0` 与
 `torus ∩ x ≥ 0`（跨 v 缝）体积各 `2.4674011002723395`，`torus ⊂ 盒` 体积
 `4.934802200544679`、`cuts == 0`；两次运行体积逐位相同。Debug 与 Release 各
-932 个用例、659,163 条断言全绿，`/W4 /WX /utf-8` 零警告。
+933 个用例、659,233 条断言全绿，`/W4 /WX /utf-8` 零警告。
 
 待 M3c-3：布尔结果的一般修剪网格化、偏移平行/倾斜环切、内部闭环与开放切链、
 锥顶点与球 cap、NURBS 操作数、精确 torus/cone 愈合。

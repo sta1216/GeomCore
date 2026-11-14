@@ -88,7 +88,7 @@ M3b-2 的 `boolean_solid_curved` 只接受 `Plane3`/`Cylinder3` 面：圆柱面�
   `torus ∩ z ≥ 0` 与 `torus ∩ x ≥ 0`（跨 v 缝）体积各
   `2.4674011002723395`，残差 `<= 1e-3`，两次运行体积逐位相同；
   `torus ⊂ 盒` 体积 `4.934802200544679`、`cuts == 0`。单用例 74 条断言通过；
-  全量 Debug 与 Release 各 932 个用例、659,163 条断言全绿，`/W4 /WX /utf-8`
+  全量 Debug 与 Release 各 933 个用例、659,233 条断言全绿，`/W4 /WX /utf-8`
   零警告。
 - **基准（`geom_bench_m3c2`，Release，100 次/操作）。** 三个操作分别计时
   `boolean_solid_curved` 与 `detail::curved_solid_volume`，无时间门禁；实测
@@ -96,9 +96,9 @@ M3b-2 的 `boolean_solid_curved` 只接受 `Plane3`/`Cylinder3` 面：圆柱面�
 - **修剪网格化仍不支持布尔结果。** 布尔输出的修剪面边界是非直边/含孔洞，
   `tessellate` 会按 ADR-0027 的域形状确定性拒绝；体积只能走
   `detail::curved_solid_volume`。通用修剪网格化是 M3c-3 的工作。
-- **限制清单。** 偏移平行/倾斜环切平面、内部闭环、开放切链、锥顶点、球 cap、
-  NURBS 操作数、精确 torus/cone 愈合都留给 M3c-3；环面的分类网格仍按默认
-  弦高构建，驱动没有采样预算旋钮。
+- **限制清单。** 偏移平行/倾斜环切平面、torus/torus 与 torus/cylinder 配对、
+  内部闭环、开放切链、锥顶点、球 cap、NURBS 操作数、精确 torus/cone 愈合都留给
+  M3c-3；环面的分类网格仍按默认弦高构建，驱动没有采样预算旋钮。
 - **复用。** 合成域与剥边逻辑在球/锥具备裁剪能力后可直接复用；8 ulp 归一化带
   对所有环切入口一致，包括 `curved_boolean_pair_circles`。
 
