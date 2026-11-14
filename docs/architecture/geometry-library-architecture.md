@@ -1268,6 +1268,14 @@ provenance 也延后（ADR-0026 记录了该 §4.6 偏差）。
 NURBS 修剪轮廓、布尔留下的 190 个同面 `7e-13` 擦边点（`1e-12` 绝对容差下 0
 个 T 型接缝）都记录为 M3c-2/布尔精度范围（ADR-0027）。
 
+**M3c-2（球操作数：明确不支持）**：球面是单条缝合线围成的闭曲面，其 uv 环面积为
+0，因此球操作数的布尔除需要裁剪能处理零面积环外，还需要极点绕行的 cap 环、
+`split_solid_heal_fragment` 不把绕行经线折进切割圆弧跨度，以及 `球 ∩ 球` 两条缝
+接触的跨链接合；四处缺口都超出 M3c-2。因此 `boolean_solid_curved` 对 `Sphere3`
+操作数在入口返回 `unsupported`，消息为 `"boolean_solid_curved: sphere operands need
+cap topology; booleans are deferred to M3c-3"`，且失败报告不消耗配对计数
+（`CurvedBooleanReport::face_pairs == 0`）；其余行为不变。
+
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外
 无全局 epsilon。

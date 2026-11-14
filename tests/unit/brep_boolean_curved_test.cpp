@@ -522,23 +522,27 @@ TEST_CASE("brep: boolean_solid_curved heals the cut rim into exact arcs") {
   CHECK(healed_cap);
 }
 
-TEST_CASE("brep: boolean_solid_curved defers sphere operands") {
+TEST_CASE("curved boolean: sphere operands are rejected with the cap diagnostic") {
   const double tolerance = 1e-9;
-  const geom::Result<geom::Brep> sphere_result =
-      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 2.0, tolerance);
-  REQUIRE(sphere_result.has_value());
-  const geom::Brep& sphere = sphere_result.value();
-  REQUIRE(geom::validate_topology(sphere).ok());
-  const geom::Brep box =
-      geom::make_box(geom::Point3d{-5.0, -5.0, -5.0}, geom::Point3d{5.0, 5.0, 5.0}, tolerance)
-          .value();
-
-  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
-      sphere, only_solid(sphere), box, only_solid(box), geom::SolidBooleanOp::union_,
-      geom::CurvedBooleanOptions{tolerance});
-  REQUIRE(!result.has_value());
-  CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) == "boolean_solid_curved: sphere operands are deferred to M3c");
+  const geom::Result<geom::Brep> sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance);
+  const geom::Result<geom::Brep> box = geom::make_box(geom::Point3d{-2.0, -2.0, 0.5},
+                                                      geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(sphere.has_value());
+  REQUIRE(box.has_value());
+  const geom::SolidId a = only_solid(sphere.value());
+  const geom::SolidId b = only_solid(box.value());
+  geom::CurvedBooleanReport report;
+  for (const geom::SolidBooleanOp op : {geom::SolidBooleanOp::union_,
+                                        geom::SolidBooleanOp::intersection,
+                                        geom::SolidBooleanOp::difference}) {
+    const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+        sphere.value(), a, box.value(), b, op, geom::CurvedBooleanOptions{tolerance}, &report);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == geom::Errc::unsupported);
+    CHECK(message_of(result.error()).find("deferred to M3c-3") != std::string_view::npos);
+    CHECK(report.face_pairs == 0);
+  }
 }
 
 TEST_CASE("brep: boolean_solid_curved defers torus operands") {
@@ -947,7 +951,8 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
 
   // Diagnosed rejections. The expected messages are the ones the driver
   // documents:
-  //   sphere   "boolean_solid_curved: sphere operands are deferred to M3c"
+  //   sphere   "boolean_solid_curved: sphere operands need cap topology;
+  //             booleans are deferred to M3c-3"
   //   torus    "boolean_solid_curved: torus operands are deferred to M3c"
   //   cone     "boolean_solid_curved: cone operands are not supported
   //             (apex-touching loops are deferred)"
@@ -987,7 +992,8 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
   };
   const std::array<RejectionCase, 6> rejections{{
       {"sphere box", &sphere, &wide_box, geom::SolidBooleanOp::union_,
-       "boolean_solid_curved: sphere operands are deferred to M3c"},
+       "boolean_solid_curved: sphere operands need cap topology; booleans are deferred to "
+       "M3c-3"},
       {"torus box", &torus, &wide_box, geom::SolidBooleanOp::union_,
        "boolean_solid_curved: torus operands are deferred to M3c"},
       {"cone box", &cone, &wide_box, geom::SolidBooleanOp::union_,

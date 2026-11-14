@@ -166,7 +166,9 @@ inline CurvedBooleanSurfaceGate curved_boolean_surface_gate(
   }
   if (std::holds_alternative<Sphere3>(surface)) {
     return CurvedBooleanSurfaceGate{
-        false, "boolean_solid_curved: sphere operands are deferred to M3c"};
+        false,
+        "boolean_solid_curved: sphere operands need cap topology; booleans are deferred to "
+        "M3c-3"};
   }
   if (std::holds_alternative<Torus3>(surface)) {
     return CurvedBooleanSurfaceGate{
