@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -735,6 +736,143 @@ TEST_CASE("curved boolean: torus cut by a tilted plane is rejected") {
   geom::CurvedBooleanReport report;
   const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
       torus.value(), only_solid(torus.value()), slab, only_solid(slab),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) ==
+        "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
+        "axis");
+  CHECK(report.face_pairs == 0);
+}
+
+// A closed slab whose bottom face is the plane through the origin with the given
+// normal, extending four units along that normal. Only the bottom face reaches
+// the torus bounds (|x|,|y|,|z| <= 1.5), so one torus/plane pair decides the
+// cut-plane guard. The corner ring and coedge pattern follow make_tilted_slab;
+// each face plane is derived from the corner sequence its loop traverses.
+geom::Brep make_plane_slab(const geom::Vec3d& normal, double tolerance) {
+  const double length = std::sqrt(geom::dot(normal, normal));
+  REQUIRE(length > 0.0);
+  const geom::Vec3d n{normal[0] / length, normal[1] / length, normal[2] / length};
+  const geom::Vec3d seed =
+      std::fabs(n[0]) < 0.9 ? geom::Vec3d{1.0, 0.0, 0.0} : geom::Vec3d{0.0, 1.0, 0.0};
+  const geom::Vec3d raw_u = geom::cross(seed, n);
+  const double u_length = std::sqrt(geom::dot(raw_u, raw_u));
+  REQUIRE(u_length > 0.0);
+  const geom::Vec3d u{raw_u[0] / u_length, raw_u[1] / u_length, raw_u[2] / u_length};
+  const geom::Vec3d v = geom::cross(n, u);
+  const auto corner = [&](double su, double sv, double sn) {
+    return geom::Point3d{su * u[0] + sv * v[0] + sn * n[0],
+                         su * u[1] + sv * v[1] + sn * n[1],
+                         su * u[2] + sv * v[2] + sn * n[2]};
+  };
+  const geom::Point3d corners[8] = {
+      corner(-4.0, -4.0, 0.0), corner(4.0, -4.0, 0.0), corner(4.0, 4.0, 0.0),
+      corner(-4.0, 4.0, 0.0),  corner(-4.0, -4.0, 4.0), corner(4.0, -4.0, 4.0),
+      corner(4.0, 4.0, 4.0),   corner(-4.0, 4.0, 4.0),
+  };
+  geom::SolidEditor editor;
+  geom::VertexId vertices[8];
+  for (int i = 0; i < 8; ++i) {
+    vertices[i] = editor.add_vertex(corners[i], tolerance).value();
+  }
+  const int edge_specs[12][2] = {{0, 1}, {1, 2}, {2, 3},  {3, 0},  {4, 5}, {5, 6},
+                                 {6, 7}, {7, 4}, {1, 5},  {2, 6},  {3, 7}, {0, 4}};
+  geom::EdgeId edges[12];
+  for (int i = 0; i < 12; ++i) {
+    const geom::Point3d from = corners[edge_specs[i][0]];
+    const geom::Point3d to = corners[edge_specs[i][1]];
+    const geom::Vec3d delta = to - from;
+    const double edge_length = std::hypot(delta[0], delta[1], delta[2]);
+    const geom::Vec3d direction{delta[0] / edge_length, delta[1] / edge_length,
+                                delta[2] / edge_length};
+    const std::uint32_t curve = editor.add_curve(geom::LineCurve3{from, direction});
+    edges[i] = editor.add_edge(vertices[edge_specs[i][0]], vertices[edge_specs[i][1]], curve,
+                               0.0, edge_length, tolerance)
+                   .value();
+  }
+  // Edges traversed by each loop, in loop order, with the coedge direction flags.
+  const int loop_edges[6][4] = {{3, 2, 1, 0}, {4, 5, 6, 7}, {0, 8, 4, 11},
+                                {2, 10, 6, 9}, {11, 7, 10, 3}, {1, 9, 5, 8}};
+  const bool loop_reversed[6][4] = {{true, true, true, true},   {false, false, false, false},
+                                    {false, false, true, true}, {false, false, true, true},
+                                    {false, true, true, false}, {false, false, true, true}};
+  // Corners the same loops visit, used to derive each face plane exactly.
+  const int loop_corners[6][4] = {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+                                  {2, 3, 7, 6}, {0, 4, 7, 3}, {1, 2, 6, 5}};
+  std::array<geom::FaceId, 6> faces{};
+  for (int f = 0; f < 6; ++f) {
+    const geom::Point3d a = corners[loop_corners[f][0]];
+    const geom::Point3d b = corners[loop_corners[f][1]];
+    const geom::Point3d c = corners[loop_corners[f][2]];
+    const geom::Vec3d ab{b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    const geom::Vec3d ac{c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+    const geom::Vec3d raw = geom::cross(ab, ac);
+    const double normal_length = std::sqrt(geom::dot(raw, raw));
+    REQUIRE(normal_length > 0.0);
+    const geom::Vec3d face_normal{raw[0] / normal_length, raw[1] / normal_length,
+                                  raw[2] / normal_length};
+    const std::uint32_t surface = editor.add_surface(geom::Plane3{
+        face_normal, geom::dot(face_normal, geom::Vec3d{a[0], a[1], a[2]})});
+    const geom::FaceId face = editor.add_face(surface, false, tolerance).value();
+    std::array<geom::CoedgeSpec, 4> coedges{};
+    for (int i = 0; i < 4; ++i) {
+      coedges[static_cast<std::size_t>(i)] =
+          geom::CoedgeSpec{edges[loop_edges[f][i]], loop_reversed[f][i]};
+    }
+    editor.add_loop(face, coedges, true).value();
+    faces[static_cast<std::size_t>(f)] = face;
+  }
+  const geom::ShellId shell = editor.add_shell(faces, true).value();
+  const std::array<geom::ShellId, 1> shells{shell};
+  editor.add_solid(shells, tolerance).value();
+  return editor.commit().value();
+}
+
+TEST_CASE("curved boolean: torus cut by a near-axis plane is rejected quickly") {
+  const double tolerance = 1e-9;
+  // The cutting plane normal is (1, 0, 1e-10): it contains the torus axis only up
+  // to rounding. Before the 1e-12 guard this pair was accepted and the exact cut
+  // path ran for a very long time; the rejection must be immediate.
+  const geom::Result<geom::Brep> torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance);
+  REQUIRE(torus.has_value());
+  const geom::Brep slab = make_plane_slab(geom::Vec3d{1.0, 0.0, 1e-10}, tolerance);
+  REQUIRE(geom::validate_topology(slab).ok());
+  geom::CurvedBooleanReport report;
+  const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), slab, only_solid(slab),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
+  const double elapsed =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) ==
+        "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
+        "axis");
+  CHECK(report.face_pairs == 0);
+  CHECK(elapsed < 5.0);
+}
+
+TEST_CASE("curved boolean: torus cut by a near-perpendicular plane is rejected") {
+  const double tolerance = 1e-9;
+  // The axis is 5e-10 short of the exact box face normal. The exact cut path
+  // cannot represent that loop (trim_face reports "segment intersection is not
+  // representable"), so the guard must reject it instead of letting it through.
+  const double axial = 1.0 - 5e-10;
+  const double radial = std::sqrt(1.0 - axial * axial);
+  const geom::Result<geom::Brep> torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{radial, 0.0, axial}, 1.0, 0.5,
+                       tolerance);
+  const geom::Result<geom::Brep> box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(torus.has_value());
+  REQUIRE(box.has_value());
+  geom::CurvedBooleanReport report;
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), box.value(), only_solid(box.value()),
       geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
