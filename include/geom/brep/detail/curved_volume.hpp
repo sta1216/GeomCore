@@ -96,6 +96,9 @@ inline std::vector<Point2d> curved_volume_simplify_ring(const std::vector<Point2
     }
     simplified.push_back(point);
   }
+  // A ring that collapses below three vertices cannot be triangulated; keep the
+  // original sampling so a degenerate sliver fails (or passes) exactly as before.
+  if (simplified.size() < 3u) return points;
   return simplified;
 }
 

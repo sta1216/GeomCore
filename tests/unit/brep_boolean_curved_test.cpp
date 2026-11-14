@@ -944,8 +944,8 @@ TEST_CASE("curved boolean: torus cut by a 5e-13 short axis is rejected quickly")
 
 TEST_CASE("curved boolean: torus cut by a 1e-12 short axis is rejected") {
   const double tolerance = 1e-9;
-  // Boundary of the old band: 1e-12 short of perpendicular was accepted by the
-  // 8cc43af guard. Exact alignment only now, so this is rejected as well.
+  // Boundary of the old 1e-12 band: 1e-12 short of perpendicular was accepted
+  // by the 8cc43af guard. The normalized-axis 8-ulp band rejects it as well.
   const double axial = 1.0 - 1e-12;
   const double radial = std::sqrt(1.0 - axial * axial);
   const geom::Result<geom::Brep> torus =

@@ -774,3 +774,10 @@ TEST_CASE("curved_solid_volume: rejects NURBS faces") {
               geom::Errc::unsupported,
               "curved_solid_volume: NURBS surfaces are not supported");
 }
+
+TEST_CASE("curved volume: a degenerate sliver ring is kept for the triangulator") {
+  const std::vector<geom::Point2d> ring{{0.0, 0.0}, {1.0, -1e-13}, {2.0, -2e-13}, {3.0, 0.0}};
+  const std::vector<geom::Point2d> simplified =
+      geom::detail::curved_volume_simplify_ring(ring, 1e-12);
+  CHECK(simplified.size() == ring.size());
+}
