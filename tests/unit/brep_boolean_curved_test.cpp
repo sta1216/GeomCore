@@ -967,6 +967,57 @@ TEST_CASE("curved boolean: torus cut by a 1e-12 short axis is rejected") {
   CHECK(report.face_pairs == 0);
 }
 
+TEST_CASE("curved boolean: rounded unit axis still cuts the torus in half") {
+  const double tolerance = 1e-9;
+  // make_torus stores the axis unnormalized and only requires it within
+  // kAnalyticSurfaceUnitTolerance (1e-12), and even a unit axis can give a
+  // normalized dot of 1 +/- 1 ulp. This theta (hypot exactly 1.0) is the sampled
+  // case where the dot rounds below 1.0, so exact equality rejected a valid cut.
+  const double angle = 0.00013823007675795089;
+  const geom::Vec3d axis{std::cos(angle), std::sin(angle), 0.0};
+  REQUIRE(std::hypot(axis[0], axis[1]) == 1.0);
+  const geom::Result<geom::Brep> torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, axis, 1.0, 0.5, tolerance);
+  REQUIRE(torus.has_value());
+  // The slab's bottom face is the plane through the origin with the same normal,
+  // so it cuts the torus into two equal halves.
+  const geom::Brep slab = make_plane_slab(axis, tolerance);
+  REQUIRE(geom::validate_topology(slab).ok());
+  geom::CurvedBooleanReport report;
+  const geom::Result<geom::CurvedBooleanResult> half = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), slab, only_solid(slab),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
+  REQUIRE_MESSAGE(half.has_value(),
+                  (half.has_value() ? std::string_view{} : message_of(half.error())));
+  CHECK(geom::validate_topology(half.value().brep).ok());
+  CHECK(volume_of(half.value().brep) ==
+        doctest::Approx(2.4674011002723395).epsilon(1e-6));
+  CHECK(half.value().report.face_pairs >= 1);
+}
+
+TEST_CASE("curved boolean: a torus axis with a tiny norm excess still cuts") {
+  const double tolerance = 1e-9;
+  // make_torus accepts an axis only within 1e-12 of unit length but keeps it
+  // unnormalized, so the alignment dot carries the norm excess. The guard must
+  // normalize before comparing (5e-13 is far outside the 8 ulp band).
+  const geom::Result<geom::Brep> torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0 + 5e-13}, 1.0, 0.5, tolerance);
+  REQUIRE(torus.has_value());
+  const geom::Result<geom::Brep> box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(box.has_value());
+  geom::CurvedBooleanReport report;
+  const geom::Result<geom::CurvedBooleanResult> half = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), box.value(), only_solid(box.value()),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
+  REQUIRE_MESSAGE(half.has_value(),
+                  (half.has_value() ? std::string_view{} : message_of(half.error())));
+  CHECK(geom::validate_topology(half.value().brep).ok());
+  CHECK(volume_of(half.value().brep) ==
+        doctest::Approx(2.4674011002723395).epsilon(1e-6));
+  CHECK(half.value().report.face_pairs >= 1);
+}
+
 TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a box above its equator") {
   const double tolerance = 1e-9;
   const geom::Brep cylinder = make_test_cylinder(tolerance);

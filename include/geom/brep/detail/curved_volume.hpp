@@ -64,6 +64,41 @@ inline int curved_volume_subdivision_level(double max_edge) noexcept {
   return std::min(8, static_cast<int>(std::ceil(std::log2(panels))));
 }
 
+// Drops samples that sit within `tolerance` of the segment through their
+// surviving neighbours. face_loops_uv samples every edge at a fixed number of
+// segments, so a straight edge arrives as a dense run of collinear points; the
+// triangulator only removes *exactly* collinear vertices, and after a rotation
+// the projection rounding leaves those runs a few ulp off a line, which keeps
+// every sample and turns the ear clipping into a quadratic pass over thousands
+// of vertices. The tolerance is far below any real curvature over one sample
+// (a 32-segment arc of radius 0.5 deviates by ~6e-4), so this only removes
+// sampling redundancy along straight edges and leaves the integral unchanged
+// to rounding.
+inline std::vector<Point2d> curved_volume_simplify_ring(const std::vector<Point2d>& points,
+                                                        double tolerance) {
+  std::vector<Point2d> simplified;
+  simplified.reserve(points.size());
+  for (const Point2d& point : points) {
+    if (simplified.size() >= 2u) {
+      const Point2d& previous = simplified[simplified.size() - 2u];
+      const Point2d& last = simplified.back();
+      const double dx = last[0] - previous[0];
+      const double dy = last[1] - previous[1];
+      const double length = std::hypot(dx, dy);
+      if (length > 0.0) {
+        const double distance =
+            std::fabs(dx * (point[1] - previous[1]) - dy * (point[0] - previous[0])) / length;
+        if (distance <= tolerance) {
+          simplified.back() = point;
+          continue;
+        }
+      }
+    }
+    simplified.push_back(point);
+  }
+  return simplified;
+}
+
 // Signed volume of a closed solid obtained by integrating
 // (1/3) S . (S_u x S_v) over every face's uv polygon.
 //
@@ -401,10 +436,22 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
 
       Polygon2d polygon;
       polygon.ring_starts.push_back(0u);
-      const auto append_ring = [&polygon, sphere](const FaceUvLoop& loop) {
-        const std::size_t count = loop.points.size();
+      double volume_uv_scale = 1.0;
+      for (const FaceUvLoop& loop : loops) {
+        for (const Point2d& point : loop.points) {
+          volume_uv_scale =
+              std::max(volume_uv_scale, std::max(std::fabs(point[0]), std::fabs(point[1])));
+        }
+      }
+      const double simplify_tolerance = 1e-12 * volume_uv_scale;
+      const auto append_ring = [&polygon, sphere, simplify_tolerance](const FaceUvLoop& loop) {
+        const std::vector<Point2d> simplified =
+            (sphere == nullptr && loop.points.size() > 3u)
+                ? curved_volume_simplify_ring(loop.points, simplify_tolerance)
+                : loop.points;
+        const std::size_t count = simplified.size();
         for (std::size_t i = 0; i < count; ++i) {
-          const Point2d& point = loop.points[i];
+          const Point2d& point = simplified[i];
           if (sphere == nullptr) {
             polygon.vertices.push_back(point);
             continue;

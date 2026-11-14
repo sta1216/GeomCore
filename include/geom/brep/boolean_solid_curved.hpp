@@ -1404,11 +1404,16 @@ inline void curved_boolean_reverse_rings(std::vector<std::vector<Point3d>>& loop
 // circle. The exact cut path cannot represent a merely near-aligned pair, and
 // nothing here snaps: a plane 5e-13 short of perpendicular already dies in
 // trim_face ("segment intersection is not representable"), and a plane 1e-10 off
-// the axis winds through a degenerate SSI loop. So both tests are exact: the
-// normal must be exactly parallel (|n . axis| == 1 after normalizing both) or
-// exactly perpendicular (n . axis == 0) to the axis. Near-aligned planes are NOT
-// snapped and are rejected as unsupported; a plane exactly parallel to the axis
-// but offset from it, or a tilted plane, is a separate M3c-3 limitation.
+// the axis winds through a degenerate SSI loop. So alignment must be exact up to
+// floating-point rounding: the torus axis is normalized first (make_torus stores
+// it unnormalized, only within kAnalyticSurfaceUnitTolerance of unit), and the
+// dot with the normalized plane normal is compared within 8 ulp of 1
+// (perpendicular) or of 0 (axis-containing). A comparison outside that band is a
+// genuinely near-aligned plane, not a rounding artefact, and is rejected as
+// unsupported. A plane exactly parallel to the axis but offset from it, or a
+// tilted plane, is a separate M3c-3 limitation.
+constexpr double kCurvedBooleanTorusAlignmentSlack = 8.0 * std::numeric_limits<double>::epsilon();
+
 inline bool curved_boolean_torus_plane_cut_supported(const Plane3& plane, const Torus3& torus,
                                                      double tolerance) noexcept {
   const double length = std::sqrt(plane.normal[0] * plane.normal[0] +
@@ -1417,9 +1422,13 @@ inline bool curved_boolean_torus_plane_cut_supported(const Plane3& plane, const 
   if (!(length > 0.0) || !std::isfinite(length)) return false;
   const Vec3d unit{plane.normal[0] / length, plane.normal[1] / length,
                    plane.normal[2] / length};
-  const double alignment = dot(unit, torus.axis);
-  if (std::abs(alignment) == 1.0) return true;
-  if (alignment == 0.0) {
+  const double axis_norm = std::sqrt(dot(torus.axis, torus.axis));
+  if (!(axis_norm > 0.0) || !std::isfinite(axis_norm)) return false;
+  const Vec3d axis{torus.axis[0] / axis_norm, torus.axis[1] / axis_norm,
+                   torus.axis[2] / axis_norm};
+  const double alignment = dot(unit, axis);
+  if (std::abs(std::abs(alignment) - 1.0) <= kCurvedBooleanTorusAlignmentSlack) return true;
+  if (std::abs(alignment) <= kCurvedBooleanTorusAlignmentSlack) {
     return std::abs(dot(unit, split_solid_as_vec(torus.center)) - plane.offset / length) <=
            tolerance;
   }
@@ -1461,21 +1470,25 @@ inline std::vector<CircleCurve3> curved_boolean_pair_circles(
   }
   const Torus3* torus = std::get_if<Torus3>(other);
   if (torus == nullptr || !torus->is_valid()) return circles;
-  const double alignment = dot(unit, torus->axis);
+  const double axis_norm = std::sqrt(dot(torus->axis, torus->axis));
+  if (!(axis_norm > 0.0) || !std::isfinite(axis_norm)) return circles;
+  const Vec3d axis{torus->axis[0] / axis_norm, torus->axis[1] / axis_norm,
+                   torus->axis[2] / axis_norm};
+  const double alignment = dot(unit, axis);
   const double distance = dot(unit, split_solid_as_vec(torus->center)) - offset;
-  // Both orientation tests require exact alignment, matching the cut-plane guard,
-  // so the circles agree with the pairs the boolean accepts; there is no snapping
-  // band.
-  if (alignment == 0.0) {
+  // Same normalized axis and 8 ulp band as the cut-plane guard, so the circles
+  // agree with the pairs the boolean accepts; there is no geometric snapping, so
+  // a plane outside the band still gets no circles.
+  if (std::abs(alignment) <= kCurvedBooleanTorusAlignmentSlack) {
     // The cutting plane contains the torus axis. It meets the tube exactly at
     // the two cross-sections whose tube centre lies in the plane, and each of
     // those is a full minor circle of the tube, centred at centre +/- R * d
     // where d is the in-plane direction perpendicular to the axis. A plane that
     // is parallel but offset from the axis misses those circles entirely.
     if (!(std::abs(distance) <= tolerance)) return circles;
-    const Vec3d d = split_solid_unit(cross(torus->axis, unit));
+    const Vec3d d = split_solid_unit(cross(axis, unit));
     if (!(norm2(d) > 0.5)) return circles;
-    const Vec3d x_axis = split_solid_unit(torus->axis);
+    const Vec3d x_axis = split_solid_unit(axis);
     const Vec3d y_axis = split_solid_unit(cross(unit, x_axis));
     for (const double side : {1.0, -1.0}) {
       const Point3d center = torus->center + d * (side * torus->major_radius);
@@ -1484,7 +1497,7 @@ inline std::vector<CircleCurve3> curved_boolean_pair_circles(
     }
     return circles;
   }
-  if (std::abs(alignment) != 1.0) return circles;
+  if (std::abs(std::abs(alignment) - 1.0) > kCurvedBooleanTorusAlignmentSlack) return circles;
   // Signed distance of the torus centre from the cutting plane; the tube circle
   // reaches the plane only when |distance| < minor radius.
   const double tube = torus->minor_radius * torus->minor_radius - distance * distance;
