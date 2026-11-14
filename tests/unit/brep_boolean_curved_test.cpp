@@ -560,8 +560,8 @@ TEST_CASE("curved boolean: torus and half space") {
   const geom::Result<geom::CurvedBooleanResult> half = geom::boolean_solid_curved(
       torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(half.has_value(), "boolean_solid_curved failed: "
-                                        << message_of(half.error()));
+  REQUIRE_MESSAGE(half.has_value(),
+                  (half.has_value() ? std::string_view{} : message_of(half.error())));
   CHECK(half.value().report.max_cut_residual <= 1e-3);
   CHECK(geom::validate_topology(half.value().brep).ok());
   CHECK(volume_of(half.value().brep) ==
@@ -583,8 +583,8 @@ TEST_CASE("curved boolean: torus cut across the v seam") {
   const geom::Result<geom::CurvedBooleanResult> half = geom::boolean_solid_curved(
       torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(half.has_value(), "boolean_solid_curved failed: "
-                                        << message_of(half.error()));
+  REQUIRE_MESSAGE(half.has_value(),
+                  (half.has_value() ? std::string_view{} : message_of(half.error())));
   CHECK(geom::validate_topology(half.value().brep).ok());
   CHECK(volume_of(half.value().brep) ==
         doctest::Approx(2.4674011002723395).epsilon(1e-6));
@@ -606,8 +606,8 @@ TEST_CASE("curved boolean: torus minus half space") {
   const geom::Result<geom::CurvedBooleanResult> half = geom::boolean_solid_curved(
       torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::difference,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(half.has_value(), "boolean_solid_curved failed: "
-                                        << message_of(half.error()));
+  REQUIRE_MESSAGE(half.has_value(),
+                  (half.has_value() ? std::string_view{} : message_of(half.error())));
   CHECK(geom::validate_topology(half.value().brep).ok());
 }
 
@@ -626,11 +626,122 @@ TEST_CASE("curved boolean: a box that contains a torus keeps it whole") {
   const geom::Result<geom::CurvedBooleanResult> whole = geom::boolean_solid_curved(
       torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(whole.has_value(), "boolean_solid_curved failed: "
-                                         << message_of(whole.error()));
+  REQUIRE_MESSAGE(whole.has_value(),
+                  (whole.has_value() ? std::string_view{} : message_of(whole.error())));
   CHECK(geom::validate_topology(whole.value().brep).ok());
   CHECK(volume_of(whole.value().brep) ==
         doctest::Approx(4.934802200544679).epsilon(1e-6));
+}
+
+// A closed slab whose bottom face is the tilted plane z = 0.3 x. The shear keeps
+// every face planar and the shell closed, so the driver can reach its torus cut
+// plane check instead of failing on the operand itself. Only the bottom face
+// overlaps the torus, which makes the rejection deterministic.
+geom::Brep make_tilted_slab(double tolerance) {
+  const double slope = 0.3;
+  const geom::Point3d corners[8] = {
+      {-4.0, -4.0, 0.0 + slope * -4.0}, {4.0, -4.0, 0.0 + slope * 4.0},
+      {4.0, 4.0, 0.0 + slope * 4.0},    {-4.0, 4.0, 0.0 + slope * -4.0},
+      {-4.0, -4.0, 4.0 + slope * -4.0}, {4.0, -4.0, 4.0 + slope * 4.0},
+      {4.0, 4.0, 4.0 + slope * 4.0},    {-4.0, 4.0, 4.0 + slope * -4.0},
+  };
+  geom::SolidEditor editor;
+  geom::VertexId vertices[8];
+  for (int i = 0; i < 8; ++i) {
+    vertices[i] = editor.add_vertex(corners[i], tolerance).value();
+  }
+  const int edge_specs[12][2] = {{0, 1}, {1, 2}, {2, 3},  {3, 0},  {4, 5}, {5, 6},
+                                 {6, 7}, {7, 4}, {1, 5},  {2, 6},  {3, 7}, {0, 4}};
+  geom::EdgeId edges[12];
+  for (int i = 0; i < 12; ++i) {
+    const geom::Point3d from = corners[edge_specs[i][0]];
+    const geom::Point3d to = corners[edge_specs[i][1]];
+    const geom::Vec3d delta = to - from;
+    const double length = std::hypot(delta[0], delta[1], delta[2]);
+    const geom::Vec3d direction{delta[0] / length, delta[1] / length, delta[2] / length};
+    const std::uint32_t curve = editor.add_curve(geom::LineCurve3{from, direction});
+    edges[i] = editor.add_edge(vertices[edge_specs[i][0]], vertices[edge_specs[i][1]], curve,
+                               0.0, length, tolerance)
+                   .value();
+  }
+  const double side = std::sqrt(0.09 + 1.0);
+  const geom::Vec3d bottom_normal{0.3 / side, 0.0, -1.0 / side};
+  const geom::Vec3d top_normal{-0.3 / side, 0.0, 1.0 / side};
+  struct FaceSpec {
+    geom::Vec3d normal;
+    int corner;
+    int loop[4];
+    bool reversed[4];
+  };
+  const FaceSpec face_specs[6] = {
+      {bottom_normal, 0, {3, 2, 1, 0}, {true, true, true, true}},
+      {top_normal, 4, {4, 5, 6, 7}, {false, false, false, false}},
+      {{0.0, -1.0, 0.0}, 0, {0, 8, 4, 11}, {false, false, true, true}},
+      {{0.0, 1.0, 0.0}, 2, {2, 10, 6, 9}, {false, false, true, true}},
+      {{-1.0, 0.0, 0.0}, 0, {11, 7, 10, 3}, {false, true, true, false}},
+      {{1.0, 0.0, 0.0}, 1, {1, 9, 5, 8}, {false, false, true, true}},
+  };
+  std::array<geom::FaceId, 6> faces{};
+  int face_index = 0;
+  for (const FaceSpec& spec : face_specs) {
+    const geom::Point3d corner = corners[spec.corner];
+    const std::uint32_t surface = editor.add_surface(geom::Plane3{
+        spec.normal,
+        geom::dot(spec.normal, geom::Vec3d{corner[0], corner[1], corner[2]})});
+    const geom::FaceId face = editor.add_face(surface, false, tolerance).value();
+    std::array<geom::CoedgeSpec, 4> coedges{};
+    for (int i = 0; i < 4; ++i) {
+      coedges[static_cast<std::size_t>(i)] = geom::CoedgeSpec{
+          edges[spec.loop[i]], spec.reversed[i]};
+    }
+    editor.add_loop(face, coedges, true).value();
+    faces[static_cast<std::size_t>(face_index++)] = face;
+  }
+  const geom::ShellId shell = editor.add_shell(faces, true).value();
+  const std::array<geom::ShellId, 1> shells{shell};
+  editor.add_solid(shells, tolerance).value();
+  return editor.commit().value();
+}
+
+TEST_CASE("curved boolean: torus cut by an offset parallel plane is rejected") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance);
+  const geom::Result<geom::Brep> box =
+      geom::make_box(geom::Point3d{0.2, -2.0, -2.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(torus.has_value());
+  REQUIRE(box.has_value());
+  geom::CurvedBooleanReport report;
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), box.value(), only_solid(box.value()),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) ==
+        "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
+        "axis");
+  CHECK(report.face_pairs == 0);
+}
+
+TEST_CASE("curved boolean: torus cut by a tilted plane is rejected") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance);
+  REQUIRE(torus.has_value());
+  const geom::Brep slab = make_tilted_slab(tolerance);
+  REQUIRE(geom::validate_topology(slab).ok());
+  geom::CurvedBooleanReport report;
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), slab, only_solid(slab),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) ==
+        "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
+        "axis");
+  CHECK(report.face_pairs == 0);
 }
 
 TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a box above its equator") {

@@ -1397,6 +1397,30 @@ inline void curved_boolean_reverse_rings(std::vector<std::vector<Point3d>>& loop
   }
 }
 
+// A torus is only cuttable by planes whose cut loops the periodic charts can
+// represent: a plane perpendicular to the axis closes the loop around the tube in
+// both charts, and a plane that contains the axis closes it around a minor
+// circle. A plane parallel to the axis but offset from it, or a tilted plane,
+// produces a loop that winds or leaves the v window without a representable
+// seam-crossing chain. Rejecting those pairs up front keeps the diagnostic
+// explicit; offset-parallel and tilted planes are M3c-3 work.
+inline bool curved_boolean_torus_plane_cut_supported(const Plane3& plane, const Torus3& torus,
+                                                     double tolerance) noexcept {
+  const double length = std::sqrt(plane.normal[0] * plane.normal[0] +
+                                  plane.normal[1] * plane.normal[1] +
+                                  plane.normal[2] * plane.normal[2]);
+  if (!(length > 0.0) || !std::isfinite(length)) return false;
+  const Vec3d unit{plane.normal[0] / length, plane.normal[1] / length,
+                   plane.normal[2] / length};
+  const double alignment = dot(unit, torus.axis);
+  if (std::abs(alignment) >= 1.0 - 1e-9) return true;
+  if (std::abs(alignment) <= 1e-9) {
+    return std::abs(dot(unit, split_solid_as_vec(torus.center)) - plane.offset / length) <=
+           tolerance;
+  }
+  return false;
+}
+
 // The exact circles in which a face pair meets. A plane and a cylinder or a
 // sphere with a parallel axis meet in one circle; a plane perpendicular to a
 // torus axis meets the tube in two concentric circles of radius R +/- sqrt(r^2 -
@@ -1433,11 +1457,14 @@ inline std::vector<CircleCurve3> curved_boolean_pair_circles(
   const Torus3* torus = std::get_if<Torus3>(other);
   if (torus == nullptr || !torus->is_valid()) return circles;
   const double alignment = dot(unit, torus->axis);
-  if (std::abs(alignment) <= 1e-12) {
+  const double distance = dot(unit, split_solid_as_vec(torus->center)) - offset;
+  if (std::abs(alignment) <= 1e-9) {
     // The cutting plane contains the torus axis. It meets the tube exactly at
     // the two cross-sections whose tube centre lies in the plane, and each of
     // those is a full minor circle of the tube, centred at centre +/- R * d
-    // where d is the in-plane direction perpendicular to the axis.
+    // where d is the in-plane direction perpendicular to the axis. A plane that
+    // is parallel but offset from the axis misses those circles entirely.
+    if (!(std::abs(distance) <= tolerance)) return circles;
     const Vec3d d = split_solid_unit(cross(torus->axis, unit));
     if (!(norm2(d) > 0.5)) return circles;
     const Vec3d x_axis = split_solid_unit(torus->axis);
@@ -1449,10 +1476,9 @@ inline std::vector<CircleCurve3> curved_boolean_pair_circles(
     }
     return circles;
   }
-  if (!(std::abs(alignment) >= 1.0 - 1e-12)) return circles;
+  if (!(std::abs(alignment) >= 1.0 - 1e-9)) return circles;
   // Signed distance of the torus centre from the cutting plane; the tube circle
   // reaches the plane only when |distance| < minor radius.
-  const double distance = dot(unit, split_solid_as_vec(torus->center)) - offset;
   const double tube = torus->minor_radius * torus->minor_radius - distance * distance;
   if (!(tube > tolerance * tolerance)) return circles;
   const double lift = std::sqrt(tube);
@@ -1719,6 +1745,34 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
   std::vector<std::vector<FaceCut>> cuts_b(infos_b.size());
   std::vector<std::vector<CircleCurve3>> circles_a(infos_a.size());
   std::vector<std::vector<CircleCurve3>> circles_b(infos_b.size());
+
+  // A torus can only be cut by a plane that is perpendicular to its axis or
+  // contains it; any other orientation has no representable cut loops (see the
+  // helper above). Reject such a pair before face pairing, so the caller gets
+  // this diagnostic instead of a trim failure on a later fragment or a result
+  // that silently loses the torus side fragments.
+  for (std::size_t ia = 0; ia < infos_a.size(); ++ia) {
+    for (std::size_t ib = 0; ib < infos_b.size(); ++ib) {
+      const detail::CurvedBooleanFaceInfo& face_a = infos_a[ia];
+      const detail::CurvedBooleanFaceInfo& face_b = infos_b[ib];
+      if (!detail::curved_boolean_bounds_overlap(face_a.bounds, face_b.bounds, tolerance)) {
+        continue;
+      }
+      const Torus3* torus = std::get_if<Torus3>(face_a.surface);
+      const Plane3* plane = std::get_if<Plane3>(face_b.surface);
+      if (torus == nullptr) {
+        torus = std::get_if<Torus3>(face_b.surface);
+        plane = std::get_if<Plane3>(face_a.surface);
+      }
+      if (torus == nullptr || plane == nullptr) continue;
+      if (detail::curved_boolean_torus_plane_cut_supported(*plane, *torus, tolerance)) continue;
+      record_failure();
+      return Error{Errc::unsupported,
+                   "boolean_solid_curved: torus cut plane must be perpendicular to or contain "
+                   "the torus axis",
+                   face_a.id.index(), face_b.id.index()};
+    }
+  }
 
   for (std::size_t ia = 0; ia < infos_a.size(); ++ia) {
     for (std::size_t ib = 0; ib < infos_b.size(); ++ib) {
