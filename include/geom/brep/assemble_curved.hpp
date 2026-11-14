@@ -609,10 +609,14 @@ inline Result<Brep> assemble_curved_impl(std::span<const CurvedAssembledFace> fa
   }
 
   // Step 4: group the uses by undirected key and check that every edge is
-  // shared by exactly two compatible pieces.
+  // shared by exactly two compatible pieces. A closed arc can start and end at
+  // the same vertex, and two different circles (the outer equator and the tube
+  // circle of a torus) can share that one seam vertex, so a key may hold several
+  // distinct edges: arc uses only join a slot on the same circle, straight uses
+  // only a straight slot.
   std::vector<assemble_curved_use> uses;
   std::vector<assemble_curved_edge_slot> edges;
-  std::unordered_map<std::uint64_t, std::size_t> edge_of_key;
+  std::unordered_map<std::uint64_t, std::vector<std::size_t>> edges_of_key;
   for (std::size_t f = 0; f < faces.size(); ++f) {
     for (std::size_t l = 0; l < layouts[f].size(); ++l) {
       for (std::size_t p = 0; p < layouts[f][l].size(); ++p) {
@@ -626,9 +630,42 @@ inline Result<Brep> assemble_curved_impl(std::span<const CurvedAssembledFace> fa
         use.arc = piece.arc;
         use.sweep = piece.sweep;
         const std::uint64_t key = assemble_curved_edge_key(piece.v0, piece.v1);
-        const auto found = edge_of_key.find(key);
-        if (found == edge_of_key.end()) {
-          use.edge = edges.size();
+        std::size_t edge = edges.size();
+        const auto found = edges_of_key.find(key);
+        if (found != edges_of_key.end()) {
+          for (const std::size_t candidate : found->second) {
+            const assemble_curved_edge_slot& slot = edges[candidate];
+            if (slot.arc != piece.arc) continue;
+            if (piece.arc) {
+              if (!assemble_curved_same_circle(slot.circle, piece.circle, tolerance)) continue;
+              // Two parallel arcs can join the same pair of vertices on one
+              // circle (a closed rim split at a welded vertex yields a long and
+              // a short arc). They are distinct edges, so the spans must match.
+              const double sweep_tolerance =
+                  std::max(1e-12, 4.0 * tolerance / std::max(slot.circle.radius, 1e-12));
+              if (!(std::abs(std::abs(piece.sweep) - std::abs(slot.sweep)) <= sweep_tolerance)) {
+                continue;
+              }
+            }
+            edge = candidate;
+            break;
+          }
+        }
+        if (edge == edges.size()) {
+          // No slot on this key accepts the piece. If the key already holds an
+          // edge of the other kind, attach to it so the compatibility checks
+          // below report the mismatch (an arc shared with a chord) instead of
+          // leaving two half-used edges behind.
+          if (found != edges_of_key.end()) {
+            for (const std::size_t candidate : found->second) {
+              if (edges[candidate].arc != piece.arc) {
+                edge = candidate;
+                break;
+              }
+            }
+          }
+        }
+        if (edge == edges.size()) {
           assemble_curved_edge_slot slot;
           slot.v0 = piece.v0;
           slot.v1 = piece.v1;
@@ -636,10 +673,9 @@ inline Result<Brep> assemble_curved_impl(std::span<const CurvedAssembledFace> fa
           slot.sweep = piece.sweep;
           slot.circle = piece.circle;
           edges.push_back(slot);
-          edge_of_key.emplace(key, use.edge);
-        } else {
-          use.edge = found->second;
+          edges_of_key[key].push_back(edge);
         }
+        use.edge = edge;
         piece.use = uses.size();
         uses.push_back(use);
         edges[use.edge].uses.push_back(uses.size() - 1);
@@ -671,7 +707,21 @@ inline Result<Brep> assemble_curved_impl(std::span<const CurvedAssembledFace> fa
           return Error{Errc::invalid_topology,
                        "assemble_curved_solid: shared edge curve mismatch", 0u, 0u};
         }
-        use.reversed = (piece.sweep < 0.0) != (slot.sweep < 0.0);
+        // The sweep sign is measured against the piece's own circle frame, and
+        // two faces may describe the same circle with anti-parallel normals
+        // (same_circle above accepts that). Fold the frame alignment in before
+        // comparing directions, otherwise a shared arc traversed oppositely on
+        // the two faces looks like two forward runs.
+        Vec3d slot_normal{0.0, 0.0, 0.0};
+        Vec3d piece_normal{0.0, 0.0, 0.0};
+        const bool slot_has_normal = assemble_curved_circle_normal(slot.circle, slot_normal);
+        const bool piece_has_normal = assemble_curved_circle_normal(piece.circle, piece_normal);
+        const double alignment =
+            slot_has_normal && piece_has_normal ? dot(piece_normal, slot_normal) : 1.0;
+        const double piece_direction =
+            (piece.sweep < 0.0 ? -1.0 : 1.0) * (alignment >= 0.0 ? 1.0 : -1.0);
+        const double slot_direction = slot.sweep < 0.0 ? -1.0 : 1.0;
+        use.reversed = piece_direction != slot_direction;
       } else {
         use.reversed = use.v0 != slot.v0;
       }

@@ -545,24 +545,92 @@ TEST_CASE("curved boolean: sphere operands are rejected with the cap diagnostic"
   }
 }
 
-TEST_CASE("brep: boolean_solid_curved defers torus operands") {
+TEST_CASE("curved boolean: torus and half space") {
   const double tolerance = 1e-9;
   const geom::Result<geom::Brep> torus_result =
-      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 2.0, 0.5,
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
                        tolerance);
+  const geom::Result<geom::Brep> box_result =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
   REQUIRE(torus_result.has_value());
+  REQUIRE(box_result.has_value());
   const geom::Brep& torus = torus_result.value();
-  REQUIRE(geom::validate_topology(torus).ok());
-  const geom::Brep box =
-      geom::make_box(geom::Point3d{-5.0, -5.0, -5.0}, geom::Point3d{5.0, 5.0, 5.0}, tolerance)
-          .value();
+  const geom::Brep& box = box_result.value();
 
-  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
-      torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::union_,
+  const geom::Result<geom::CurvedBooleanResult> half = geom::boolean_solid_curved(
+      torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE(!result.has_value());
-  CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) == "boolean_solid_curved: torus operands are deferred to M3c");
+  REQUIRE_MESSAGE(half.has_value(), "boolean_solid_curved failed: "
+                                        << message_of(half.error()));
+  CHECK(half.value().report.max_cut_residual <= 1e-3);
+  CHECK(geom::validate_topology(half.value().brep).ok());
+  CHECK(volume_of(half.value().brep) ==
+        doctest::Approx(2.4674011002723395).epsilon(1e-6));
+}
+
+TEST_CASE("curved boolean: torus cut across the v seam") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> torus_result =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance);
+  const geom::Result<geom::Brep> box_result =
+      geom::make_box(geom::Point3d{0.0, -2.0, -2.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(torus_result.has_value());
+  REQUIRE(box_result.has_value());
+  const geom::Brep& torus = torus_result.value();
+  const geom::Brep& box = box_result.value();
+
+  const geom::Result<geom::CurvedBooleanResult> half = geom::boolean_solid_curved(
+      torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::intersection,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(half.has_value(), "boolean_solid_curved failed: "
+                                        << message_of(half.error()));
+  CHECK(geom::validate_topology(half.value().brep).ok());
+  CHECK(volume_of(half.value().brep) ==
+        doctest::Approx(2.4674011002723395).epsilon(1e-6));
+  CHECK(half.value().report.max_cut_residual <= 1e-3);
+}
+
+TEST_CASE("curved boolean: torus minus half space") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> torus_result =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance);
+  const geom::Result<geom::Brep> box_result =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(torus_result.has_value());
+  REQUIRE(box_result.has_value());
+  const geom::Brep& torus = torus_result.value();
+  const geom::Brep& box = box_result.value();
+
+  const geom::Result<geom::CurvedBooleanResult> half = geom::boolean_solid_curved(
+      torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::difference,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(half.has_value(), "boolean_solid_curved failed: "
+                                        << message_of(half.error()));
+  CHECK(geom::validate_topology(half.value().brep).ok());
+}
+
+TEST_CASE("curved boolean: a box that contains a torus keeps it whole") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> torus_result =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance);
+  const geom::Result<geom::Brep> box_result =
+      geom::make_box(geom::Point3d{-2.0, -2.0, -2.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(torus_result.has_value());
+  REQUIRE(box_result.has_value());
+  const geom::Brep& torus = torus_result.value();
+  const geom::Brep& box = box_result.value();
+
+  const geom::Result<geom::CurvedBooleanResult> whole = geom::boolean_solid_curved(
+      torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::intersection,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(whole.has_value(), "boolean_solid_curved failed: "
+                                         << message_of(whole.error()));
+  CHECK(geom::validate_topology(whole.value().brep).ok());
+  CHECK(volume_of(whole.value().brep) ==
+        doctest::Approx(4.934802200544679).epsilon(1e-6));
 }
 
 TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a box above its equator") {
@@ -899,7 +967,7 @@ TEST_CASE("brep: collapse_circular_chains heals a rim run beside the cut corner"
   }
   CHECK(keeps_corner);
 }
-// The QA corpus: six positive cases with independently derived volumes and six
+// The QA corpus: six positive cases with independently derived volumes and five
 // diagnosed rejections. The positive volumes are
 //   I = pi/6 + sqrt(3)/4 - 1/2                  (offset-cap footprint, unit tall)
 //   offset box [0.5, 2] x [-0.5, 0.5] x [0.5, 1.5] on the unit cylinder:
@@ -953,7 +1021,6 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
   // documents:
   //   sphere   "boolean_solid_curved: sphere operands need cap topology;
   //             booleans are deferred to M3c-3"
-  //   torus    "boolean_solid_curved: torus operands are deferred to M3c"
   //   cone     "boolean_solid_curved: cone operands are not supported
   //             (apex-touching loops are deferred)"
   //   NURBS    "boolean_solid_curved: NURBS operands are not supported"
@@ -961,10 +1028,6 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
   //   coplanar "boolean_solid_curved: coplanar face contact is not supported yet"
   const geom::Brep sphere =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 2.0, tolerance).value();
-  const geom::Brep torus =
-      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 2.0, 0.5,
-                       tolerance)
-          .value();
   const geom::Brep cone =
       geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 1.0,
                       tolerance)
@@ -990,12 +1053,10 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
     geom::SolidBooleanOp op;
     const char* message;
   };
-  const std::array<RejectionCase, 6> rejections{{
+  const std::array<RejectionCase, 5> rejections{{
       {"sphere box", &sphere, &wide_box, geom::SolidBooleanOp::union_,
        "boolean_solid_curved: sphere operands need cap topology; booleans are deferred to "
        "M3c-3"},
-      {"torus box", &torus, &wide_box, geom::SolidBooleanOp::union_,
-       "boolean_solid_curved: torus operands are deferred to M3c"},
       {"cone box", &cone, &wide_box, geom::SolidBooleanOp::union_,
        "boolean_solid_curved: cone operands are not supported (apex-touching loops are "
        "deferred)"},
