@@ -29,6 +29,7 @@ M3c-2 covers **torus and cone operands of `boolean_solid_curved`**, plus the pol
 2. **Synthetic parameter boundary.** For a seam-only face the splitter synthesizes the missing rectangle of the parameter domain (`u ∈ [u0,u0+2π]`, `v ∈ [v_lo,v_hi]`), runs the existing arrangement, then strips every chain that came from the synthetic seam/pole edges and closes the remaining cut chain by 3D endpoint identity. The synthetic edges never appear in `CurvedFragment::loops`, so assembly sees only real cut edges.
 3. **Torus cuts stay chordal.** There is no exact torus/plane or torus/cylinder healing (the intersection is quartic in general). Quality is reported by `CurvedBooleanReport::max_cut_residual`; the tests require it below `1e-3` for the chosen corpus.
 4. **Cone support is plane/cylinder cuts**, including cuts through the apex; cuts tangent to the apex or to the base rim remain `unsupported`.
+4b. **Torus cut planes are restricted to axis-perpendicular or axis-containing planes.** A torus/plane pair whose plane is neither (offset-parallel or tilted) is rejected before pairing with `unsupported "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus axis"`; offset-parallel and tilted cuts are M3c-3.
 5. **No trimmed tessellation of boolean results in this milestone.** QA-14 checks topology, closedness, volume and determinism; tessellating a result face with a non-rectilinear boundary is M3c-3 work (M3c-1 explicitly rejects those with `"... boundary is not rectilinear"`).
 
 ## Review Focus (feed these to every reviewer)
@@ -417,7 +418,7 @@ TEST_CASE("curved boolean: sphere operands are rejected with the cap diagnostic"
 - Test: `tests/unit/brep_boolean_curved_test.cpp`
 
 **Interfaces:**
-- Produces: `curved_boolean_split_at_seam(..., int axis)` where `axis == 0` splits on u and `axis == 1` on v; call sites pass `detail::FaceUvProjection::periodic_v() ? 1 : 0`. After unwrapping, chains are shifted by whole periods into `[0,2π]` on each periodic axis. Chains that lie entirely on a synthetic seam-only rectangle side are dropped before splitting. `assemble_curved_edge_key` distinguishes circles by centre, normal and radius, not just endpoints.
+- Produces: `curved_boolean_split_at_seam(..., int axis)` where `axis == 0` splits on u and `axis == 1` on v; call sites pass `detail::FaceUvProjection::periodic_v() ? 1 : 0`. After unwrapping, chains are shifted by whole periods into `[0,2π]` on each periodic axis. Chains that lie entirely on a synthetic seam-only rectangle side are dropped before splitting. Torus/plane pairs outside the axis-perpendicular/axis-containing restriction return the documented `unsupported` message before pairing.
 
 - [ ] **Step 1: Write the failing tests**
 
