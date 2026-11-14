@@ -911,6 +911,62 @@ TEST_CASE("curved boolean: torus cut by a near-perpendicular plane is rejected")
   CHECK(report.face_pairs == 0);
 }
 
+TEST_CASE("curved boolean: torus cut by a 5e-13 short axis is rejected quickly") {
+  const double tolerance = 1e-9;
+  // This is the accepted side of the old 1e-12 band: 5e-13 short of perpendicular.
+  // No snapping exists, so the exact cut path still dies in trim_face; the guard
+  // must reject the pair immediately (this case took the full suite down at
+  // 8cc43af with "segment intersection is not representable").
+  const double axial = 1.0 - 5e-13;
+  const double radial = std::sqrt(1.0 - axial * axial);
+  const geom::Result<geom::Brep> torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{radial, 0.0, axial}, 1.0, 0.5,
+                       tolerance);
+  const geom::Result<geom::Brep> box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(torus.has_value());
+  REQUIRE(box.has_value());
+  geom::CurvedBooleanReport report;
+  const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), box.value(), only_solid(box.value()),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
+  const double elapsed =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) ==
+        "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
+        "axis");
+  CHECK(report.face_pairs == 0);
+  CHECK(elapsed < 5.0);
+}
+
+TEST_CASE("curved boolean: torus cut by a 1e-12 short axis is rejected") {
+  const double tolerance = 1e-9;
+  // Boundary of the old band: 1e-12 short of perpendicular was accepted by the
+  // 8cc43af guard. Exact alignment only now, so this is rejected as well.
+  const double axial = 1.0 - 1e-12;
+  const double radial = std::sqrt(1.0 - axial * axial);
+  const geom::Result<geom::Brep> torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{radial, 0.0, axial}, 1.0, 0.5,
+                       tolerance);
+  const geom::Result<geom::Brep> box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(torus.has_value());
+  REQUIRE(box.has_value());
+  geom::CurvedBooleanReport report;
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), box.value(), only_solid(box.value()),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) ==
+        "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
+        "axis");
+  CHECK(report.face_pairs == 0);
+}
+
 TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a box above its equator") {
   const double tolerance = 1e-9;
   const geom::Brep cylinder = make_test_cylinder(tolerance);
