@@ -1797,11 +1797,27 @@ inline Result<std::optional<CurvedBooleanRebasedSpheres>> curved_boolean_rechart
                  "boolean_solid_curved: sphere/sphere booleans need two crossing spheres",
                  a_solid.index(), b_solid.index()};
   }
-  const Vec3d axis{delta[0] / distance, delta[1] / distance, delta[2] / distance};
+  const Vec3d unit{delta[0] / distance, delta[1] / distance, delta[2] / distance};
+  // The rebuilt charts can only put their poles on a coordinate axis; anything
+  // else would leave the two seams on unrelated meridians.
+  int dominant = 0;
+  for (int i = 1; i < 3; ++i) {
+    if (std::abs(unit[i]) > std::abs(unit[dominant])) dominant = i;
+  }
+  constexpr double kAxisAlignment = 1.0 - 1e-12;
+  if (std::abs(unit[dominant]) < kAxisAlignment) {
+    return Error{Errc::unsupported,
+                 "boolean_solid_curved: sphere/sphere placement is not axis-aligned; "
+                 "general placements are deferred to M3c-3c",
+                 a_solid.index(), b_solid.index()};
+  }
+  Vec3d axis{0.0, 0.0, 0.0};
+  axis[dominant] = unit[dominant] < 0.0 ? -1.0 : 1.0;
   const Vec3d negated_axis{-axis[0], -axis[1], -axis[2]};
   constexpr double kAxisAgreement = 8.0 * std::numeric_limits<double>::epsilon();
   if (std::abs(dot(first.axis, axis) - 1.0) <= kAxisAgreement &&
-      std::abs(dot(second.axis, negated_axis) - 1.0) <= kAxisAgreement) {
+      std::abs(dot(second.axis, negated_axis) - 1.0) <= kAxisAgreement &&
+      std::abs(dot(first.x_axis, second.x_axis) - 1.0) <= kAxisAgreement) {
     return not_a_rechart;
   }
   // Same deterministic shared frame as the sphere/sphere cut circle: the

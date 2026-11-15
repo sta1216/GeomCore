@@ -276,6 +276,30 @@ geom::SolidId only_solid(const geom::Brep& brep) {
 
 std::string_view message_of(const geom::Error& error) { return std::string_view(error.message); }
 
+// Structural fingerprint of an operand. The sphere/sphere tests compare one
+// before and after a rejected boolean so a diagnostic cannot quietly re-chart or
+// otherwise mutate its inputs.
+struct BrepFingerprint {
+  double volume = 0.0;
+  std::size_t vertices = 0;
+  std::size_t edges = 0;
+  std::size_t faces = 0;
+  std::size_t shells = 0;
+  std::size_t solids = 0;
+  bool operator==(const BrepFingerprint& other) const = default;
+};
+
+BrepFingerprint fingerprint_of(const geom::Brep& brep) {
+  BrepFingerprint result;
+  result.volume = volume_of(brep);
+  result.vertices = brep.vertex_ids().size();
+  result.edges = brep.edge_ids().size();
+  result.faces = brep.face_ids().size();
+  result.solids = brep.solid_ids().size();
+  result.shells = brep.solid_shells(brep.solid_ids().front()).size();
+  return result;
+}
+
 // Signed chart volume of a solid built only from spherical faces. Task 5 also
 // uses this helper, so it stays test-local and generic. Each spherical face must
 // be a polar cap in its own chart: its single uv loop has to reach a pole
@@ -1879,6 +1903,8 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance).value();
   const geom::Brep unit_b =
       geom::make_sphere(geom::Point3d{1.5, 0.0, 0.0}, 1.0, tolerance).value();
+  const BrepFingerprint unit_a_before = fingerprint_of(unit_a);
+  const BrepFingerprint unit_b_before = fingerprint_of(unit_b);
 
   // Two equal spherical caps of height h = r - d / 2 = 0.25 meet at the rim.
   const geom::Result<geom::CurvedBooleanResult> lens = geom::boolean_solid_curved(
@@ -1913,26 +1939,45 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
     CHECK(std::abs(min_v - rim_latitude) <= 1e-9);
   }
 
-  struct Fingerprint {
-    double volume = 0.0;
-    std::size_t vertices = 0;
-    std::size_t edges = 0;
-    std::size_t faces = 0;
-    std::size_t shells = 0;
-    std::size_t solids = 0;
-    bool operator==(const Fingerprint& other) const = default;
-  };
-  const auto fingerprint = [](const geom::Brep& brep) {
-    Fingerprint result;
-    result.volume = volume_of(brep);
-    result.vertices = brep.vertex_ids().size();
-    result.edges = brep.edge_ids().size();
-    result.faces = brep.face_ids().size();
-    result.solids = brep.solid_ids().size();
-    result.shells = brep.solid_shells(brep.solid_ids().front()).size();
-    return result;
-  };
-  const Fingerprint unit_a_before = fingerprint(unit_a);
+  // The output carries the re-charted frame, not the operands' canonical +z
+  // charts: A's cap is on +x, B's on -x, and both share one x-axis meridian.
+  std::vector<const geom::Sphere3*> cap_surfaces;
+  for (const geom::FaceId face_id : lens.value().brep.face_ids()) {
+    const geom::Face& face = lens.value().brep.face(face_id);
+    const geom::SurfaceGeometry& surface = lens.value().brep.geometry().surfaces[face.surface];
+    const geom::Sphere3* sphere = std::get_if<geom::Sphere3>(&surface);
+    REQUIRE_MESSAGE(sphere != nullptr, "a lens face is not on a sphere");
+    cap_surfaces.push_back(sphere);
+  }
+  REQUIRE(cap_surfaces.size() == 2);
+  const geom::Vec3d plus_x{1.0, 0.0, 0.0};
+  const geom::Vec3d minus_x{-1.0, 0.0, 0.0};
+  const bool first_is_plus =
+      std::abs(geom::dot(cap_surfaces[0]->axis, plus_x) - 1.0) <= 1e-12;
+  const bool first_is_minus =
+      std::abs(geom::dot(cap_surfaces[0]->axis, minus_x) - 1.0) <= 1e-12;
+  CHECK(first_is_plus != first_is_minus);
+  CHECK(std::abs(geom::dot(cap_surfaces[0]->x_axis, cap_surfaces[1]->x_axis) - 1.0) <= 1e-12);
+  CHECK(std::abs(geom::dot(cap_surfaces[1]->axis, first_is_plus ? minus_x : plus_x) - 1.0) <=
+        1e-12);
+
+  // The two caps are stitched on one rim edge used in opposite senses; each
+  // seam edge is a doubled use on a single face.
+  std::optional<geom::EdgeId> rim_edge;
+  for (const geom::EdgeId edge_id : lens.value().brep.edge_ids()) {
+    std::vector<const geom::Coedge*> uses;
+    for (const geom::CoedgeId coedge_id : lens.value().brep.coedge_ids()) {
+      const geom::Coedge& coedge = lens.value().brep.coedge(coedge_id);
+      if (coedge.edge == edge_id) uses.push_back(&coedge);
+    }
+    if (uses.size() == 2 && uses[0]->face != uses[1]->face) {
+      REQUIRE(!rim_edge.has_value());
+      rim_edge = edge_id;
+      CHECK(uses[0]->reversed != uses[1]->reversed);
+    }
+  }
+  REQUIRE(rim_edge.has_value());
+  CHECK(fingerprint_of(unit_b) == unit_b_before);
 
   // The sphere check needs whole-sphere operands: a sphere intersected with a
   // box gives a two-face solid whose spherical face is only a cap, so the pair
@@ -1949,8 +1994,8 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   const geom::Brep cap_other =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 1.5}, 1.0, tolerance).value();
 
-  const Fingerprint cap_before = fingerprint(cap);
-  const Fingerprint cap_other_before = fingerprint(cap_other);
+  const BrepFingerprint cap_before = fingerprint_of(cap);
+  const BrepFingerprint cap_other_before = fingerprint_of(cap_other);
   const geom::Result<geom::CurvedBooleanResult> not_whole = geom::boolean_solid_curved(
       cap, only_solid(cap), cap_other, only_solid(cap_other),
       geom::SolidBooleanOp::intersection, options);
@@ -1958,8 +2003,8 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   CHECK(not_whole.error().code == geom::Errc::unsupported);
   CHECK(message_of(not_whole.error()) ==
         "boolean_solid_curved: sphere/sphere booleans need whole-sphere operands");
-  CHECK(fingerprint(cap) == cap_before);
-  CHECK(fingerprint(cap_other) == cap_other_before);
+  CHECK(fingerprint_of(cap) == cap_before);
+  CHECK(fingerprint_of(cap_other) == cap_other_before);
 
   // External tangency (unit/unit at d = 2), containment (d + 0.2 <= 1) and
   // separation (unit/unit at d = 2.5) have no circle of intersection.
@@ -1976,7 +2021,7 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   for (const CrossingCase& entry : crossing) {
     INFO(entry.name);
     const geom::Brep other = geom::make_sphere(entry.center, entry.radius, tolerance).value();
-    const Fingerprint other_before = fingerprint(other);
+    const BrepFingerprint other_before = fingerprint_of(other);
     const geom::Result<geom::CurvedBooleanResult> rejected = geom::boolean_solid_curved(
         unit_a, only_solid(unit_a), other, only_solid(other),
         geom::SolidBooleanOp::intersection, options);
@@ -1984,9 +2029,74 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
     CHECK(rejected.error().code == geom::Errc::unsupported);
     CHECK(message_of(rejected.error()) ==
           "boolean_solid_curved: sphere/sphere booleans need two crossing spheres");
-    CHECK(fingerprint(other) == other_before);
+    CHECK(fingerprint_of(other) == other_before);
   }
-  CHECK(fingerprint(unit_a) == unit_a_before);
+
+  // The axis snap is index-based, so a +y centre line has to take the same
+  // re-chart path with unequal radii instead of only the canonical +x one.
+  const geom::Brep y_a =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.2, tolerance).value();
+  const geom::Brep y_b =
+      geom::make_sphere(geom::Point3d{0.0, 1.4, 0.0}, 0.8, tolerance).value();
+  const geom::Result<geom::CurvedBooleanResult> y_lens = geom::boolean_solid_curved(
+      y_a, only_solid(y_a), y_b, only_solid(y_b), geom::SolidBooleanOp::intersection, options);
+  REQUIRE_MESSAGE(y_lens.has_value(), message_of(y_lens.error()));
+  CHECK(geom::validate_topology(y_lens.value().brep).ok());
+  CHECK(y_lens.value().brep.face_ids().size() == 2);
+  CHECK(y_lens.value().brep.edge_ids().size() == 3);
+  CHECK(y_lens.value().brep.vertex_ids().size() == 3);
+
+  CHECK(fingerprint_of(unit_a) == unit_a_before);
+}
+
+TEST_CASE("curved boolean: sphere/sphere rejects off-axis placements") {
+  const double tolerance = 1e-9;
+  const geom::CurvedBooleanOptions options{tolerance};
+  // The centre line is unit({1, 2, 2}); its dominant component is 2/3, so the
+  // placement is not axis-aligned and the whole-sphere chart cannot be rebuilt
+  // onto a coordinate axis.
+  const geom::Vec3d direction{1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0};
+  const geom::Point3d center_a{0.3, -0.2, 0.1};
+  const geom::Point3d center_b{center_a[0] + 1.4 * direction[0],
+                               center_a[1] + 1.4 * direction[1],
+                               center_a[2] + 1.4 * direction[2]};
+  const geom::Brep a = geom::make_sphere(center_a, 1.2, tolerance).value();
+  const geom::Brep b = geom::make_sphere(center_b, 0.8, tolerance).value();
+  const BrepFingerprint a_before = fingerprint_of(a);
+  const BrepFingerprint b_before = fingerprint_of(b);
+
+  const geom::Result<geom::CurvedBooleanResult> rejected = geom::boolean_solid_curved(
+      a, only_solid(a), b, only_solid(b), geom::SolidBooleanOp::intersection, options);
+  REQUIRE_MESSAGE(!rejected.has_value(), "an off-axis placement must be refused");
+  CHECK(rejected.error().code == geom::Errc::unsupported);
+  CHECK(message_of(rejected.error()) ==
+        "boolean_solid_curved: sphere/sphere placement is not axis-aligned; general "
+        "placements are deferred to M3c-3c");
+  CHECK(fingerprint_of(a) == a_before);
+  CHECK(fingerprint_of(b) == b_before);
+}
+
+TEST_CASE("curved boolean: sphere/sphere re-charts opposite meridians") {
+  const double tolerance = 1e-9;
+  const geom::CurvedBooleanOptions options{tolerance};
+  // Both operands are already charted on the centre line (+x / -x), but their
+  // seams lie on opposite meridians (+y versus -y). The recursion fixed point
+  // has to include x_axis agreement, or the lens is stitched at two meridians.
+  const geom::Brep a = geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0},
+                                         geom::Vec3d{1.0, 0.0, 0.0},
+                                         geom::Vec3d{0.0, 1.0, 0.0}, 1.0, tolerance)
+                           .value();
+  const geom::Brep b = geom::make_sphere(geom::Point3d{1.5, 0.0, 0.0},
+                                         geom::Vec3d{-1.0, 0.0, 0.0},
+                                         geom::Vec3d{0.0, -1.0, 0.0}, 1.0, tolerance)
+                           .value();
+  const geom::Result<geom::CurvedBooleanResult> lens = geom::boolean_solid_curved(
+      a, only_solid(a), b, only_solid(b), geom::SolidBooleanOp::intersection, options);
+  REQUIRE_MESSAGE(lens.has_value(), message_of(lens.error()));
+  CHECK(geom::validate_topology(lens.value().brep).ok());
+  CHECK(lens.value().brep.face_ids().size() == 2);
+  CHECK(lens.value().brep.edge_ids().size() == 3);
+  CHECK(lens.value().brep.vertex_ids().size() == 3);
 }
 
 TEST_CASE("curved boolean: difference subtracts a sphere cap") {
