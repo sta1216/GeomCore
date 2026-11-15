@@ -1322,8 +1322,9 @@ ADR-0028，实测见 `docs/benchmarks/m3c2.md`）。
 `curved_boolean_clip_pair` 在矩形上裁剪并在边界交点共享精确 3D 顶点；触及极点的
 cap 片段把极点行折成恰好一个 `v = ±π/2` 的 uv 点；无极点且恰有两个环的 band 片段
 在 `u = 0` 缝合列把两条纬度环拼成一个环。内部闭环、跨缝合线两次的闭环与开放切链
-仍在 arrangement 之前拒绝（`"closed cut does not reach the seam"`、
-`"closed cut crosses the seam twice"`、`"cut lies on the parameter domain boundary"`）。
+仍在 arrangement 之前拒绝（开放切链 `"open cuts on a seam-only face"`、闭环未触缝
+`"closed cut does not reach the seam"`、跨缝两次 `"closed cut crosses the seam twice"`、
+切链落在参数域边界 `"cut lies on the parameter domain boundary"`）。
 QA-15 三行体积 `0.6544984694978736` / `3.534291735288517` / `3.9542179533184135`，
 每行跑两次，`validate_topology` 干净、单壳、相对误差 `<= 1e-6`、第二次体积逐位
 相同；cap/complement 分类网格闭合，slab 的 band 轮廓无法三角化（`"a face outline

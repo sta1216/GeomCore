@@ -265,8 +265,9 @@ inline Result<CurvedBooleanFaceInfo> curved_boolean_face_info(const Brep& brep, 
   // seam) has no boundary loop of its own: the loop-derived u-span collapses
   // onto one parameter line even though the face covers the whole surface. The
   // chart still needs the analytic range for the 5x5 sample and for the
-  // splitter, so substitute it -- but only for a collapsed span, never for a
-  // genuinely trimmed face, whose old range must stay byte for byte.
+  // splitter, so substitute it -- but only for a span collapsed below the
+  // 1e-12 relative threshold; a genuinely trimmed face above it keeps its old
+  // range byte for byte.
   const std::optional<std::array<double, 4>> analytic_domain =
       curved_boolean_surface_uv_domain(*info.surface);
   if (analytic_domain.has_value() &&
