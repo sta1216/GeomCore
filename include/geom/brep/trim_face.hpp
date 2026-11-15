@@ -888,6 +888,24 @@ inline bool trim_face_seam_only_synthetic_edge(
          (a[1] == domain[3] && b[1] == domain[3]);
 }
 
+// The sphere chart is the only seam-only chart whose v range is exactly
+// [-pi/2, pi/2]; the cone's is [0, r/tan(theta)] and the torus's [0, 2pi]. On
+// that chart a synthetic edge along the top or bottom side is a pole row, which
+// collapses to one 3D point even though it spans the whole u range.
+inline bool trim_face_seam_only_pole_v(const std::array<double, 4>& domain,
+                                       double& pole_v) noexcept {
+  constexpr double kHalfPi = 1.57079632679489661923;
+  if (domain[2] == -kHalfPi) {
+    pole_v = domain[2];
+    return true;
+  }
+  if (domain[3] == kHalfPi) {
+    pole_v = domain[3];
+    return true;
+  }
+  return false;
+}
+
 // Appends one side of the synthetic rectangle. Interior samples interpolate the
 // two corners, so every sample of a horizontal side keeps v exactly and every
 // sample of a vertical side keeps u exactly; the side therefore stays on its
@@ -1123,6 +1141,12 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
     } while (h != start && cycle.size() <= half_edges.size());
     if (h != start || cycle.size() < 3) continue;
 
+    // On the sphere chart a material cycle that owns part of the top or bottom
+    // synthetic row reaches that pole: the row is one 3D point, so the ring is
+    // the rim plus exactly one pole point instead of a seam-pair closure.
+    double pole_v = 0.0;
+    const bool pole_chart = trim_face_seam_only_pole_v(domain, pole_v);
+    bool touches_pole = false;
     std::vector<char> synthetic(cycle.size(), 0);
     std::size_t cut_edges = 0;
     for (std::size_t i = 0; i < cycle.size(); ++i) {
@@ -1131,6 +1155,13 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
       const Point2d& to = vertices[half_edges[edge.twin].origin];
       if (trim_face_seam_only_synthetic_edge(from, to, domain)) {
         synthetic[i] = 1;
+        if (pole_chart && from[1] == domain[3] && to[1] == domain[3]) {
+          pole_v = domain[3];
+          touches_pole = true;
+        } else if (pole_chart && from[1] == domain[2] && to[1] == domain[2]) {
+          pole_v = domain[2];
+          touches_pole = true;
+        }
       } else {
         ++cut_edges;
       }
@@ -1157,6 +1188,18 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
       for (const std::size_t index : run) {
         const Arrangement2::HalfEdge& edge = half_edges[cycle[index]];
         points.push_back(vertices[half_edges[edge.twin].origin]);
+      }
+      if (touches_pole) {
+        // The rim ends on a pole row, and that row is one 3D point: close the
+        // ring through the exact pole between the last rim sample and the
+        // repeated first point, i.e. along the meridian chords rim -> pole ->
+        // rim. The pole comes from the domain, so v is exactly -pi/2 or +pi/2.
+        points.push_back(Point2d{points.back()[0], pole_v});
+        points.push_back(points.front());
+        if (points.size() < 3) continue;
+        trim_face_normalize_ring(points, true);
+        rings.push_back(SeamRing{std::move(points), false});
+        continue;
       }
       const Point2d front = points.front();
       const Point2d back = points.back();

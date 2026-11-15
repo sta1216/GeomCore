@@ -36,6 +36,7 @@ namespace {
 
 constexpr double kTol = 1e-12;
 constexpr double kPi = std::numbers::pi_v<double>;
+constexpr double kHalfPi = kPi / 2.0;
 
 template <class Surface>
 FaceId face_with_surface(const Brep& brep) {
@@ -106,17 +107,34 @@ double fragment_area(const CurvedFragment& fragment) {
   return area;
 }
 
+// The exact pole the sphere chart collapses the v = +/-pi/2 row onto. A ring
+// that touches a pole stores that row as one vertex instead of a repeated first
+// point, so the pole's z is the one value that differs from the rim latitude.
+bool is_pole_point(const Point3d& point) {
+  return std::fabs(std::fabs(point[2]) - 1.0) <= kTol &&
+         std::hypot(point[0], point[1]) <= kTol;
+}
+
 // The spherical area of the region a seam-only fragment covers, derived from
-// its latitude rings. All of these rings are horizontal circles, so the sign of
-// their projection onto xy tells which side carries the material (the
+// its latitude rings. A ring without a pole is a horizontal circle, so the sign
+// of its projection onto xy tells which side carries the material (the
 // arrangement keeps the material on its left in uv); a ring above the material
-// contributes +2*pi*(1 - z), a ring below contributes -2*pi*(1 - z). The sum is
-// wrapped into [0, 4*pi].
+// contributes +2*pi*(1 - z), a ring below contributes -2*pi*(1 - z). A
+// pole-touching ring ends at the pole, which is a whole row collapsed to one
+// vertex, so its latitude is the z of the rim vertices; the same cap term then
+// applies, because the wrap into [0, 4*pi] turns a complement into the side
+// that carries the material. The sum is wrapped into [0, 4*pi].
 double spherical_area(const CurvedFragment& fragment) {
   double sum = 0.0;
   for (const std::vector<Point3d>& ring : fragment.loops) {
     REQUIRE(ring.size() >= 3);
-    const double z = ring.front()[2];
+    double z = ring.front()[2];
+    for (const Point3d& point : ring) {
+      if (!is_pole_point(point)) {
+        z = point[2];
+        break;
+      }
+    }
     double projected = 0.0;
     for (std::size_t i = 0; i < ring.size(); ++i) {
       const Point3d& a = ring[i];
@@ -135,10 +153,29 @@ double spherical_area(const CurvedFragment& fragment) {
 // A seam-closed ring stores the two parameter copies of one physical seam point
 // first and last; the implicit closing edge is that seam edge, so the two ends
 // must land on the same 3D point even though the parameter copies differ by a
-// whole turn (their 3D distance is about 2.4e-16, not zero).
+// whole turn (their 3D distance is about 2.4e-16, not zero). A pole-touching
+// ring instead ends at the pole: the v = +/-pi/2 row is one point, so exactly
+// one vertex is the pole and exactly one of the two ends is it, while the other
+// end is a rim sample on the unit sphere. Its implicit closing edge is the
+// meridian from the pole back to that rim sample.
 void check_ring_closes(const std::vector<Point3d>& ring) {
-  REQUIRE(ring.size() >= 2);
-  CHECK(norm2(ring.front() - ring.back()) <= 1e-12);
+  REQUIRE(ring.size() >= 3);
+  std::size_t poles = 0;
+  for (const Point3d& point : ring) {
+    if (is_pole_point(point)) ++poles;
+  }
+  if (poles == 0) {
+    CHECK(norm2(ring.front() - ring.back()) <= kTol);
+    return;
+  }
+  CHECK(poles == 1);
+  const bool front_pole = is_pole_point(ring.front());
+  const bool back_pole = is_pole_point(ring.back());
+  CHECK(front_pole != back_pole);
+  const Point3d& rim = front_pole ? ring.back() : ring.front();
+  CHECK_FALSE(is_pole_point(rim));
+  CHECK(norm2(rim - Point3d{0, 0, 0}) ==
+        doctest::Approx(1.0).epsilon(kTol));
 }
 
 // A rejected split must leave the seam-only input face untouched.
@@ -1559,20 +1596,37 @@ TEST_CASE("trim face: a sphere splits into caps and bands") {
     CHECK(fragment.reversed == false);
     CHECK(fragment.arc_spans.empty());
     // Only cut geometry appears: the synthetic domain sides are stripped.
-    // 65 samples plus the repeated first point that closes the ring.
+    // 65 rim samples plus the exact pole the synthetic top or bottom row
+    // collapses to, so the ring is the rim and one pole point; the meridian
+    // back to the first rim sample is the implicit closing edge.
     REQUIRE(fragment.loops_uv.front().size() == 66);
-    for (const Point2d& point : fragment.loops_uv.front()) {
-      CHECK(point[1] == v);
-    }
-    for (const Point3d& point : fragment.loops.front()) {
+    REQUIRE(fragment.loops.front().size() == 66);
+    std::size_t rim_points = 0;
+    std::size_t pole_points = 0;
+    for (std::size_t i = 0; i < fragment.loops_uv.front().size(); ++i) {
+      const Point2d& uv = fragment.loops_uv.front()[i];
+      const Point3d& point = fragment.loops.front()[i];
       CHECK(norm2(point - Point3d{0, 0, 0}) ==
-            doctest::Approx(1.0).epsilon(1e-12));
-      CHECK(point[2] == doctest::Approx(0.5).epsilon(1e-12));
+            doctest::Approx(1.0).epsilon(kTol));
+      if (uv[1] == v) {
+        CHECK(point[2] == doctest::Approx(0.5).epsilon(kTol));
+        ++rim_points;
+      } else {
+        CHECK((uv[1] == kHalfPi || uv[1] == -kHalfPi));
+        CHECK(std::fabs(point[2]) == doctest::Approx(1.0).epsilon(kTol));
+        CHECK(std::hypot(point[0], point[1]) <= kTol);
+        CHECK(uv[1] * point[2] > 0.0);
+        ++pole_points;
+      }
     }
+    CHECK(rim_points == 65);
+    CHECK(pole_points == 1);
   }
 
   // The one cut leaves a cap of area pi and the rest of the sphere, 3*pi. The
-  // ring itself has no uv area: it is the straight latitude line u = 0..2*pi.
+  // cap's uv ring is the strip from its rim up to the pole, so it has area
+  // while the ring of a plain latitude line does not; the shaded area comes
+  // from the ring's latitude and orientation, not from the uv shoelace.
   std::vector<double> areas;
   for (const CurvedFragment& fragment : result.value()) {
     areas.push_back(spherical_area(fragment));
@@ -1609,22 +1663,40 @@ TEST_CASE("trim face: two latitude cuts split a sphere into three bands") {
   }
   CHECK(loop_counts == std::vector<std::size_t>{1, 2, 1});
 
-  // Each ring is a full latitude circle: no ring carries a synthetic side and
-  // every ring's points share one exact z coordinate, on the sphere.
+  // The two caps touch a pole: their single ring is 65 rim samples plus the
+  // exact pole. The band between the two cuts touches no pole, so its two rings
+  // are plain latitude circles and all of their points share one exact z.
   std::vector<double> areas;
   for (const CurvedFragment& fragment : result.value()) {
     areas.push_back(spherical_area(fragment));
     for (const std::vector<Point3d>& ring : fragment.loops) {
-      // 65 samples plus the repeated first point that closes the ring.
+      // 65 samples plus the pole (caps) or the repeated first point (band).
       REQUIRE(ring.size() == 66);
       check_ring_closes(ring);
-      const double z = ring.front()[2];
-      CHECK(std::fabs(z) == doctest::Approx(0.8).epsilon(1e-12));
+      std::size_t poles = 0;
       for (const Point3d& point : ring) {
-        CHECK(point[2] == z);
         CHECK(norm2(point - Point3d{0, 0, 0}) ==
-              doctest::Approx(1.0).epsilon(1e-12));
+              doctest::Approx(1.0).epsilon(kTol));
+        if (is_pole_point(point)) ++poles;
       }
+      CHECK(poles <= 1);
+      if (fragment.loops.size() == 1) {
+        CHECK(poles == 1);
+      } else {
+        CHECK(poles == 0);
+      }
+      bool have_z = false;
+      double z = 0.0;
+      for (const Point3d& point : ring) {
+        if (is_pole_point(point)) continue;
+        if (!have_z) {
+          z = point[2];
+          have_z = true;
+        }
+        CHECK(point[2] == z);
+      }
+      REQUIRE(have_z);
+      CHECK(std::fabs(z) == doctest::Approx(0.8).epsilon(kTol));
     }
   }
 
@@ -1836,7 +1908,7 @@ TEST_CASE("trim face: a drifted seam pair still closes a latitude cut") {
   for (const CurvedFragment& fragment : result.value()) {
     REQUIRE(fragment.loops.size() == 1);
     const std::vector<Point3d>& ring = fragment.loops.front();
-    CHECK(norm2(ring.front() - ring.back()) <= 2e-12);
+    check_ring_closes(ring);
   }
 }
 

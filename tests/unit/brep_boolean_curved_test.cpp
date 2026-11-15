@@ -582,6 +582,54 @@ TEST_CASE("curved boolean: clipping keeps a sphere latitude cut") {
   CHECK(pieces.front().size() == chain.size());
 }
 
+TEST_CASE("curved boolean: a sphere cap keeps one exact pole point") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance);
+  REQUIRE(sphere.has_value());
+  const geom::FaceId face = sphere.value().face_ids().front();
+
+  std::vector<geom::Point2d> ring;
+  constexpr std::size_t kSamples = 64;
+  const double v = std::asin(0.5);
+  for (std::size_t i = 0; i <= kSamples; ++i) {
+    const double u = 2.0 * 3.14159265358979323846 *
+                     static_cast<double>(i) / static_cast<double>(kSamples);
+    ring.push_back(geom::Point2d{u, v});
+  }
+  const std::vector<geom::FaceCut> cuts{geom::FaceCut{ring}};
+  const geom::Result<std::vector<geom::CurvedFragment>> fragments =
+      geom::split_face_curved(sphere.value(), face, cuts, tolerance);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 2);
+
+  const auto uv_area = [](const std::vector<geom::Point2d>& ring) {
+    double twice = 0.0;
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+      const geom::Point2d& a = ring[i];
+      const geom::Point2d& b = ring[(i + 1) % ring.size()];
+      twice += a[0] * b[1] - b[0] * a[1];
+    }
+    return std::fabs(twice) * 0.5;
+  };
+  bool found_cap = false;
+  for (const geom::CurvedFragment& fragment : fragments.value()) {
+    REQUIRE(fragment.loops.size() == fragment.loops_uv.size());
+    for (std::size_t l = 0; l < fragment.loops_uv.size(); ++l) {
+      CHECK(fragment.loops[l].size() == fragment.loops_uv[l].size());
+      std::size_t poles = 0;
+      for (const geom::Point2d& uv : fragment.loops_uv[l]) {
+        if (uv[1] == 0.5 * 3.14159265358979323846) ++poles;
+      }
+      if (poles == 1) {
+        found_cap = true;
+        CHECK(uv_area(fragment.loops_uv[l]) > 0.1);
+      }
+    }
+  }
+  CHECK(found_cap);
+}
+
 TEST_CASE("curved boolean: sphere operands are rejected with the cap diagnostic") {
   const double tolerance = 1e-9;
   const geom::Result<geom::Brep> sphere =
