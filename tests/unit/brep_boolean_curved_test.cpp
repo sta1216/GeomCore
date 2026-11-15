@@ -860,6 +860,32 @@ TEST_CASE("curved boolean: sphere/sphere has one analytic circle") {
   CHECK(geom::detail::curved_boolean_pair_circles(
             origin, no_frame, sphere_at(geom::Point3d{2.5, 0.0, 0.0}, 1.0), no_frame, 1e-9)
             .empty());
+  // Near external tangency: the d < ra + rb guard must fire before the radius
+  // is computed.
+  CHECK(geom::detail::curved_boolean_pair_circles(
+            origin, no_frame, sphere_at(geom::Point3d{2.0 - 1e-10, 0.0, 0.0}, 1.0), no_frame,
+            1e-9)
+            .empty());
+  // Containment boundary exactly d == |ra - rb| + tolerance: the guard is strict.
+  CHECK(geom::detail::curved_boolean_pair_circles(
+            origin, no_frame, sphere_at(geom::Point3d{0.75, 0.0, 0.0}, 0.5), no_frame, 0.25)
+            .empty());
+  // rho^2 <= tolerance^2 with a tolerance on the scale of the radii.
+  const geom::SurfaceGeometry centered_101 = sphere_at(geom::Point3d{0.0, 0.0, 0.0}, 1.01);
+  CHECK(geom::detail::curved_boolean_pair_circles(
+            centered_101, no_frame, sphere_at(geom::Point3d{1.02 - 1e-7, 0.0, 0.0}, 1.01),
+            no_frame, 1.0)
+            .empty());
+  // Unequal radii: the (ra^2 - rb^2) term moves the circle plane to x = 0.98.
+  const std::vector<geom::CircleCurve3> unequal = geom::detail::curved_boolean_pair_circles(
+      origin, no_frame, sphere_at(geom::Point3d{1.0, 0.0, 0.0}, 0.2), no_frame, 1e-9);
+  REQUIRE(unequal.size() == 1);
+  CHECK(unequal[0].center[0] == doctest::Approx(0.98));
+  CHECK(unequal[0].radius == doctest::Approx(std::sqrt(0.0396)));
+  // Frame handedness for n = (1, 0, 0): candidate is {0, 1, 0}, so the frame is
+  // x_axis = {0, 0, 1}, y_axis = {0, -1, 0}.
+  CHECK(circles[0].x_axis[2] == doctest::Approx(1.0));
+  CHECK(circles[0].y_axis[1] == doctest::Approx(-1.0));
 }
 
 TEST_CASE("curved boolean: torus pairs need a plane cut") {
