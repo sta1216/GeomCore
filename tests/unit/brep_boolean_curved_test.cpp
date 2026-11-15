@@ -18,6 +18,7 @@
 #include <geom/brep/boolean_solid_curved.hpp>
 #include <geom/brep/detail/curved_volume.hpp>
 #include <geom/brep/face_uv.hpp>
+#include <geom/brep/heal.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/solid_editor.hpp>
 #include <geom/brep/split_solid.hpp>
@@ -736,6 +737,90 @@ TEST_CASE("curved boolean: sphere slab band") {
   CHECK(result.value().brep.face_ids().size() == 3);
   CHECK(result.value().brep.edge_ids().size() == 3);
   CHECK(std::fabs(volume_of(result.value().brep) - 3.9542179533184135) <= 1e-6);
+}
+
+// QA-15: the three M3c-3a end-to-end sphere cases, each run twice. Every run
+// must be a validated single-shell solid whose boundary closes, and the
+// repeated run must reproduce the volume bit for bit.
+TEST_CASE("QA-15: sphere cap booleans are closed and deterministic") {
+  const double tolerance = 1e-9;
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance).value();
+  const geom::Brep cap_box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.5}, geom::Point3d{2.0, 2.0, 2.0}, tolerance)
+          .value();
+  const geom::Brep slab_box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, -0.8}, geom::Point3d{2.0, 2.0, 0.8}, tolerance)
+          .value();
+
+  struct Case {
+    const char* name;
+    const geom::Brep* b;
+    geom::SolidBooleanOp op;
+    double expected;
+    // The slab keeps one sphere band whose 8194-point uv outline joins its two
+    // boundary circles across the seam; triangulate_polygon2 rejects that
+    // outline, so the classification-mesh route is unavailable for that face.
+    // Cap and complement close their classification mesh; all three close by
+    // edge uses (every edge is used by exactly two coedges).
+    bool mesh_closable;
+  };
+  const std::array<Case, 3> cases{{
+      {"cap", &cap_box, geom::SolidBooleanOp::intersection, 0.6544984694978736, true},
+      {"complement", &cap_box, geom::SolidBooleanOp::difference, 3.534291735288517, true},
+      {"slab", &slab_box, geom::SolidBooleanOp::intersection, 3.9542179533184135, false},
+  }};
+
+  // `tessellate` rejects trimmed boolean faces, so close the check the way the
+  // driver builds its classification mesh: project every face, weld and census.
+  const auto check_mesh_closed = [&tolerance](const char* name, const geom::Brep& brep) {
+    std::vector<geom::detail::CurvedBooleanFaceInfo> infos;
+    for (const geom::FaceId id : brep.face_ids()) {
+      const geom::Result<geom::detail::CurvedBooleanFaceInfo> info =
+          geom::detail::curved_boolean_face_info(brep, id, tolerance);
+      REQUIRE_MESSAGE(info.has_value(),
+                      name << ": face info failed: " << message_of(info.error()));
+      infos.push_back(info.value());
+    }
+    const geom::Result<geom::TriMesh> mesh =
+        geom::detail::curved_boolean_solid_mesh(brep, infos, tolerance);
+    REQUIRE_MESSAGE(mesh.has_value(),
+                    name << ": classification mesh failed: " << message_of(mesh.error()));
+    const geom::detail::CurvedBooleanMeshClosure closure =
+        geom::detail::curved_boolean_mesh_closure(mesh.value());
+    CHECK_MESSAGE(closure.closed(), name << ": mesh is not closed");
+    CHECK_MESSAGE(closure.used_once == 0, name << ": mesh has boundary edges");
+    CHECK_MESSAGE(closure.nonmanifold == 0, name << ": mesh is non-manifold");
+  };
+
+  for (const Case& entry : cases) {
+    INFO(std::string(entry.name));
+    std::optional<double> first_volume;
+    for (int run = 0; run < 2; ++run) {
+      const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+          sphere, only_solid(sphere), *entry.b, only_solid(*entry.b), entry.op,
+          geom::CurvedBooleanOptions{tolerance});
+      REQUIRE_MESSAGE(result.has_value(), entry.name << ": " << message_of(result.error()));
+      const geom::Brep& brep = result.value().brep;
+      CHECK(geom::validate_topology(brep).ok());
+      const auto shells = brep.solid_shells(only_solid(brep));
+      CHECK(shells.size() == 1);
+      const double volume = volume_of(brep);
+      CHECK(std::abs(volume - entry.expected) <= 1e-6 * std::abs(entry.expected));
+      if (entry.mesh_closable) {
+        check_mesh_closed(entry.name, brep);
+      } else {
+        CHECK_MESSAGE(
+            geom::detail::heal_detail::shell_is_closed_by_uses(brep, shells.front()),
+            entry.name << ": an edge is not used by exactly two coedges");
+      }
+      if (run == 0) {
+        first_volume = volume;
+      } else {
+        CHECK(volume == *first_volume);
+      }
+    }
+  }
 }
 
 TEST_CASE("curved boolean: torus pairs need a plane cut") {

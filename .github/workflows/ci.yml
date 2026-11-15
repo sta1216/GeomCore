@@ -110,7 +110,7 @@ jobs:
       - name: Configure
         run: cmake -S . -B build-bench -DGEOM_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build benchmarks
-        run: cmake --build build-bench -j 4 --target geom_bench_m2 geom_bench_m1b geom_bench_m3c2
+        run: cmake --build build-bench -j 4 --target geom_bench_m2 geom_bench_m1b geom_bench_m3c2 geom_bench_m3c3
       - name: Run M2 benchmarks (QA-10, QA-11)
         run: ./build-bench/geom_bench_m2 | tee bench-m2.txt
       - name: Run M1b benchmarks (QA-1, QA-4)

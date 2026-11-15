@@ -1313,6 +1313,25 @@ ADR-0028，实测见 `docs/benchmarks/m3c2.md`）。
 待 M3c-3：布尔结果的一般修剪网格化、偏移平行/倾斜环切、内部闭环与开放切链、
 锥顶点与球 cap、NURBS 操作数、精确 torus/cone 愈合。
 
+**M3c-3a（球面闭合纬度环：支持；M3c-3 未完成）**：`boolean_solid_curved` 现在
+接受 `Sphere3` 操作数，支持闭合且经过缝合线一点的纬度环切链；球帽、帽补集与
+两纬度环之间的 band 三类结果通过 QA-15（取舍见 ADR-0029，实测见
+`docs/benchmarks/m3c3a.md`）。合成参数矩形经
+`CurvedBooleanFaceInfo::synthetic_domain` 暴露给驱动，
+`curved_boolean_region_loops` 用矩形代替零面积缝合环做成员判定，
+`curved_boolean_clip_pair` 在矩形上裁剪并在边界交点共享精确 3D 顶点；触及极点的
+cap 片段把极点行折成恰好一个 `v = ±π/2` 的 uv 点；无极点且恰有两个环的 band 片段
+在 `u = 0` 缝合列把两条纬度环拼成一个环。内部闭环、跨缝合线两次的闭环与开放切链
+仍在 arrangement 之前拒绝（`"closed cut does not reach the seam"`、
+`"closed cut crosses the seam twice"`、`"cut lies on the parameter domain boundary"`）。
+QA-15 三行体积 `0.6544984694978736` / `3.534291735288517` / `3.9542179533184135`，
+每行跑两次，`validate_topology` 干净、单壳、相对误差 `<= 1e-6`、第二次体积逐位
+相同；cap/complement 分类网格闭合，slab 的 band 轮廓无法三角化（`"a face outline
+could not be triangulated"`），该行改用每条边恰被两个 coedge 使用的结构判据。
+Debug 与 Release 各 940 个用例、659,153 条断言全绿，`/W4 /WX /utf-8` 零警告。
+球/球 lens、锥操作数、偏移/倾斜 torus 切平面、一般修剪网格化与 NURBS 仍待
+M3c-3b/3c；本行只关闭 M3c-3a，不得据此声称 M3c-3 完成。
+
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外
 无全局 epsilon。
