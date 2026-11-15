@@ -1978,6 +1978,11 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
                bool from_a) -> std::optional<std::uint32_t> {
         for (const detail::CurvedBooleanFaceInfo& info : infos) {
           if (std::holds_alternative<Plane3>(*info.surface)) continue;
+          // A spherical fragment can be emitted with a flipped normal: the
+          // harvest reverses its rings and keeps the sphere surface, so it must
+          // not be deferred by this pre-check. Every other curved surface still
+          // has no reparameterization and is rejected below.
+          if (std::holds_alternative<Sphere3>(*info.surface)) continue;
           const bool reversed = operand.face(info.id).reversed;
           for (const bool other_in : {false, true}) {
             const bool keep_plus =
@@ -2230,11 +2235,19 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
         // planar face is re-expressed with the flipped normal baked into its
         // plane (parameters reprojected into the new frame) so that `reversed`
         // stays false and `curved_solid_volume` never sees a negatively oriented
-        // planar ring. Curved surfaces have no such reparameterization here, so
-        // they are deferred instead of being emitted with a winding the volume
-        // integral would misread.
+        // planar ring. A sphere cap is the one curved exception, emitted with
+        // reversed rings below; every other curved surface is deferred instead
+        // of being emitted with a winding the volume integral would misread.
         const bool flip = brep.face(info.id).reversed != keep_plus;
-        if (flip) {
+        if (flip && std::holds_alternative<Sphere3>(assembled.surface)) {
+          // A reversed spherical cap keeps its surface and carries the sign in
+          // its ring winding: `curved_solid_volume` integrates the winding, so
+          // the reversed rings contribute negatively without setting `reversed`
+          // and without reparameterizing the sphere. `reverse_rings` keeps the
+          // (u, v) chart in step, so no plane-style reprojection is needed.
+          detail::curved_boolean_reverse_rings(assembled.loops, assembled.loops_uv,
+                                               assembled.arc_spans);
+        } else if (flip) {
           const Plane3* plane = std::get_if<Plane3>(&assembled.surface);
           if (plane == nullptr) {
             record_failure();

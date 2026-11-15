@@ -276,6 +276,61 @@ geom::SolidId only_solid(const geom::Brep& brep) {
 
 std::string_view message_of(const geom::Error& error) { return std::string_view(error.message); }
 
+// Signed chart volume of a solid built only from spherical faces. Task 5 also
+// uses this helper, so it stays test-local and generic. Each spherical face must
+// be a polar cap in its own chart: its single uv loop has to reach a pole
+// (v = +-pi/2), and the latitude range gives the cap height. The loop's signed
+// shoelace area carries the orientation (+ outward, - reversed), which is how a
+// subtracted cap contributes negative volume. A face without a pole at either v
+// end is not a polar cap and is reported as nullopt rather than as zero.
+std::optional<double> sphere_face_volume(const geom::Brep& brep) {
+  constexpr double kTolerance = 1e-9;
+  double volume = 0.0;
+  bool any_sphere = false;
+  for (const geom::FaceId face_id : brep.face_ids()) {
+    const geom::Face& face = brep.face(face_id);
+    const geom::SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
+    const geom::Sphere3* sphere = std::get_if<geom::Sphere3>(&surface);
+    if (sphere == nullptr) continue;
+    const geom::Result<std::vector<geom::FaceUvLoop>> loops =
+        geom::face_loops_uv(brep, face_id, kTolerance);
+    if (!loops.has_value() || loops.value().size() != 1) return std::nullopt;
+    const std::vector<geom::Point2d>& ring = loops.value().front().points;
+    if (ring.size() < 3) return std::nullopt;
+
+    double twice_area = 0.0;
+    double v_lo = 1e30;
+    double v_hi = -1e30;
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+      const geom::Point2d& point = ring[i];
+      const geom::Point2d& next = ring[(i + 1) % ring.size()];
+      twice_area += point[0] * next[1] - next[0] * point[1];
+      v_lo = std::min(v_lo, point[1]);
+      v_hi = std::max(v_hi, point[1]);
+    }
+    if (twice_area == 0.0) return std::nullopt;
+
+    constexpr double kHalfPi = 0.5 * kPi;
+    double height = 0.0;
+    if (std::abs(v_lo + kHalfPi) <= 1e-9) {
+      // Southern cap: the pole is at v = -pi/2, so its axial extent is
+      // r * (sin(v_hi) + 1).
+      height = sphere->radius * (1.0 + std::sin(v_hi));
+    } else if (std::abs(v_hi - kHalfPi) <= 1e-9) {
+      // Northern cap: r * (1 - sin(v_lo)).
+      height = sphere->radius * (1.0 - std::sin(v_lo));
+    } else {
+      return std::nullopt;
+    }
+    const double sign = twice_area > 0.0 ? 1.0 : -1.0;
+    const double radius = sphere->radius;
+    volume += sign * kPi * height * height * (3.0 * radius - height) / 3.0;
+    any_sphere = true;
+  }
+  if (!any_sphere) return std::nullopt;
+  return volume;
+}
+
 // Full analytic cylinder r = 1, h = 2 with its bottom cap at z = 0. Unlike the
 // quarter fixture above its lateral face carries the full periodic seam, so its
 // cuts have to land on the seam edges.
@@ -1932,4 +1987,74 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
     CHECK(fingerprint(other) == other_before);
   }
   CHECK(fingerprint(unit_a) == unit_a_before);
+}
+
+TEST_CASE("curved boolean: difference subtracts a sphere cap") {
+  const double tolerance = 1e-9;
+  const geom::CurvedBooleanOptions options{tolerance};
+  const geom::Brep unit_a =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance).value();
+  const geom::Brep unit_b =
+      geom::make_sphere(geom::Point3d{1.5, 0.0, 0.0}, 1.0, tolerance).value();
+
+  // Equal unit spheres at d = 1.5 meet in caps of height 0.25: the lens is
+  // 2 * pi * 0.25^2 * (3 - 0.25) / 3 = 11*pi/96, so either difference is
+  // 4*pi/3 - 11*pi/96 = 39*pi/32.
+  const double expected = 39.0 * std::numbers::pi / 32.0;
+  struct DifferenceCase {
+    const char* name;
+    const geom::Brep* a;
+    const geom::Brep* b;
+  };
+  const std::array<DifferenceCase, 2> cases{{
+      {"A - B", &unit_a, &unit_b},
+      {"B - A", &unit_b, &unit_a},
+  }};
+  for (const DifferenceCase& entry : cases) {
+    INFO(entry.name);
+    const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+        *entry.a, only_solid(*entry.a), *entry.b, only_solid(*entry.b),
+        geom::SolidBooleanOp::difference, options);
+    REQUIRE_MESSAGE(result.has_value(), entry.name << ": " << message_of(result.error()));
+    const geom::Brep& brep = result.value().brep;
+    CHECK(geom::validate_topology(brep).ok());
+    CHECK(brep.face_ids().size() == 2);
+    CHECK(brep.edge_ids().size() == 3);
+    CHECK(brep.vertex_ids().size() == 3);
+    CHECK(brep.solid_shells(only_solid(brep)).size() == 1);
+
+    const std::optional<double> volume = sphere_face_volume(brep);
+    REQUIRE_MESSAGE(volume.has_value(), entry.name << ": a face is not a polar cap");
+    CHECK(*volume == doctest::Approx(expected).epsilon(1e-9));
+
+    // The A complement cap and the reversed B cap meet on one rim edge used by
+    // both faces; each of the two seam edges is used twice by one face.
+    std::size_t rim_edges = 0;
+    for (const geom::EdgeId edge_id : brep.edge_ids()) {
+      std::vector<geom::FaceId> users;
+      std::size_t uses = 0;
+      for (const geom::CoedgeId coedge_id : brep.coedge_ids()) {
+        const geom::Coedge& coedge = brep.coedge(coedge_id);
+        if (coedge.edge != edge_id) continue;
+        ++uses;
+        if (std::find(users.begin(), users.end(), coedge.face) == users.end()) {
+          users.push_back(coedge.face);
+        }
+      }
+      CHECK(uses == 2);
+      if (users.size() == 2) ++rim_edges;
+    }
+    CHECK(rim_edges == 1);
+  }
+
+  // A spherical band has a pole at neither v end, so the helper must refuse it
+  // instead of reporting zero volume for it.
+  const geom::Brep slab =
+      geom::make_box(geom::Point3d{-2.0, -2.0, -0.8}, geom::Point3d{2.0, 2.0, 0.8}, tolerance)
+          .value();
+  const geom::Result<geom::CurvedBooleanResult> band = geom::boolean_solid_curved(
+      unit_a, only_solid(unit_a), slab, only_solid(slab), geom::SolidBooleanOp::intersection,
+      options);
+  REQUIRE_MESSAGE(band.has_value(), message_of(band.error()));
+  CHECK(!sphere_face_volume(band.value().brep).has_value());
 }
