@@ -605,11 +605,11 @@ TEST_CASE("curved boolean: a sphere cap keeps one exact pole point") {
   REQUIRE(fragments.has_value());
   REQUIRE(fragments.value().size() == 2);
 
-  const auto uv_area = [](const std::vector<geom::Point2d>& ring) {
+  const auto uv_area = [](const std::vector<geom::Point2d>& loop) {
     double twice = 0.0;
-    for (std::size_t i = 0; i < ring.size(); ++i) {
-      const geom::Point2d& a = ring[i];
-      const geom::Point2d& b = ring[(i + 1) % ring.size()];
+    for (std::size_t i = 0; i < loop.size(); ++i) {
+      const geom::Point2d& a = loop[i];
+      const geom::Point2d& b = loop[(i + 1) % loop.size()];
       twice += a[0] * b[1] - b[0] * a[1];
     }
     return std::fabs(twice) * 0.5;
@@ -653,11 +653,11 @@ TEST_CASE("curved boolean: a sphere band joins its two cut runs") {
   REQUIRE(fragments.has_value());
   REQUIRE(fragments.value().size() == 3);
 
-  const auto uv_area = [](const std::vector<geom::Point2d>& ring) {
+  const auto uv_area = [](const std::vector<geom::Point2d>& loop) {
     double twice = 0.0;
-    for (std::size_t i = 0; i < ring.size(); ++i) {
-      const geom::Point2d& a = ring[i];
-      const geom::Point2d& b = ring[(i + 1) % ring.size()];
+    for (std::size_t i = 0; i < loop.size(); ++i) {
+      const geom::Point2d& a = loop[i];
+      const geom::Point2d& b = loop[(i + 1) % loop.size()];
       twice += a[0] * b[1] - b[0] * a[1];
     }
     return std::fabs(twice) * 0.5;
