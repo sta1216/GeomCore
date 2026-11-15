@@ -164,8 +164,10 @@ Plus `{}` cases: `d = 2.0` (tangent), `d = 0.5` (one inside the other),
 
 **Step 3 — implement**
 
-Add the branch before the torus branch, after the plane branch's early return.
-No allocation is needed beyond the returned vector.
+Add the branch in the `plane == nullptr` path, immediately before its
+`return circles;` at `:1486`: a sphere/sphere pair has no plane, so a branch
+placed after that early return would never run. The plane and torus branches stay
+untouched. No allocation is needed beyond the returned vector.
 
 **Step 4 — run tests**
 
