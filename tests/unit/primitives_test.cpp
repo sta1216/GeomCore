@@ -323,6 +323,21 @@ TEST_CASE("make_sphere accepts an arbitrary chart") {
   CHECK(surface->x_axis[0] == doctest::Approx(0.0));
   CHECK(surface->x_axis[1] == doctest::Approx(1.0));
   CHECK(surface->x_axis[2] == doctest::Approx(0.0));
+
+  // The seam edge must be built from the same chart as the surface; a seam
+  // left on the canonical frame would silently tear the chart.
+  const geom::Loop& loop = sphere.value().loop(face.first_loop);
+  const geom::Coedge& coedge = sphere.value().coedge(loop.start);
+  const geom::Edge& edge = sphere.value().edge(coedge.edge);
+  const auto* seam = std::get_if<geom::CircleCurve3>(
+      &sphere.value().geometry().curves[edge.curve]);
+  REQUIRE(seam != nullptr);
+  CHECK(seam->x_axis[0] == doctest::Approx(0.0));
+  CHECK(seam->x_axis[1] == doctest::Approx(1.0));
+  CHECK(seam->x_axis[2] == doctest::Approx(0.0));
+  CHECK(seam->y_axis[0] == doctest::Approx(1.0));
+  CHECK(seam->y_axis[1] == doctest::Approx(0.0));
+  CHECK(seam->y_axis[2] == doctest::Approx(0.0));
 }
 
 // Regression guard for the canonical overload: it must delegate to the frame
@@ -394,6 +409,16 @@ TEST_CASE("make_sphere rejects an invalid chart") {
   const double nan = std::numeric_limits<double>::quiet_NaN();
 
   // Non-finite center, axis, x_axis and radius all take the first branch.
+  // The 1e-12 frame bound is inclusive: 1e-10 and 2e-12 must be rejected so a
+  // widened bound cannot pass an invalid Sphere3 past the library invariant.
+  check_sphere_error(geom::make_sphere(origin, geom::Vec3d{1.0 + 1e-10, 0.0, 0.0}, x, 1.0, 1e-9),
+                     geom::Errc::degenerate, "make_sphere: axis must be unit length");
+  check_sphere_error(geom::make_sphere(origin, z, geom::Vec3d{1.0 + 1e-10, 0.0, 0.0}, 1.0, 1e-9),
+                     geom::Errc::degenerate,
+                     "make_sphere: x-axis must be perpendicular to the axis");
+  check_sphere_error(geom::make_sphere(origin, z, geom::Vec3d{1.0, 0.0, 2e-12}, 1.0, 1e-9),
+                     geom::Errc::degenerate,
+                     "make_sphere: x-axis must be perpendicular to the axis");
   check_sphere_error(geom::make_sphere(geom::Point3d{inf, 0.0, 0.0}, z, x, 1.0, 1e-9),
                      geom::Errc::non_finite, "make_sphere: input is not finite");
   check_sphere_error(geom::make_sphere(geom::Point3d{nan, 0.0, 0.0}, z, x, 1.0, 1e-9),
