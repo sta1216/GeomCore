@@ -3,11 +3,14 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <string>
 #include <variant>
 #include <vector>
 
 #include <geom/brep/detail/curved_volume.hpp>
 #include <geom/brep/primitives.hpp>
+#include <geom/core/error.hpp>
+#include <geom/core/result.hpp>
 #include <geom/primitives/box.hpp>
 #include <geom/primitives/point.hpp>
 #include <geom/primitives/segment.hpp>
@@ -366,4 +369,69 @@ TEST_CASE("make_sphere canonical chart is unchanged") {
   REQUIRE(volume.has_value());
   const double expected = 4.0 * std::numbers::pi_v<double> / 3.0;
   CHECK(primitive_relative_error(volume.value(), expected) <= 1e-12);
+}
+
+namespace {
+
+// Pin both the error class and the exact message of a rejected sphere. The
+// canonical overload delegates to the frame overload, so this contract is the
+// old one: messages and codes must not drift when a frame is rejected.
+void check_sphere_error(const geom::Result<geom::Brep>& result, geom::Errc code,
+                        const char* message) {
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == code);
+  CHECK(std::string(result.error().message) == std::string(message));
+}
+
+}  // namespace
+
+// Frame-aware sphere: every rejection path, with the exact code and message.
+TEST_CASE("make_sphere rejects an invalid chart") {
+  const geom::Point3d origin{0.0, 0.0, 0.0};
+  const geom::Vec3d z{0.0, 0.0, 1.0};
+  const geom::Vec3d x{1.0, 0.0, 0.0};
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+
+  // Non-finite center, axis, x_axis and radius all take the first branch.
+  check_sphere_error(geom::make_sphere(geom::Point3d{inf, 0.0, 0.0}, z, x, 1.0, 1e-9),
+                     geom::Errc::non_finite, "make_sphere: input is not finite");
+  check_sphere_error(geom::make_sphere(geom::Point3d{nan, 0.0, 0.0}, z, x, 1.0, 1e-9),
+                     geom::Errc::non_finite, "make_sphere: input is not finite");
+  check_sphere_error(geom::make_sphere(origin, geom::Vec3d{0.0, nan, 0.0}, x, 1.0, 1e-9),
+                     geom::Errc::non_finite, "make_sphere: input is not finite");
+  check_sphere_error(geom::make_sphere(origin, z, geom::Vec3d{inf, 0.0, 0.0}, 1.0, 1e-9),
+                     geom::Errc::non_finite, "make_sphere: input is not finite");
+  check_sphere_error(geom::make_sphere(origin, z, x, nan, 1e-9), geom::Errc::non_finite,
+                     "make_sphere: input is not finite");
+
+  // A NaN tolerance is a tolerance violation, not a non-finite input: the
+  // finite branch above covers center/axis/x_axis/radius only.
+  check_sphere_error(geom::make_sphere(origin, z, x, 1.0, nan),
+                     geom::Errc::tolerance_violation,
+                     "make_sphere: tolerance must be finite and non-negative");
+  check_sphere_error(geom::make_sphere(origin, z, x, 1.0, -1.0),
+                     geom::Errc::tolerance_violation,
+                     "make_sphere: tolerance must be finite and non-negative");
+  check_sphere_error(geom::make_sphere(origin, z, x, 0.0, 1e-9), geom::Errc::degenerate,
+                     "make_sphere: radius must be positive");
+  check_sphere_error(geom::make_sphere(origin, z, x, -1.0, 1e-9), geom::Errc::degenerate,
+                     "make_sphere: radius must be positive");
+  check_sphere_error(geom::make_sphere(origin, geom::Vec3d{0.0, 0.0, 1.001}, x, 1.0, 1e-9),
+                     geom::Errc::degenerate, "make_sphere: axis must be unit length");
+  check_sphere_error(geom::make_sphere(origin, geom::Vec3d{0.0, 0.0, 2.0}, x, 1.0, 1e-9),
+                     geom::Errc::degenerate, "make_sphere: axis must be unit length");
+  check_sphere_error(geom::make_sphere(origin, geom::Vec3d{0.0, 0.0, 0.0}, x, 1.0, 1e-9),
+                     geom::Errc::degenerate, "make_sphere: axis must be unit length");
+  check_sphere_error(geom::make_sphere(origin, z, geom::Vec3d{1.001, 0.0, 0.0}, 1.0, 1e-9),
+                     geom::Errc::degenerate,
+                     "make_sphere: x-axis must be perpendicular to the axis");
+  check_sphere_error(geom::make_sphere(origin, geom::Vec3d{1.0, 0.0, 0.0},
+                                       geom::Vec3d{1.0, 0.0, 0.0}, 1.0, 1e-9),
+                     geom::Errc::degenerate,
+                     "make_sphere: x-axis must be perpendicular to the axis");
+
+  // The canonical overload delegates, so it must reject with the same contract.
+  check_sphere_error(geom::make_sphere(geom::Point3d{inf, 0.0, 0.0}, 1.0, 1e-9),
+                     geom::Errc::non_finite, "make_sphere: input is not finite");
 }
