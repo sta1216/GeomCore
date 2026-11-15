@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -628,6 +629,55 @@ TEST_CASE("curved boolean: a sphere cap keeps one exact pole point") {
     }
   }
   CHECK(found_cap);
+}
+
+TEST_CASE("curved boolean: a sphere band joins its two cut runs") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance);
+  REQUIRE(sphere.has_value());
+  const geom::FaceId face = sphere.value().face_ids().front();
+
+  constexpr std::size_t kSamples = 64;
+  const double v = std::asin(0.8);
+  std::vector<geom::FaceCut> cuts(2);
+  for (std::size_t i = 0; i <= kSamples; ++i) {
+    const double u = 2.0 * 3.14159265358979323846 *
+                     static_cast<double>(i) / static_cast<double>(kSamples);
+    cuts[0].uv.push_back(geom::Point2d{u, -v});
+    cuts[1].uv.push_back(geom::Point2d{u, v});
+  }
+  const geom::Result<std::vector<geom::CurvedFragment>> fragments =
+      geom::split_face_curved(sphere.value(), face, cuts, tolerance);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 3);
+
+  const auto uv_area = [](const std::vector<geom::Point2d>& ring) {
+    double twice = 0.0;
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+      const geom::Point2d& a = ring[i];
+      const geom::Point2d& b = ring[(i + 1) % ring.size()];
+      twice += a[0] * b[1] - b[0] * a[1];
+    }
+    return std::fabs(twice) * 0.5;
+  };
+  bool found_band = false;
+  for (const geom::CurvedFragment& fragment : fragments.value()) {
+    if (fragment.loops_uv.size() != 1) continue;
+    double v_min = 1e300;
+    double v_max = -1e300;
+    for (const geom::Point2d& uv : fragment.loops_uv.front()) {
+      v_min = std::min(v_min, uv[1]);
+      v_max = std::max(v_max, uv[1]);
+    }
+    if (v_min < -0.5 && v_max > 0.5) {
+      found_band = true;
+      CHECK(uv_area(fragment.loops_uv.front()) ==
+            doctest::Approx(2.0 * 3.14159265358979323846 * 2.0 * v)
+                .epsilon(1e-9));
+    }
+  }
+  CHECK(found_band);
 }
 
 TEST_CASE("curved boolean: sphere operands are rejected with the cap diagnostic") {

@@ -1240,6 +1240,36 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
     }
     if (rings.empty()) continue;
 
+    // A pole-free fragment of a chart with a pole, bounded by exactly two
+    // rings, is the band between two latitude runs: the two rims, joined
+    // across the seam column at u = 0. Joining turns them into one closed
+    // ring, which is what a band is; leaving them as two rings would put two
+    // zero-area boundaries on one region. A cap has one ring (or touches a
+    // pole) and is never joined. Both runs are seam rings here: their ends
+    // are the two parameter copies of the seam, one whole turn apart, so the
+    // seam flag itself cannot decide.
+    if (pole_chart && !touches_pole && rings.size() == 2) {
+      std::vector<Point2d> merged;
+      merged.reserve(rings[0].points.size() + rings[1].points.size());
+      for (const SeamRing& ring : rings) {
+        // Each seam ring repeats its first point at the end; the join closes
+        // the merged ring instead, so that repeat is dropped.
+        for (std::size_t i = 0; i + 1 < ring.points.size(); ++i) {
+          if (!merged.empty() && merged.back()[0] == ring.points[i][0] &&
+              merged.back()[1] == ring.points[i][1]) {
+            continue;
+          }
+          merged.push_back(ring.points[i]);
+        }
+      }
+      merged.push_back(merged.front());
+      if (merged.size() >= 4) {
+        trim_face_normalize_ring(merged, true);
+        rings.clear();
+        rings.push_back(SeamRing{std::move(merged), false});
+      }
+    }
+
     // A seam ring closes across the periodic seam, so its uv shoelace area is a
     // chord artefact (the closing edge spans the whole u period at nearly
     // constant v), not a region area: it must not be used to choose the outer

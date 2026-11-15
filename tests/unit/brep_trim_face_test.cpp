@@ -115,9 +115,25 @@ bool is_pole_point(const Point3d& point) {
          std::hypot(point[0], point[1]) <= kTol;
 }
 
-// The spherical area of the region a seam-only fragment covers, derived from
-// its latitude rings. A ring without a pole is a horizontal circle, so the sign
-// of its projection onto xy tells which side carries the material (the
+// The spherical area of a polygonal ring given in the sphere chart. The chart
+// (u, v) -> (u, sin v) is area preserving because dA = cos v du dv = du
+// d(sin v), so the shoelace formula in (u, sin v) is exact for any polygonal
+// uv ring, not just a latitude circle.
+double uv_sphere_area(std::span<const Point2d> ring) {
+  REQUIRE(ring.size() >= 3);
+  double twice = 0.0;
+  for (std::size_t i = 0; i < ring.size(); ++i) {
+    const Point2d& a = ring[i];
+    const Point2d& b = ring[(i + 1) % ring.size()];
+    twice += a[0] * std::sin(b[1]) - b[0] * std::sin(a[1]);
+  }
+  return std::fabs(twice) * 0.5;
+}
+
+// The spherical area of the region a seam-only fragment covers. A pole-free
+// ring with nonzero uv area (a joined latitude band) is measured exactly by the
+// (u, sin v) shoelace of its uv polygon. Otherwise the ring is a latitude
+// circle: its projection onto xy tells which side carries the material (the
 // arrangement keeps the material on its left in uv); a ring above the material
 // contributes +2*pi*(1 - z), a ring below contributes -2*pi*(1 - z). A
 // pole-touching ring ends at the pole, which is a whole row collapsed to one
@@ -125,9 +141,24 @@ bool is_pole_point(const Point3d& point) {
 // applies, because the wrap into [0, 4*pi] turns a complement into the side
 // that carries the material. The sum is wrapped into [0, 4*pi].
 double spherical_area(const CurvedFragment& fragment) {
+  REQUIRE(fragment.loops.size() == fragment.loops_uv.size());
   double sum = 0.0;
-  for (const std::vector<Point3d>& ring : fragment.loops) {
+  for (std::size_t l = 0; l < fragment.loops.size(); ++l) {
+    const std::vector<Point3d>& ring = fragment.loops[l];
     REQUIRE(ring.size() >= 3);
+    const std::vector<Point2d>& uv = fragment.loops_uv[l];
+    REQUIRE(uv.size() == ring.size());
+    bool pole = false;
+    for (const Point3d& point : ring) {
+      if (is_pole_point(point)) {
+        pole = true;
+        break;
+      }
+    }
+    if (!pole && std::fabs(signed_area2(uv)) > kTol) {
+      sum += uv_sphere_area(uv);
+      continue;
+    }
     double z = ring.front()[2];
     for (const Point3d& point : ring) {
       if (!is_pole_point(point)) {
@@ -157,15 +188,35 @@ double spherical_area(const CurvedFragment& fragment) {
 // ring instead ends at the pole: the v = +/-pi/2 row is one point, so exactly
 // one vertex is the pole and exactly one of the two ends is it, while the other
 // end is a rim sample on the unit sphere. Its implicit closing edge is the
-// meridian from the pole back to that rim sample.
-void check_ring_closes(const std::vector<Point3d>& ring) {
+// meridian from the pole back to that rim sample. A joined band ring (pole-free
+// with nonzero uv area) closes through the seam column at u = 0: its two ends
+// are the two rim latitudes, distinct 3D points, so the distance test does not
+// apply; both ends are rim points at the same u.
+void check_ring_closes(const std::vector<Point3d>& ring,
+                       const std::vector<Point2d>* uv = nullptr) {
   REQUIRE(ring.size() >= 3);
   std::size_t poles = 0;
   for (const Point3d& point : ring) {
     if (is_pole_point(point)) ++poles;
   }
   if (poles == 0) {
-    CHECK(norm2(ring.front() - ring.back()) <= kTol);
+    const double distance = norm2(ring.front() - ring.back());
+    if (uv != nullptr && std::fabs(signed_area2(*uv)) > kTol) {
+      REQUIRE(uv->size() == ring.size());
+      // The band runs end on the two rim latitudes at the seam column; the
+      // closing edge is that column, so u is the same and v is opposite.
+      CHECK(distance > kTol);
+      CHECK(norm2(ring.front() - Point3d{0, 0, 0}) ==
+            doctest::Approx(1.0).epsilon(kTol));
+      CHECK(norm2(ring.back() - Point3d{0, 0, 0}) ==
+            doctest::Approx(1.0).epsilon(kTol));
+      CHECK(std::fabs(uv->back()[0] - uv->front()[0]) <= kTol);
+      CHECK(uv->front()[1] * uv->back()[1] < 0.0);
+      CHECK(std::fabs(uv->front()[1]) ==
+            doctest::Approx(std::fabs(uv->back()[1])).epsilon(kTol));
+      return;
+    }
+    CHECK(distance <= kTol);
     return;
   }
   CHECK(poles == 1);
@@ -1630,7 +1681,7 @@ TEST_CASE("trim face: a sphere splits into caps and bands") {
   std::vector<double> areas;
   for (const CurvedFragment& fragment : result.value()) {
     areas.push_back(spherical_area(fragment));
-    check_ring_closes(fragment.loops.front());
+    check_ring_closes(fragment.loops.front(), &fragment.loops_uv.front());
   }
   REQUIRE(areas.size() == 2);
   std::sort(areas.begin(), areas.end());
@@ -1661,18 +1712,19 @@ TEST_CASE("trim face: two latitude cuts split a sphere into three bands") {
   for (const CurvedFragment& fragment : result.value()) {
     loop_counts.push_back(fragment.loops.size());
   }
-  CHECK(loop_counts == std::vector<std::size_t>{1, 2, 1});
+  CHECK(loop_counts == std::vector<std::size_t>{1, 1, 1});
 
   // The two caps touch a pole: their single ring is 65 rim samples plus the
-  // exact pole. The band between the two cuts touches no pole, so its two rings
-  // are plain latitude circles and all of their points share one exact z.
+  // exact pole. The band between the two cuts touches no pole, so its two
+  // latitude runs are joined into one 130-point ring (65 samples each); its
+  // implicit closing edge is the seam column at u = 0 between the two rims.
   std::vector<double> areas;
   for (const CurvedFragment& fragment : result.value()) {
     areas.push_back(spherical_area(fragment));
-    for (const std::vector<Point3d>& ring : fragment.loops) {
-      // 65 samples plus the pole (caps) or the repeated first point (band).
-      REQUIRE(ring.size() == 66);
-      check_ring_closes(ring);
+    REQUIRE(fragment.loops.size() == fragment.loops_uv.size());
+    for (std::size_t l = 0; l < fragment.loops.size(); ++l) {
+      const std::vector<Point3d>& ring = fragment.loops[l];
+      const std::vector<Point2d>& uv = fragment.loops_uv[l];
       std::size_t poles = 0;
       for (const Point3d& point : ring) {
         CHECK(norm2(point - Point3d{0, 0, 0}) ==
@@ -1680,23 +1732,55 @@ TEST_CASE("trim face: two latitude cuts split a sphere into three bands") {
         if (is_pole_point(point)) ++poles;
       }
       CHECK(poles <= 1);
-      if (fragment.loops.size() == 1) {
-        CHECK(poles == 1);
-      } else {
-        CHECK(poles == 0);
-      }
-      bool have_z = false;
-      double z = 0.0;
-      for (const Point3d& point : ring) {
-        if (is_pole_point(point)) continue;
-        if (!have_z) {
-          z = point[2];
-          have_z = true;
+      check_ring_closes(ring, &uv);
+      if (poles == 1) {
+        // A cap: 65 rim samples plus the exact pole.
+        CHECK(ring.size() == 66);
+        double z = 0.0;
+        for (const Point3d& point : ring) {
+          if (!is_pole_point(point)) {
+            z = point[2];
+            break;
+          }
         }
-        CHECK(point[2] == z);
+        CHECK(std::fabs(z) == doctest::Approx(0.8).epsilon(kTol));
+        continue;
       }
-      REQUIRE(have_z);
-      CHECK(std::fabs(z) == doctest::Approx(0.8).epsilon(kTol));
+      // The joined latitude band: 65 samples per run, no pole. Each run is a
+      // latitude circle, so all of its points share one exact z, and the two
+      // rims are at exactly opposite latitudes.
+      CHECK(poles == 0);
+      CHECK(ring.size() == 130);
+      double z_low = 0.0;
+      double z_high = 0.0;
+      bool have_low = false;
+      bool have_high = false;
+      for (std::size_t i = 0; i < ring.size(); ++i) {
+        const Point3d& point = ring[i];
+        if (uv[i][1] < 0.0) {
+          if (!have_low) {
+            z_low = point[2];
+            have_low = true;
+          }
+          CHECK(point[2] == z_low);
+        } else {
+          if (!have_high) {
+            z_high = point[2];
+            have_high = true;
+          }
+          CHECK(point[2] == z_high);
+        }
+      }
+      REQUIRE(have_low);
+      REQUIRE(have_high);
+      CHECK(z_low == doctest::Approx(-0.8).epsilon(kTol));
+      CHECK(z_high == doctest::Approx(0.8).epsilon(kTol));
+      CHECK(z_low == -z_high);
+      // The (u, sin v) shoelace is exact for this polygonal ring.
+      CHECK(uv_sphere_area(uv) == doctest::Approx(3.2 * kPi).epsilon(1e-12));
+      // Both ends are rim points on opposite rims at the same seam column.
+      CHECK(uv.front()[1] == doctest::Approx(-v).epsilon(kTol));
+      CHECK(uv.back()[1] == doctest::Approx(v).epsilon(kTol));
     }
   }
 
