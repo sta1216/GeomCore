@@ -1181,3 +1181,33 @@ TEST_CASE("a two point semicircle pcurve has no resolvable arc direction") {
     CHECK(loops.error().context_b == 2u);
   }
 }
+
+TEST_CASE("curved boolean: the sphere face exposes a synthetic boundary") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance);
+  REQUIRE(sphere.has_value());
+  const geom::Result<geom::detail::CurvedBooleanFaceInfo> sphere_info =
+      geom::detail::curved_boolean_face_info(sphere.value(),
+                                             sphere.value().face_ids().front(), tolerance);
+  REQUIRE(sphere_info.has_value());
+  CHECK(sphere_info.value().synthetic_domain);
+  CHECK(sphere_info.value().u[0] == 0.0);
+  CHECK(sphere_info.value().u[1] == doctest::Approx(2.0 * 3.14159265358979323846));
+  CHECK(sphere_info.value().synthetic_boundary[0] == 0.0);
+  CHECK(sphere_info.value().synthetic_boundary[1] ==
+        doctest::Approx(-0.5 * 3.14159265358979323846));
+  CHECK(sphere_info.value().synthetic_boundary[2] ==
+        doctest::Approx(2.0 * 3.14159265358979323846));
+  CHECK(sphere_info.value().synthetic_boundary[3] ==
+        doctest::Approx(0.5 * 3.14159265358979323846));
+
+  const geom::Result<geom::Brep> box = geom::make_box(
+      geom::Point3d{-1.0, -1.0, -1.0}, geom::Point3d{1.0, 1.0, 1.0}, tolerance);
+  REQUIRE(box.has_value());
+  const geom::Result<geom::detail::CurvedBooleanFaceInfo> box_info =
+      geom::detail::curved_boolean_face_info(box.value(), box.value().face_ids().front(),
+                                             tolerance);
+  REQUIRE(box_info.has_value());
+  CHECK_FALSE(box_info.value().synthetic_domain);
+}

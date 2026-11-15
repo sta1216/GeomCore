@@ -211,6 +211,14 @@ struct CurvedBooleanFaceInfo {
   const SurfaceGeometry* surface = nullptr;
   FaceUvProjection projection{};
   std::vector<FaceUvLoop> loops;
+  // True when `u`/`v` and `bounds` describe the synthesized full parameter
+  // domain of a seam-only face (a sphere or torus whose stored loop is the
+  // zero-area seam slit), not the stored loops. Clipping and classification
+  // must then use `synthetic_boundary` as the region, because the stored loop
+  // encloses no area.
+  bool synthetic_domain = false;
+  // {u_lo, v_lo, u_hi, v_hi} of that domain; zeros when the flag is false.
+  std::array<double, 4> synthetic_boundary{};
   std::array<double, 2> u{};
   std::array<double, 2> v{};
   CurvedBooleanBounds bounds{};
@@ -269,6 +277,8 @@ inline Result<CurvedBooleanFaceInfo> curved_boolean_face_info(const Brep& brep, 
     u_hi = (*analytic_domain)[1];
     v_lo = (*analytic_domain)[2];
     v_hi = (*analytic_domain)[3];
+    info.synthetic_domain = true;
+    info.synthetic_boundary = {u_lo, v_lo, u_hi, v_hi};
   }
   info.u = {u_lo, u_hi};
   info.v = {v_lo, v_hi};
