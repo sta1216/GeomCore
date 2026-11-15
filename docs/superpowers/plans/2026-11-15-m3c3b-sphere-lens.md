@@ -273,10 +273,13 @@ curved_boolean_rebase_sphere_pair(const Brep& a, SolidId a_solid, const Brep& b,
 
 **Algorithm**
 
-1. Classify each operand as a whole sphere: exactly one solid, one shell, one
-   face, one edge, two vertices, the face is `Sphere3`, and
+1. Classify each operand as a whole sphere: the selected solid has exactly one
+   shell, that shell exactly one face, the face surface is `Sphere3`, and
    `curved_boolean_face_info(...).synthetic_domain` is true (the seam-only test).
-   If neither operand is a sphere, return `nullopt`.
+   Count edges and vertices through the face's loop (one edge, two vertices) or,
+   because operands built by `make_sphere` contain a single solid, through the
+   Brep-level `edge_ids()`/`vertex_ids()`; document the single-solid precondition
+   at the helper. If neither operand has a sphere face, return `nullopt`.
 2. If exactly one is a sphere, return `nullopt` (sphere against other surfaces is
    handled by the existing code).
 3. If both are spheres: if either is not a whole sphere, return
@@ -337,9 +340,14 @@ Focused test passes; suite green.
 
 **Step 3 — negative tests**
 
-A sphere face extracted from a box (or a two-face solid) returns the
-whole-sphere message; `d = 2.0`, `0.5`, `2.5` return the crossing message and
-leave the input Breps unchanged (compare a volume/edge-count fingerprint).
+Build the non-whole-sphere operand with the already-shipped M3c-3a path: take a
+unit sphere and an axis-aligned box that cuts a cap, call
+`boolean_solid_curved(sphere, box, intersection)`, and use the resulting two-face
+solid (one sphere cap + one planar cap) as operand A against a whole sphere B.
+It must return the whole-sphere message and leave both inputs unchanged.
+
+`d = 2.0`, `0.5`, `2.5` return the crossing message and leave the input Breps
+unchanged (compare a volume/edge-count fingerprint).
 
 **Step 4 — commit**
 
