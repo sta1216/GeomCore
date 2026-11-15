@@ -1148,6 +1148,26 @@ inline Result<Point3d> curved_boolean_boundary_crossing(const CurvedBooleanFaceI
   return best;
 }
 
+// The region of a face in its own parameter chart. A seam-only face stores a
+// zero-area seam slit, so membership must be tested against the synthesized
+// rectangle instead (the caller's cut can only cross that rectangle).
+inline std::vector<std::vector<Point2d>> curved_boolean_region_loops(
+    const CurvedBooleanFaceInfo& info) {
+  std::vector<std::vector<Point2d>> loops;
+  if (info.synthetic_domain) {
+    const double u_lo = info.synthetic_boundary[0];
+    const double v_lo = info.synthetic_boundary[1];
+    const double u_hi = info.synthetic_boundary[2];
+    const double v_hi = info.synthetic_boundary[3];
+    loops.push_back({Point2d{u_lo, v_lo}, Point2d{u_hi, v_lo}, Point2d{u_hi, v_hi},
+                     Point2d{u_lo, v_hi}});
+    return loops;
+  }
+  loops.reserve(info.loops.size());
+  for (const FaceUvLoop& loop : info.loops) loops.push_back(loop.points);
+  return loops;
+}
+
 // Keeps the part of a cut that lies inside both trimmed regions. The cut is the
 // segment intersection of the two surfaces, so it is only a real edge of the
 // result where it runs over both faces; the parameterizations are clipped at
@@ -1158,12 +1178,9 @@ inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
     const CurvedBooleanFaceInfo& other, const CircleCurve3* curve, double tolerance) {
   const std::size_t count = chain.size();
   if (count < 2) return {};
-  std::vector<std::vector<Point2d>> loops;
-  loops.reserve(face.loops.size());
-  for (const FaceUvLoop& loop : face.loops) loops.push_back(loop.points);
-  std::vector<std::vector<Point2d>> other_loops;
-  other_loops.reserve(other.loops.size());
-  for (const FaceUvLoop& loop : other.loops) other_loops.push_back(loop.points);
+  const std::vector<std::vector<Point2d>> loops = curved_boolean_region_loops(face);
+  const std::vector<std::vector<Point2d>> other_loops =
+      curved_boolean_region_loops(other);
 
   std::vector<Point3d> points;
   points.reserve(count);

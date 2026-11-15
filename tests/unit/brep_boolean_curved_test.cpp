@@ -553,6 +553,35 @@ TEST_CASE("brep: boolean_solid_curved heals the cut rim into exact arcs") {
   CHECK(healed_cap);
 }
 
+TEST_CASE("curved boolean: clipping keeps a sphere latitude cut") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance);
+  const geom::Result<geom::Brep> box = geom::make_box(
+      geom::Point3d{-2.0, -2.0, 0.5}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(sphere.has_value());
+  REQUIRE(box.has_value());
+  const auto sphere_info = geom::detail::curved_boolean_face_info(
+      sphere.value(), sphere.value().face_ids().front(), tolerance);
+  const auto box_info = geom::detail::curved_boolean_face_info(
+      box.value(), box.value().face_ids().front(), tolerance);
+  REQUIRE(sphere_info.has_value());
+  REQUIRE(box_info.has_value());
+
+  std::vector<geom::Point2d> chain;
+  constexpr std::size_t kSamples = 32;
+  for (std::size_t i = 0; i <= kSamples; ++i) {
+    const double u = 2.0 * 3.14159265358979323846 *
+                     static_cast<double>(i) / static_cast<double>(kSamples);
+    chain.push_back(geom::Point2d{u, std::asin(0.5)});
+  }
+  const std::vector<std::vector<geom::Point2d>> pieces =
+      geom::detail::curved_boolean_clip_pair(sphere_info.value(), chain,
+                                             box_info.value(), nullptr, tolerance);
+  REQUIRE(pieces.size() == 1);
+  CHECK(pieces.front().size() == chain.size());
+}
+
 TEST_CASE("curved boolean: sphere operands are rejected with the cap diagnostic") {
   const double tolerance = 1e-9;
   const geom::Result<geom::Brep> sphere =
