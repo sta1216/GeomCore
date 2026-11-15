@@ -2,11 +2,17 @@
 
 #include <cmath>
 #include <limits>
+#include <numbers>
+#include <variant>
+#include <vector>
 
+#include <geom/brep/detail/curved_volume.hpp>
+#include <geom/brep/primitives.hpp>
 #include <geom/primitives/box.hpp>
 #include <geom/primitives/point.hpp>
 #include <geom/primitives/segment.hpp>
 #include <geom/primitives/vec.hpp>
+#include <geom/surfaces/analytic.hpp>
 #include <geom/transform/affine.hpp>
 
 using geom::v1::Affine;
@@ -285,4 +291,79 @@ TEST_CASE("affine rotation and scale inverse round-trips") {
   const Vec3d v = a.transform_vector(Vec3d{1.0, 0.0, 0.0});
   CHECK(v.v[0] == 0.0);
   CHECK(v.v[1] == doctest::Approx(2.0));
+}
+
+namespace {
+
+double primitive_relative_error(double actual, double expected) {
+  const double scale = std::fabs(expected) > 1.0 ? std::fabs(expected) : 1.0;
+  return std::fabs(actual - expected) / scale;
+}
+
+}  // namespace
+
+// Task 2 of M3c-3b: the sphere primitive must accept an arbitrary orthonormal
+// chart so that a boolean can re-chart an operand in the shared frame. The
+// sphere below is re-charted with axis = +x and x_axis = +y; the face surface
+// must carry exactly that frame (the seam circle and the poles follow from it).
+TEST_CASE("make_sphere accepts an arbitrary chart") {
+  const auto sphere = geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{1.0, 0.0, 0.0},
+                                        geom::Vec3d{0.0, 1.0, 0.0}, 1.0, 1e-9);
+  REQUIRE(sphere.has_value());
+  const geom::Face& face = sphere.value().face(sphere.value().face_ids().front());
+  const geom::Sphere3* surface =
+      std::get_if<geom::Sphere3>(&sphere.value().geometry().surfaces[face.surface]);
+  REQUIRE(surface != nullptr);
+  CHECK(surface->axis[0] == doctest::Approx(1.0));
+  CHECK(surface->axis[1] == doctest::Approx(0.0));
+  CHECK(surface->axis[2] == doctest::Approx(0.0));
+  CHECK(surface->x_axis[0] == doctest::Approx(0.0));
+  CHECK(surface->x_axis[1] == doctest::Approx(1.0));
+  CHECK(surface->x_axis[2] == doctest::Approx(0.0));
+}
+
+// Regression guard for the canonical overload: it must delegate to the frame
+// overload without changing topology, chart, poles or volume.
+TEST_CASE("make_sphere canonical chart is unchanged") {
+  const auto sphere = geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-9);
+  REQUIRE(sphere.has_value());
+  const geom::Brep& brep = sphere.value();
+
+  CHECK(brep.vertex_count() == 2);
+  CHECK(brep.edge_count() == 1);
+  CHECK(brep.face_count() == 1);
+  CHECK(brep.shell_count() == 1);
+  CHECK(brep.solid_count() == 1);
+
+  const geom::Face& face = brep.face(brep.face_ids().front());
+  const geom::Sphere3* surface =
+      std::get_if<geom::Sphere3>(&brep.geometry().surfaces[face.surface]);
+  REQUIRE(surface != nullptr);
+  CHECK(surface->axis[0] == 0.0);
+  CHECK(surface->axis[1] == 0.0);
+  CHECK(surface->axis[2] == 1.0);
+  CHECK(surface->x_axis[0] == 1.0);
+  CHECK(surface->x_axis[1] == 0.0);
+  CHECK(surface->x_axis[2] == 0.0);
+
+  // The two vertices are the poles on the axis: (0, 0, -1) and (0, 0, +1).
+  const std::vector<geom::VertexId> vertices = brep.vertex_ids();
+  REQUIRE(vertices.size() == 2);
+  bool saw_south = false;
+  bool saw_north = false;
+  for (const geom::VertexId id : vertices) {
+    const Point3d& p = brep.vertex(id).point;
+    CHECK(p[0] == 0.0);
+    CHECK(p[1] == 0.0);
+    if (p[2] == -1.0) saw_south = true;
+    if (p[2] == 1.0) saw_north = true;
+  }
+  CHECK(saw_south);
+  CHECK(saw_north);
+
+  const geom::Result<double> volume =
+      geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9);
+  REQUIRE(volume.has_value());
+  const double expected = 4.0 * std::numbers::pi_v<double> / 3.0;
+  CHECK(primitive_relative_error(volume.value(), expected) <= 1e-12);
 }

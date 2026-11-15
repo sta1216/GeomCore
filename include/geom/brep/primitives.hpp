@@ -461,25 +461,33 @@ inline Result<Brep> make_cone(Point3d base, Vec3d axis, double base_radius, doub
 }
 
 // Sphere of `radius` around `center`, cut along the meridian half great circle
-// in the plane that contains the canonical x axis (1, 0, 0) and axis
-// (0, 0, 1). The seam is CircleCurve3{center, x_axis, axis, radius} over
-// [-pi/2, pi/2], running from the south pole to the north pole, and the single
-// face's loop uses it once in each direction. V = 2, E = 1, F = 1 (chi = 2).
+// in the plane spanned by `x_axis` and `axis`. The seam is
+// CircleCurve3{center, x_axis, axis, radius} over [-pi/2, pi/2], running from
+// the south pole (center - radius*axis) to the north pole (center +
+// radius*axis), and the single face's loop uses it once in each direction.
+// V = 2, E = 1, F = 1 (chi = 2) and the shell is closed.
 //
-// The frame is canonical because make_sphere has no frame parameter: axis is
-// (0, 0, 1) and x_axis is (1, 0, 0), so Sphere3::eval(0, v) is exactly the
-// seam curve and the poles are the two vertices.
+// `axis` and `x_axis` must be unit length and orthogonal, so the frame
+// (x_axis, cross(axis, x_axis), axis) is right handed and Sphere3::eval(0, v)
+// is exactly the seam curve while the poles are the two vertices. The
+// canonical overload below fixes axis = (0, 0, 1) and x_axis = (1, 0, 0) and
+// delegates here.
 //
 // Validation:
-//   - non-finite center or radius      -> Errc::non_finite
-//   - non-finite or negative tolerance -> Errc::tolerance_violation
-//   - radius <= 0                      -> Errc::degenerate
+//   - non-finite center, axis, x_axis or radius -> Errc::non_finite
+//   - non-finite or negative tolerance         -> Errc::tolerance_violation
+//   - radius <= 0                              -> Errc::degenerate
+//   - axis not unit length                     -> Errc::degenerate
+//   - x_axis not unit length, or not orthogonal
+//     to axis                                  -> Errc::degenerate
 //   - a pole that is not representable,
-//     or two poles rounding to one point -> Errc::degenerate
+//     or two poles rounding to one point       -> Errc::degenerate
 // Any error from a SolidEditor add_* call is propagated unchanged; commit()
 // performs the final validation.
-inline Result<Brep> make_sphere(Point3d center, double radius, double tol) {
-  if (!detail::primitive_point_finite(center) || !std::isfinite(radius)) {
+inline Result<Brep> make_sphere(Point3d center, Vec3d axis, Vec3d x_axis, double radius,
+                                double tol) {
+  if (!detail::primitive_point_finite(center) || !detail::primitive_vec_finite(axis) ||
+      !detail::primitive_vec_finite(x_axis) || !std::isfinite(radius)) {
     return Error{Errc::non_finite, "make_sphere: input is not finite", 0u, 0u};
   }
   if (!std::isfinite(tol) || tol < 0.0) {
@@ -489,9 +497,19 @@ inline Result<Brep> make_sphere(Point3d center, double radius, double tol) {
   if (!(radius > 0.0)) {
     return Error{Errc::degenerate, "make_sphere: radius must be positive", 0u, 0u};
   }
+  // Both norms use std::hypot, which is scale-safe. The bounds below are local
+  // constants, not a global epsilon.
+  const double axis_length = std::hypot(axis[0], axis[1], axis[2]);
+  if (!(std::fabs(axis_length - 1.0) <= detail::kAnalyticSurfaceUnitTolerance)) {
+    return Error{Errc::degenerate, "make_sphere: axis must be unit length", 0u, 0u};
+  }
+  const double x_axis_length = std::hypot(x_axis[0], x_axis[1], x_axis[2]);
+  const double axis_dot_x = dot(axis, x_axis);
+  if (!(std::fabs(x_axis_length - 1.0) <= detail::kAnalyticSurfaceUnitTolerance) ||
+      !(std::fabs(axis_dot_x) <= detail::kAnalyticSurfaceUnitTolerance)) {
+    return Error{Errc::degenerate, "make_sphere: x-axis must be perpendicular to the axis", 0u, 0u};
+  }
 
-  const Vec3d axis{0.0, 0.0, 1.0};
-  const Vec3d x_axis{1.0, 0.0, 0.0};
   const Point3d south{center[0] - radius * axis[0], center[1] - radius * axis[1],
                       center[2] - radius * axis[2]};
   const Point3d north{center[0] + radius * axis[0], center[1] + radius * axis[1],
@@ -533,6 +551,13 @@ inline Result<Brep> make_sphere(Point3d center, double radius, double tol) {
   const Result<SolidId> solid = editor.add_solid(shells, tol);
   if (!solid.has_value()) return solid.error();
   return editor.commit();
+}
+
+// Canonical chart of the sphere above: axis = (0, 0, 1), x_axis = (1, 0, 0),
+// so the seam lies in the xz plane and the poles are on the z axis. Kept
+// byte-identical to the pre-frame implementation by delegating.
+inline Result<Brep> make_sphere(Point3d center, double radius, double tol) {
+  return make_sphere(center, Vec3d{0.0, 0.0, 1.0}, Vec3d{1.0, 0.0, 0.0}, radius, tol);
 }
 
 // Torus with major radius R and minor radius r around the unit `axis` through
