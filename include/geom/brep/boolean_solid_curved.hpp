@@ -1464,13 +1464,13 @@ inline bool curved_boolean_torus_plane_cut_supported(const Plane3& plane, const 
 }
 
 // The exact circles in which a face pair meets. A plane and a cylinder or a
-// sphere with a parallel axis meet in one circle; a plane perpendicular to a
-// torus axis meets the tube in two concentric circles of radius R +/- sqrt(r^2 -
-// d^2), one for each side of the tube, and those are exactly the rims that bound
-// the flat cap of a cut torus. Both faces of the pair receive the same circle
-// objects, which is what lets the trimmed fragments and the healed arcs agree
-// edge for edge. A plane that misses the tube, or that only touches it, yields
-// no circle.
+// sphere with a parallel axis meet in one circle; two spheres meet in one circle
+// perpendicular to their centre line; a plane perpendicular to a torus axis
+// meets the tube in two concentric circles of radius R +/- sqrt(r^2 - d^2), one
+// for each side of the tube, and those are exactly the rims that bound the flat
+// cap of a cut torus. Both faces of the pair receive the same circle objects,
+// which is what lets the trimmed fragments and the healed arcs agree edge for
+// edge. A plane that misses the tube, or that only touches it, yields no circle.
 inline std::vector<CircleCurve3> curved_boolean_pair_circles(
     const SurfaceGeometry& a_surface, const PlaneFrame& a_frame,
     const SurfaceGeometry& b_surface, const PlaneFrame& b_frame, double tolerance) noexcept {
@@ -1483,7 +1483,47 @@ inline std::vector<CircleCurve3> curved_boolean_pair_circles(
     other = &a_surface;
     frame = &b_frame;
   }
-  if (plane == nullptr) return circles;
+  if (plane == nullptr) {
+    // Two whole spheres cross in one circle perpendicular to the centre line.
+    // This is the only plane-free pair with an analytic cut circle; the driver
+    // re-charts both operands so that the circle becomes a latitude of each
+    // sphere. Containment, tangency and separation have no cutting circle, and
+    // the inclusive guards keep the division by the centre distance away from
+    // zero (a non-finite distance fails the first one).
+    const Sphere3* a_sphere = std::get_if<Sphere3>(&a_surface);
+    const Sphere3* b_sphere = std::get_if<Sphere3>(&b_surface);
+    if (a_sphere == nullptr || b_sphere == nullptr || !a_sphere->is_valid() ||
+        !b_sphere->is_valid()) {
+      return circles;
+    }
+    const Vec3d delta = b_sphere->center - a_sphere->center;
+    const double distance = norm2(delta);
+    const double radius_sum = a_sphere->radius + b_sphere->radius;
+    const double radius_gap = std::abs(a_sphere->radius - b_sphere->radius);
+    if (!(distance > tolerance)) return circles;
+    if (!(distance < radius_sum - tolerance)) return circles;
+    if (!(distance > radius_gap + tolerance)) return circles;
+    // t is the signed offset from a's centre to the circle plane along the
+    // centre line; rho is the circle radius, real exactly when the spheres
+    // cross.
+    const Vec3d n{delta[0] / distance, delta[1] / distance, delta[2] / distance};
+    const double along = (distance * distance + a_sphere->radius * a_sphere->radius -
+                          b_sphere->radius * b_sphere->radius) /
+                         (2.0 * distance);
+    const double rho_squared = a_sphere->radius * a_sphere->radius - along * along;
+    if (!(rho_squared > tolerance * tolerance)) return circles;
+    // Deterministic frame: the reference axis is x unless n is too close to it,
+    // in which case y keeps cross(n, candidate) away from zero (its norm is at
+    // least 0.9 near x and at least sqrt(1 - 0.9^2) otherwise).
+    const Vec3d candidate =
+        std::abs(n[0]) >= 0.9 ? Vec3d{0.0, 1.0, 0.0} : Vec3d{1.0, 0.0, 0.0};
+    const Vec3d x_axis = split_solid_unit(cross(n, candidate));
+    const Vec3d y_axis = cross(n, x_axis);
+    const CircleCurve3 circle{a_sphere->center + n * along, x_axis, y_axis,
+                              std::sqrt(rho_squared)};
+    if (circle.is_valid()) circles.push_back(circle);
+    return circles;
+  }
   const double length = std::sqrt(plane->normal[0] * plane->normal[0] +
                                   plane->normal[1] * plane->normal[1] +
                                   plane->normal[2] * plane->normal[2]);

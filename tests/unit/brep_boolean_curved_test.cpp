@@ -823,6 +823,45 @@ TEST_CASE("QA-15: sphere cap booleans are closed and deterministic") {
   }
 }
 
+// Task 1 of M3c-3b: the analytic sphere/sphere pair circle. Two unit spheres
+// whose centres are 1.5 apart cross in the plane x = 0.75 with radius
+// sqrt(1 - 0.75^2) = sqrt(7)/4, perpendicular to the centre line.
+TEST_CASE("curved boolean: sphere/sphere has one analytic circle") {
+  const geom::PlaneFrame no_frame{};
+  const geom::Sphere3 sphere_a{geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                               geom::Vec3d{1.0, 0.0, 0.0}, 1.0};
+  const geom::Sphere3 sphere_b{geom::Point3d{1.5, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                               geom::Vec3d{1.0, 0.0, 0.0}, 1.0};
+  const std::vector<geom::CircleCurve3> circles = geom::detail::curved_boolean_pair_circles(
+      geom::SurfaceGeometry{sphere_a}, no_frame, geom::SurfaceGeometry{sphere_b}, no_frame,
+      1e-9);
+  REQUIRE(circles.size() == 1);
+  CHECK(circles[0].center[0] == doctest::Approx(0.75));
+  CHECK(circles[0].center[1] == doctest::Approx(0.0));
+  CHECK(circles[0].center[2] == doctest::Approx(0.0));
+  CHECK(circles[0].radius == doctest::Approx(std::sqrt(7.0) / 4.0));
+  CHECK(circles[0].is_valid());
+
+  // Tangent, contained and separate boundaries produce no cutting circle. The
+  // containment case uses radii 1.0 and 0.2 so that a centre distance of 0.5
+  // really is `d + rb <= ra`; with two unit spheres 0.5 apart is a lens, not
+  // containment.
+  const auto sphere_at = [](geom::Point3d center, double radius) {
+    return geom::SurfaceGeometry{geom::Sphere3{center, geom::Vec3d{0.0, 0.0, 1.0},
+                                               geom::Vec3d{1.0, 0.0, 0.0}, radius}};
+  };
+  const geom::SurfaceGeometry origin = sphere_at(geom::Point3d{0.0, 0.0, 0.0}, 1.0);
+  CHECK(geom::detail::curved_boolean_pair_circles(
+            origin, no_frame, sphere_at(geom::Point3d{2.0, 0.0, 0.0}, 1.0), no_frame, 1e-9)
+            .empty());
+  CHECK(geom::detail::curved_boolean_pair_circles(
+            origin, no_frame, sphere_at(geom::Point3d{0.5, 0.0, 0.0}, 0.2), no_frame, 1e-9)
+            .empty());
+  CHECK(geom::detail::curved_boolean_pair_circles(
+            origin, no_frame, sphere_at(geom::Point3d{2.5, 0.0, 0.0}, 1.0), no_frame, 1e-9)
+            .empty());
+}
+
 TEST_CASE("curved boolean: torus pairs need a plane cut") {
   const double tolerance = 1e-9;
   const geom::Result<geom::Brep> torus_a =
