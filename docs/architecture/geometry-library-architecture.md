@@ -1124,7 +1124,7 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
 
 依赖关系：M1 依赖 M0 的谓词、曲线曲面与测试设施；M2 依赖 M1 的 arrangement/CDT/索引；M3 强依赖 M2 的拓扑、网格化与容差模型；M4 在 M3 之上；M5 依赖前五者的 API 稳定。
 
-### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3/M3c-1/M3c-2 出口状态（2026-11-14）
+### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3/M3c-1/M3c-2 与 M3c-3a 出口状态（2026-11-15）
 
 **M0 地基：已满足。** 谓词以独立整数/Fraction oracle 对拍（1e6 随机 + 共线、1 ulp、
 抵消、1e±200、次正规语料），NURBS 求值与导数对解析解校验，三平台 CI 矩阵已配置；

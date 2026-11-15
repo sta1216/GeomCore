@@ -804,7 +804,7 @@ TEST_CASE("QA-15: sphere cap booleans are closed and deterministic") {
       const geom::Brep& brep = result.value().brep;
       CHECK(geom::validate_topology(brep).ok());
       const auto shells = brep.solid_shells(only_solid(brep));
-      CHECK(shells.size() == 1);
+      REQUIRE(shells.size() == 1);
       const double volume = volume_of(brep);
       CHECK(std::abs(volume - entry.expected) <= 1e-6 * std::abs(entry.expected));
       if (entry.mesh_closable) {
