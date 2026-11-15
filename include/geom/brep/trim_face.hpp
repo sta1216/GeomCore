@@ -1364,15 +1364,20 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
 // must lie on the face boundary within `tolerance`, weld to another open cut
 // endpoint within that distance, or T-junction onto another cut (its projection
 // is inserted into that cut). A closed cut (first point repeated as last) may
-// lie anywhere on an ordinary face. On a seam-only face (a sphere or torus face
-// whose boundary loop has zero area) the parameter rectangle is synthesized and
-// the closed cuts must be latitude-like: the two ends must be the two copies of
-// one physical seam point, matched with the same 1e-12 relative bound the
-// parameter projection uses (so a seam point that drifted by rounding still
-// counts as one point), and no other vertex may touch the seam. The contact
-// test and this path inspect the u sides only, so a torus closed cut that meets
-// the v seam is not supported by this path and is rejected. A closed cut wholly
-// inside the domain ("does not reach the seam"), a closed cut tangent to the
+// lie anywhere on an ordinary face, where it bounds an interior island. On a
+// seam-only face (a sphere or torus face whose boundary loop has zero area) the
+// parameter rectangle is synthesized and the closed cuts must be latitude-like:
+// the two ends must be the two copies of one physical seam point, matched with
+// the same 1e-12 relative bound the parameter projection uses (so a seam point
+// that drifted by rounding still counts as one point), and no other vertex may
+// touch the seam. On the sphere chart a latitude cut therefore meets the seam
+// at one physical point; a cap fragment that reaches a pole is emitted with
+// exactly one pole point (v = -pi/2 or +pi/2, taken from the domain, not a
+// projected approximation), and a pole-free band between two latitudes is
+// emitted as one ring joined through the seam columns. The contact test and
+// this path inspect the u sides only, so a torus closed cut that meets the v
+// seam is not supported by this path and is rejected. A closed cut that never
+// touches the seam (an island on a seam-only face), a closed cut tangent to the
 // seam, a closed cut crossing the seam more than once ("crosses the seam
 // twice"), and any cut running along a domain side are rejected as unsupported
 // before any arrangement work. Cut segments shorter than `tolerance` and

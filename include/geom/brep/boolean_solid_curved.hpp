@@ -150,10 +150,11 @@ inline bool curved_boolean_bounds_overlap(const CurvedBooleanBounds& a,
 // The surface kinds the driver can cut. Cone operands have an apex that
 // produces tangent loops the splitter cannot represent yet (an interior closed
 // ring not touching a seam, or an open meridian chain ending on the base rim);
-// sphere operands fold a periodic u axis onto two poles and need cap topology, so
-// their classification mesh is deferred to M3c-3; NURBS patches have no analytic
-// parameterization here. A torus is periodic on both axes, which the cut chains
-// and the seam splitter handle one axis at a time.
+// NURBS patches have no analytic parameterization here. A sphere is periodic in
+// u and collapses at both poles, but its closed latitude cuts are supported:
+// the splitter synthesizes the parameter rectangle and represents a
+// pole-touching cap with one exact pole point. A torus is periodic on both
+// axes, which the cut chains and the seam splitter handle one axis at a time.
 struct CurvedBooleanSurfaceGate {
   bool supported = false;
   const char* message = nullptr;
@@ -169,11 +170,8 @@ inline CurvedBooleanSurfaceGate curved_boolean_surface_gate(
     return CurvedBooleanSurfaceGate{
         false, "boolean_solid_curved: NURBS operands are not supported"};
   }
-  if (std::holds_alternative<Sphere3>(surface)) {
-    return CurvedBooleanSurfaceGate{
-        false,
-        "boolean_solid_curved: sphere operands need cap topology; booleans are deferred to "
-        "M3c-3"};
+  if (std::get_if<Sphere3>(&surface) != nullptr) {
+    return CurvedBooleanSurfaceGate{true, nullptr};
   }
   return CurvedBooleanSurfaceGate{
       false,

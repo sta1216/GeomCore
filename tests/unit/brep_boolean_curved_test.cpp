@@ -680,28 +680,62 @@ TEST_CASE("curved boolean: a sphere band joins its two cut runs") {
   CHECK(found_band);
 }
 
-TEST_CASE("curved boolean: sphere operands are rejected with the cap diagnostic") {
+TEST_CASE("curved boolean: sphere cap intersection") {
   const double tolerance = 1e-9;
   const geom::Result<geom::Brep> sphere =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance);
-  const geom::Result<geom::Brep> box = geom::make_box(geom::Point3d{-2.0, -2.0, 0.5},
-                                                      geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  const geom::Result<geom::Brep> box = geom::make_box(
+      geom::Point3d{-2.0, -2.0, 0.5}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
   REQUIRE(sphere.has_value());
   REQUIRE(box.has_value());
   const geom::SolidId a = only_solid(sphere.value());
   const geom::SolidId b = only_solid(box.value());
   geom::CurvedBooleanReport report;
-  for (const geom::SolidBooleanOp op : {geom::SolidBooleanOp::union_,
-                                        geom::SolidBooleanOp::intersection,
-                                        geom::SolidBooleanOp::difference,
-                                        geom::SolidBooleanOp::symmetric_difference}) {
-    const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
-        sphere.value(), a, box.value(), b, op, geom::CurvedBooleanOptions{tolerance}, &report);
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == geom::Errc::unsupported);
-    CHECK(message_of(result.error()).find("deferred to M3c-3") != std::string_view::npos);
-    CHECK(report.face_pairs == 0);
-  }
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      sphere.value(), a, box.value(), b, geom::SolidBooleanOp::intersection,
+      geom::CurvedBooleanOptions{tolerance}, &report);
+  REQUIRE_MESSAGE(result.has_value(), "boolean failed: " << message_of(result.error()));
+  CHECK(geom::validate_topology(result.value().brep).ok());
+  // `report` is the failure report and stays zeroed on success; the returned
+  // report carries the counters.
+  CHECK(report.cuts == 0);
+  CHECK(result.value().report.cuts >= 1);
+  CHECK(result.value().report.fragments >= 2);
+  CHECK(std::fabs(volume_of(result.value().brep) - 0.6544984694978736) <= 1e-6);
+}
+
+TEST_CASE("curved boolean: sphere complement cap") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance);
+  const geom::Result<geom::Brep> box = geom::make_box(
+      geom::Point3d{-2.0, -2.0, 0.5}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(sphere.has_value());
+  REQUIRE(box.has_value());
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      sphere.value(), only_solid(sphere.value()), box.value(), only_solid(box.value()),
+      geom::SolidBooleanOp::difference, geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(result.has_value(), "boolean failed: " << message_of(result.error()));
+  CHECK(geom::validate_topology(result.value().brep).ok());
+  CHECK(std::fabs(volume_of(result.value().brep) - 3.534291735288517) <= 1e-6);
+}
+
+TEST_CASE("curved boolean: sphere slab band") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance);
+  const geom::Result<geom::Brep> slab = geom::make_box(
+      geom::Point3d{-2.0, -2.0, -0.8}, geom::Point3d{2.0, 2.0, 0.8}, tolerance);
+  REQUIRE(sphere.has_value());
+  REQUIRE(slab.has_value());
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      sphere.value(), only_solid(sphere.value()), slab.value(), only_solid(slab.value()),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(result.has_value(), "boolean failed: " << message_of(result.error()));
+  CHECK(geom::validate_topology(result.value().brep).ok());
+  CHECK(result.value().brep.face_ids().size() == 3);
+  CHECK(result.value().brep.edge_ids().size() == 3);
+  CHECK(std::fabs(volume_of(result.value().brep) - 3.9542179533184135) <= 1e-6);
 }
 
 TEST_CASE("curved boolean: torus pairs need a plane cut") {
@@ -1552,6 +1586,12 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
   const geom::Brep caps_box =
       geom::make_box(geom::Point3d{-0.2, -2.0, 1.5}, geom::Point3d{0.4, 2.0, 3.0}, tolerance)
           .value();
+  // Sphere ∩ box z >= 0.5: the cap of height 0.5 above the latitude z = 0.5.
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance).value();
+  const geom::Brep sphere_cap_box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.5}, geom::Point3d{2.0, 2.0, 2.0}, tolerance)
+          .value();
 
   struct PositiveCase {
     const char* name;
@@ -1560,7 +1600,7 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
     geom::SolidBooleanOp op;
     double expected;
   };
-  const std::array<PositiveCase, 6> positives{{
+  const std::array<PositiveCase, 7> positives{{
       {"offset cap union", &cylinder, &offset_box, geom::SolidBooleanOp::union_,
        1.5 + 2.0 * kPi - i},
       {"offset cap intersection", &cylinder, &offset_box, geom::SolidBooleanOp::intersection, i},
@@ -1571,6 +1611,8 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
        2.0 * (kPi / 3.0 - std::sqrt(3.0) / 4.0)},
       {"box through both caps intersection", &cylinder, &caps_box,
        geom::SolidBooleanOp::intersection, 0.587720000938},
+      {"sphere cap intersection", &sphere, &sphere_cap_box,
+       geom::SolidBooleanOp::intersection, 0.6544984694978736},
   }};
   for (const PositiveCase& entry : positives) {
     check_qa_volume(entry.name, *entry.a, *entry.b, entry.op, entry.expected);
@@ -1578,15 +1620,11 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
 
   // Diagnosed rejections. The expected messages are the ones the driver
   // documents:
-  //   sphere   "boolean_solid_curved: sphere operands need cap topology;
-  //             booleans are deferred to M3c-3"
   //   cone     "boolean_solid_curved: cone operands need closed-cut and apex
   //             topology; booleans are deferred to M3c-3"
   //   NURBS    "boolean_solid_curved: NURBS operands are not supported"
   //   tangent  "boolean_solid_curved: tangent face contact is not supported yet"
   //   coplanar "boolean_solid_curved: coplanar face contact is not supported yet"
-  const geom::Brep sphere =
-      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 2.0, tolerance).value();
   const geom::Brep cone =
       geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 1.0,
                       tolerance)
@@ -1612,10 +1650,7 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
     geom::SolidBooleanOp op;
     const char* message;
   };
-  const std::array<RejectionCase, 5> rejections{{
-      {"sphere box", &sphere, &wide_box, geom::SolidBooleanOp::union_,
-       "boolean_solid_curved: sphere operands need cap topology; booleans are deferred to "
-       "M3c-3"},
+  const std::array<RejectionCase, 4> rejections{{
       {"cone box", &cone, &wide_box, geom::SolidBooleanOp::union_,
        "boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are "
        "deferred to M3c-3"},
