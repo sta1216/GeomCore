@@ -1815,3 +1815,121 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
     check_qa_rejection(entry.name, *entry.a, *entry.b, entry.op, entry.message);
   }
 }
+
+
+TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
+  const double tolerance = 1e-9;
+  const geom::CurvedBooleanOptions options{tolerance};
+  const geom::Brep unit_a =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance).value();
+  const geom::Brep unit_b =
+      geom::make_sphere(geom::Point3d{1.5, 0.0, 0.0}, 1.0, tolerance).value();
+
+  // Two equal spherical caps of height h = r - d / 2 = 0.25 meet at the rim.
+  const geom::Result<geom::CurvedBooleanResult> lens = geom::boolean_solid_curved(
+      unit_a, only_solid(unit_a), unit_b, only_solid(unit_b),
+      geom::SolidBooleanOp::intersection, options);
+  REQUIRE_MESSAGE(lens.has_value(), message_of(lens.error()));
+  CHECK(geom::validate_topology(lens.value().brep).ok());
+  CHECK(lens.value().brep.face_ids().size() == 2);
+  CHECK(lens.value().brep.edge_ids().size() == 3);
+  CHECK(lens.value().brep.vertex_ids().size() == 3);
+
+  // Both caps are charted on the shared frame: each face is the polar cap above
+  // the rim latitude v = pi / 2 - acos(x_rim) and it reaches the pole at pi / 2.
+  const double rim_latitude = 0.5 * kPi - std::acos(0.75);
+  for (const geom::FaceId face_id : lens.value().brep.face_ids()) {
+    const geom::Result<std::vector<geom::FaceUvLoop>> loops =
+        geom::face_loops_uv(lens.value().brep, face_id, tolerance);
+    REQUIRE_MESSAGE(loops.has_value(), message_of(loops.error()));
+    REQUIRE(loops.value().size() == 1);
+    const std::vector<geom::Point2d>& ring = loops.value().front().points;
+    REQUIRE(ring.size() >= 3);
+    double min_v = 1e30;
+    double max_v = -1e30;
+    std::size_t poles = 0;
+    for (const geom::Point2d& point : ring) {
+      min_v = std::min(min_v, point[1]);
+      max_v = std::max(max_v, point[1]);
+      if (std::abs(point[1] - 0.5 * kPi) <= 1e-9) ++poles;
+    }
+    CHECK(poles == 1);
+    CHECK(std::abs(max_v - 0.5 * kPi) <= 1e-9);
+    CHECK(std::abs(min_v - rim_latitude) <= 1e-9);
+  }
+
+  struct Fingerprint {
+    double volume = 0.0;
+    std::size_t vertices = 0;
+    std::size_t edges = 0;
+    std::size_t faces = 0;
+    std::size_t shells = 0;
+    std::size_t solids = 0;
+    bool operator==(const Fingerprint& other) const = default;
+  };
+  const auto fingerprint = [](const geom::Brep& brep) {
+    Fingerprint result;
+    result.volume = volume_of(brep);
+    result.vertices = brep.vertex_ids().size();
+    result.edges = brep.edge_ids().size();
+    result.faces = brep.face_ids().size();
+    result.solids = brep.solid_ids().size();
+    result.shells = brep.solid_shells(brep.solid_ids().front()).size();
+    return result;
+  };
+  const Fingerprint unit_a_before = fingerprint(unit_a);
+
+  // The sphere check needs whole-sphere operands: a sphere intersected with a
+  // box gives a two-face solid whose spherical face is only a cap, so the pair
+  // is diagnosed instead of reaching the splitter.
+  const geom::Brep cap_box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.5}, geom::Point3d{2.0, 2.0, 2.0}, tolerance)
+          .value();
+  const geom::Result<geom::CurvedBooleanResult> cap_result = geom::boolean_solid_curved(
+      unit_a, only_solid(unit_a), cap_box, only_solid(cap_box),
+      geom::SolidBooleanOp::intersection, options);
+  REQUIRE_MESSAGE(cap_result.has_value(), message_of(cap_result.error()));
+  const geom::Brep cap = cap_result.value().brep;
+  REQUIRE(cap.face_ids().size() == 2);
+  const geom::Brep cap_other =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 1.5}, 1.0, tolerance).value();
+
+  const Fingerprint cap_before = fingerprint(cap);
+  const Fingerprint cap_other_before = fingerprint(cap_other);
+  const geom::Result<geom::CurvedBooleanResult> not_whole = geom::boolean_solid_curved(
+      cap, only_solid(cap), cap_other, only_solid(cap_other),
+      geom::SolidBooleanOp::intersection, options);
+  REQUIRE_MESSAGE(!not_whole.has_value(), "a cap solid and a whole sphere must be rejected");
+  CHECK(not_whole.error().code == geom::Errc::unsupported);
+  CHECK(message_of(not_whole.error()) ==
+        "boolean_solid_curved: sphere/sphere booleans need whole-sphere operands");
+  CHECK(fingerprint(cap) == cap_before);
+  CHECK(fingerprint(cap_other) == cap_other_before);
+
+  // External tangency (unit/unit at d = 2), containment (d + 0.2 <= 1) and
+  // separation (unit/unit at d = 2.5) have no circle of intersection.
+  struct CrossingCase {
+    const char* name;
+    geom::Point3d center;
+    double radius;
+  };
+  const std::array<CrossingCase, 3> crossing{{
+      {"external tangency", geom::Point3d{2.0, 0.0, 0.0}, 1.0},
+      {"containment", geom::Point3d{0.5, 0.0, 0.0}, 0.2},
+      {"separation", geom::Point3d{2.5, 0.0, 0.0}, 1.0},
+  }};
+  for (const CrossingCase& entry : crossing) {
+    INFO(entry.name);
+    const geom::Brep other = geom::make_sphere(entry.center, entry.radius, tolerance).value();
+    const Fingerprint other_before = fingerprint(other);
+    const geom::Result<geom::CurvedBooleanResult> rejected = geom::boolean_solid_curved(
+        unit_a, only_solid(unit_a), other, only_solid(other),
+        geom::SolidBooleanOp::intersection, options);
+    REQUIRE_MESSAGE(!rejected.has_value(), "expected the crossing-spheres diagnostic");
+    CHECK(rejected.error().code == geom::Errc::unsupported);
+    CHECK(message_of(rejected.error()) ==
+          "boolean_solid_curved: sphere/sphere booleans need two crossing spheres");
+    CHECK(fingerprint(other) == other_before);
+  }
+  CHECK(fingerprint(unit_a) == unit_a_before);
+}

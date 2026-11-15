@@ -82,6 +82,7 @@
 #include <geom/brep/face_uv.hpp>
 #include <geom/brep/mesh_inside.hpp>
 #include <geom/brep/plane_frame.hpp>
+#include <geom/brep/primitives.hpp>
 #include <geom/brep/split_solid.hpp>
 #include <geom/brep/ssi.hpp>
 #include <geom/brep/tessellate.hpp>
@@ -1679,6 +1680,156 @@ inline Result<std::vector<FaceId>> curved_boolean_operand_faces(const Brep& brep
   return faces;
 }
 
+// A whole-sphere operand rebuilt on the shared frame: `a` and `b` are new
+// single-solid documents and `a_solid` / `b_solid` name their solids.
+struct CurvedBooleanRebasedSpheres {
+  Brep a;
+  SolidId a_solid{};
+  Brep b;
+  SolidId b_solid{};
+};
+
+// One operand seen as a sphere: `surface` is null when the solid has no
+// spherical face, and `whole` is true only when its only face is the whole
+// sphere of `make_sphere`.
+struct CurvedBooleanSphereOperand {
+  const Sphere3* surface = nullptr;
+  bool whole = false;
+};
+
+// Classifies one operand for `curved_boolean_rechart_whole_spheres`.
+//
+// Precondition, the same one `curved_boolean_operand_faces` enforces for the
+// driver: `brep` holds exactly one solid and that solid owns exactly one shell.
+// The Brep-level `edge_ids()` / `vertex_ids()` counts below are read on that
+// assumption, so they describe the one selected solid rather than other solids
+// in the document. A whole sphere is one shell with one face on a Sphere3 whose
+// chart needs no boundary beyond the synthetic analytic domain, and whose single
+// face loop uses the seam once in each direction (one edge, two pole vertices).
+inline Result<CurvedBooleanSphereOperand> curved_boolean_sphere_operand(
+    const Brep& brep, SolidId solid, double tolerance) {
+  CurvedBooleanSphereOperand operand{};
+  const std::span<const ShellId> shells = brep.solid_shells(solid);
+  std::size_t face_count = 0;
+  FaceId face{};
+  for (const ShellId shell : shells) {
+    for (const FaceId id : brep.shell_faces(shell)) {
+      ++face_count;
+      face = id;
+      if (operand.surface != nullptr) continue;
+      const Face& entity = brep.face(id);
+      if (entity.surface == kNoGeometry) continue;
+      const SurfaceGeometry& surface = brep.geometry().surfaces[entity.surface];
+      if (const Sphere3* sphere = std::get_if<Sphere3>(&surface); sphere != nullptr) {
+        operand.surface = sphere;
+      }
+    }
+  }
+  if (operand.surface == nullptr) return operand;
+  if (shells.size() != 1 || face_count != 1) return operand;
+  const Result<CurvedBooleanFaceInfo> info = curved_boolean_face_info(brep, face, tolerance);
+  if (!info.has_value()) return info.error();
+  if (!info.value().synthetic_domain) return operand;
+  if (brep.edge_ids().size() != 1 || brep.vertex_ids().size() != 2) return operand;
+  operand.whole = true;
+  return operand;
+}
+
+// Re-charts a pair of whole-sphere operands so that the circle in which the two
+// sphere boundaries cross becomes a latitude of both charts. The sphere/sphere
+// cut circle (`curved_boolean_pair_circles`) lies in the plane perpendicular to
+// the centre line, but the seam of `make_sphere` is a meridian, so unless the two
+// axes already point at each other along the centre line, the circle is clipped
+// against a seam that is not one of its meridians and the cut cannot be
+// trimmed ("open cuts on a seam-only face"). Rebuilding both operands with
+// `axis = +-n` (n the unit centre line) and a shared `x_axis` makes the seam a
+// meridian of the cut circle, at which point the existing cut and split code
+// handles both caps. The result is nullopt whenever the pair should take the
+// existing path unchanged:
+//
+//   * neither operand has a spherical face, or exactly one does (that case
+//     already has a plane-free analytic cut circle of its own);
+//   * both are whole spheres and both axes already agree with the centre line:
+//     this is the fixed point of the recursion, so the re-charted pair is
+//     returned unchanged and the driver cannot recurse forever.
+//
+// A pair of spherical operands is rejected instead when either is not a whole
+// sphere (a cap or a spherical face with further boundary cannot be re-expressed
+// by `make_sphere`), or when the two boundaries do not cross (containment,
+// tangency and separation have no cut circle).
+//
+// Termination is structural, not counted: step 5 compares each axis with the
+// unit centre line, recomputed from the unchanged centres by this same
+// deterministic code. After one rebuild the axes are exactly that unit vector
+// (and its negation), so the comparison is a few ulp inside the 8-ulp band and
+// the recursive call stops. Depth is therefore two: one re-chart, then the fixed
+// point. No recursion counter is needed; one would only mask a bug that broke
+// this argument.
+//
+// The driver calls this with the single-solid documents that
+// `curved_boolean_sphere_operand` (and `curved_boolean_operand_faces`) require.
+inline Result<std::optional<CurvedBooleanRebasedSpheres>> curved_boolean_rechart_whole_spheres(
+    const Brep& a, SolidId a_solid, const Brep& b, SolidId b_solid, double tolerance) {
+  const std::optional<CurvedBooleanRebasedSpheres> not_a_rechart{};
+  const Result<CurvedBooleanSphereOperand> sphere_a =
+      curved_boolean_sphere_operand(a, a_solid, tolerance);
+  if (!sphere_a.has_value()) return sphere_a.error();
+  const Result<CurvedBooleanSphereOperand> sphere_b =
+      curved_boolean_sphere_operand(b, b_solid, tolerance);
+  if (!sphere_b.has_value()) return sphere_b.error();
+  if (sphere_a.value().surface == nullptr || sphere_b.value().surface == nullptr) {
+    return not_a_rechart;
+  }
+  if (!sphere_a.value().whole || !sphere_b.value().whole) {
+    return Error{Errc::unsupported,
+                 "boolean_solid_curved: sphere/sphere booleans need whole-sphere operands",
+                 a_solid.index(), b_solid.index()};
+  }
+  const Sphere3& first = *sphere_a.value().surface;
+  const Sphere3& second = *sphere_b.value().surface;
+  const Vec3d delta = second.center - first.center;
+  const double distance = norm2(delta);
+  const double radius_sum = first.radius + second.radius;
+  const double radius_gap = std::abs(first.radius - second.radius);
+  if (!(distance > tolerance) || !(distance < radius_sum - tolerance) ||
+      !(distance > radius_gap + tolerance)) {
+    return Error{Errc::unsupported,
+                 "boolean_solid_curved: sphere/sphere booleans need two crossing spheres",
+                 a_solid.index(), b_solid.index()};
+  }
+  const Vec3d axis{delta[0] / distance, delta[1] / distance, delta[2] / distance};
+  const Vec3d negated_axis{-axis[0], -axis[1], -axis[2]};
+  constexpr double kAxisAgreement = 8.0 * std::numeric_limits<double>::epsilon();
+  if (std::abs(dot(first.axis, axis) - 1.0) <= kAxisAgreement &&
+      std::abs(dot(second.axis, negated_axis) - 1.0) <= kAxisAgreement) {
+    return not_a_rechart;
+  }
+  // Same deterministic shared frame as the sphere/sphere cut circle: the
+  // reference axis is x unless the centre line is too close to it, in which case
+  // y keeps cross(axis, candidate) away from zero.
+  const Vec3d candidate =
+      std::abs(axis[0]) >= 0.9 ? Vec3d{0.0, 1.0, 0.0} : Vec3d{1.0, 0.0, 0.0};
+  const Vec3d x_axis = split_solid_unit(cross(axis, candidate));
+  const Result<Brep> rechart_a = make_sphere(first.center, axis, x_axis, first.radius, tolerance);
+  if (!rechart_a.has_value()) return rechart_a.error();
+  const Result<Brep> rechart_b =
+      make_sphere(second.center, negated_axis, x_axis, second.radius, tolerance);
+  if (!rechart_b.has_value()) return rechart_b.error();
+  CurvedBooleanRebasedSpheres rebased;
+  rebased.a = rechart_a.value();
+  rebased.b = rechart_b.value();
+  const std::vector<SolidId> solids_a = rebased.a.solid_ids();
+  const std::vector<SolidId> solids_b = rebased.b.solid_ids();
+  if (solids_a.size() != 1 || solids_b.size() != 1) {
+    return Error{Errc::invalid_topology,
+                 "boolean_solid_curved: re-charted sphere must have exactly one solid",
+                 a_solid.index(), b_solid.index()};
+  }
+  rebased.a_solid = solids_a.front();
+  rebased.b_solid = solids_b.front();
+  return std::optional<CurvedBooleanRebasedSpheres>{std::move(rebased)};
+}
+
 }  // namespace detail
 
 // Boolean combination of two analytic B-rep solids.
@@ -1741,6 +1892,23 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
       return info.error();
     }
     infos_b.push_back(info.value());
+  }
+
+  // A sphere/sphere pair has no splitter that can follow the seam unless both
+  // operands are re-charted onto their centre line first: the cut circle is a
+  // latitude of the shared chart only then (see the helper). This runs before the
+  // torus gate because a sphere pair has no torus, and before the flipped-fragment
+  // pre-check so the helper's diagnostics (not whole spheres, boundaries not
+  // crossing) are not masked by a cut that cannot be trimmed.
+  if (const auto rebased =
+          detail::curved_boolean_rechart_whole_spheres(a, a_solid, b, b_solid, tolerance);
+      !rebased.has_value()) {
+    record_failure();
+    return rebased.error();
+  } else if (rebased.value().has_value()) {
+    const detail::CurvedBooleanRebasedSpheres& pair = *rebased.value();
+    return boolean_solid_curved(pair.a, pair.a_solid, pair.b, pair.b_solid, op, options,
+                                failure_report);
   }
 
   // A torus is only cut by a plane; overlapping torus/torus and torus/cylinder pairs have no
