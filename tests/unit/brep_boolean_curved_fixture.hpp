@@ -1,10 +1,14 @@
 #pragma once
 
-// Shared measurement helpers for the curved boolean tests. `sphere_face_volume`
-// sums the signed chart volumes of a solid's spherical faces; each face must be
-// a polar cap (a whole-sphere boolean result is exactly two such caps sharing
-// one rim). The QA-16 corpus and the QA-17 arbitrary-placement lens both use it,
-// so it lives here rather than in either translation unit.
+// Shared measurement and topology helpers for the curved boolean tests.
+// `sphere_face_volume` sums the signed chart volumes of a solid's spherical
+// faces; each face must be a polar cap (a whole-sphere boolean result is exactly
+// two such caps sharing one rim). `check_one_shared_rim` checks that exactly one
+// edge is used by two faces with opposite coedge senses, i.e. the rim stitch.
+// The QA-16 corpus, the QA-17 arbitrary-placement lens and the 15-degree case
+// all use them, so they live here rather than in one translation unit.
+
+#include <doctest/doctest.h>
 
 #include <algorithm>
 #include <cmath>
@@ -92,6 +96,33 @@ inline std::optional<double> sphere_face_volume(const Brep& brep) {
   }
   if (!any_sphere) return std::nullopt;
   return volume;
+}
+
+// Exactly one edge may be used by two different faces, and those two coedges
+// must walk it in opposite directions; every other edge is used twice by one
+// face. For these lenses the shared edge is the rim circle.
+inline void check_one_shared_rim(const char* name, const Brep& brep) {
+  std::size_t rim_edges = 0;
+  std::size_t edge_index = 0;
+  for (const EdgeId edge_id : brep.edge_ids()) {
+    const std::size_t current = edge_index++;
+    std::vector<FaceId> users;
+    std::vector<bool> senses;
+    for (const CoedgeId coedge_id : brep.coedge_ids()) {
+      const Coedge& coedge = brep.coedge(coedge_id);
+      if (coedge.edge != edge_id) continue;
+      senses.push_back(coedge.reversed);
+      if (std::find(users.begin(), users.end(), coedge.face) == users.end()) {
+        users.push_back(coedge.face);
+      }
+    }
+    CHECK_MESSAGE(senses.size() == 2, name << ": edge " << current << " is not used twice");
+    if (users.size() != 2) continue;
+    ++rim_edges;
+    REQUIRE(senses.size() == 2);
+    CHECK_MESSAGE(senses[0] != senses[1], name << ": the rim coedges agree on orientation");
+  }
+  CHECK_MESSAGE(rim_edges == 1, name << ": expected one shared rim edge, saw " << rim_edges);
 }
 
 }  // namespace geom::test

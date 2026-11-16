@@ -39,6 +39,7 @@ namespace {
 
 constexpr double kPi = std::numbers::pi_v<double>;
 
+using geom::test::check_one_shared_rim;
 using geom::test::sphere_face_cap_volume;
 using geom::test::sphere_face_volume;
 
@@ -2002,13 +2003,6 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   CHECK(fingerprint_of(unit_a) == unit_a_before);
 }
 
-namespace {
-// Defined with the M3c-3b lens corpus later in this file; the off-axis case
-// below reuses the same rim check so a rotated lens cannot close by a
-// different rule.
-void check_one_shared_rim(const char* name, const geom::Brep& brep);
-}  // namespace
-
 TEST_CASE("curved boolean: an off-axis sphere lens is built") {
   const double tolerance = 1e-9;
   const double angle = 15.0 * 3.14159265358979323846 / 180.0;
@@ -2210,33 +2204,6 @@ LensTopology lens_topology(const geom::Brep& brep) {
     topology.shells = brep.solid_shells(brep.solid_ids().front()).size();
   }
   return topology;
-}
-
-// Exactly one edge may be used by two different faces, and those two coedges
-// must walk it in opposite directions; every other edge is used twice by one
-// face. For these lenses the shared edge is the rim circle.
-void check_one_shared_rim(const char* name, const geom::Brep& brep) {
-  std::size_t rim_edges = 0;
-  std::size_t edge_index = 0;
-  for (const geom::EdgeId edge_id : brep.edge_ids()) {
-    const std::size_t current = edge_index++;
-    std::vector<geom::FaceId> users;
-    std::vector<bool> senses;
-    for (const geom::CoedgeId coedge_id : brep.coedge_ids()) {
-      const geom::Coedge& coedge = brep.coedge(coedge_id);
-      if (coedge.edge != edge_id) continue;
-      senses.push_back(coedge.reversed);
-      if (std::find(users.begin(), users.end(), coedge.face) == users.end()) {
-        users.push_back(coedge.face);
-      }
-    }
-    CHECK_MESSAGE(senses.size() == 2, name << ": edge " << current << " is not used twice");
-    if (users.size() != 2) continue;
-    ++rim_edges;
-    REQUIRE(senses.size() == 2);
-    CHECK_MESSAGE(senses[0] != senses[1], name << ": the rim coedges agree on orientation");
-  }
-  CHECK_MESSAGE(rim_edges == 1, name << ": expected one shared rim edge, saw " << rim_edges);
 }
 
 // One QA-16 lens run. `volume` is the signed chart cap sum from

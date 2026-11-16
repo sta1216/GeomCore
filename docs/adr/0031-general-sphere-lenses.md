@@ -100,19 +100,26 @@ snapping**；本 ADR 只记录实际进入生产代码的规则。
 - **QA-17（新增）。** `tests/unit/curved_boolean_qa17_test.cpp`，单位球对、
   `d = 1.5`、中心线方向 37°（不在 15°/30°/10° 网格上）：交集体积
   `11π/96 = 0.359974158223830...`（`1e-6` 相对，chart 求和度量）、恰好 1 个
-  shell、`validate_topology().ok()`、同参数连跑两次 chart 体积逐位相同；
-  10 条断言，Debug 与 Release 都通过。QA-17 使用测试共享头
-  `tests/unit/brep_boolean_curved_fixture.hpp` 的 `sphere_face_volume`（由
-  `brep_boolean_curved_test.cpp` 迁出，未改名），不引入新的体积积分。
-- **放置语料（实测）。** 15° 已知难例（既有 off-axis 用例，含并集与共享 rim
-  判据）、30° 全圈、10° 细网格、5 个固定种子随机抽样，共 33 次布尔操作、
-  396 条断言，交集相对 `1e-9`、并/差相对 `1e-6`，全部通过；每条都是单壳、
-  `validate_topology` 干净、单条被两个 coedge 反向使用的 rim。随机抽样的具体
-  角度/距离依赖标准库的 `uniform_real_distribution` 实现，换工具链位置会移动，
-  但仍落在 `[0,360)` 与 `[1.05,1.95]` 内。
-- **全套计数（实测）。** Debug 与 Release 各 **952 个用例、660,012 条断言**，
+  shell、恰好 2 个面（两片 cap）、单条被两个 coedge 反向使用的 rim、
+  `validate_topology().ok()`、同参数连跑两次 chart 体积逐位相同；17 条断言
+  （含 `face_ids().size() == 2` 与 `check_one_shared_rim` 的 6 条 rim 断言），
+  Debug 与 Release 都通过。QA-17 使用测试共享头
+  `tests/unit/brep_boolean_curved_fixture.hpp` 的 `sphere_face_volume` 与
+  `check_one_shared_rim`（由 `brep_boolean_curved_test.cpp` 迁出，均未改名），
+  不引入新的体积积分。
+- **放置语料（实测）。** 33 次旋转语料由四部分构成：30° 全圈交集 12 次、
+  0°/45°/90° 的并/差 6 次、0–90° 以 10° 为步长的细网格交集 10 次、固定种子
+  随机抽样 5 次，共 396 条断言。15° 已知难例是**独立用例**（既有的
+  `curved boolean: an off-axis sphere lens is built`，交、并各一次，2 次布尔、
+  21 条断言，现复用 `check_one_shared_rim`），不计入这 33 次。交集相对 `1e-9`、
+  并/差相对 `1e-6`，全部通过；每条结果都是单壳、`validate_topology` 干净、
+  单条被两个 coedge 反向使用的 rim。随机抽样的具体角度/距离依赖标准库的
+  `uniform_real_distribution` 实现，换工具链位置会移动，但仍落在 `[0,360)` 与
+  `[1.05,1.95]` 内。
+- **全套计数（实测）。** Debug 与 Release 各 **952 个用例、660,019 条断言**，
   0 失败、0 跳过，`/W4 /WX /utf-8` 零警告；基线 951/660,002，本任务新增 1 个
-  用例、10 条断言。`sphere_face_volume` 迁出只改测试组织，不改变任何断言。
+  用例、17 条断言（QA-17 含 6 条共享 rim 断言）。`sphere_face_volume` 与
+  `check_one_shared_rim` 迁出只改测试组织，不改变原有用例的断言数。
 - **基准与耗时（实测）。** 本任务不新增 bench 可执行文件；QA-17 与 15° 用例
   的聚焦墙钟时间、33 次语料与全套耗时见 `docs/benchmarks/m3c3c.md`（同一台
   i7-8550U / Windows 10 / MSVC 19.44，Debug 与 Release 分列，informational、

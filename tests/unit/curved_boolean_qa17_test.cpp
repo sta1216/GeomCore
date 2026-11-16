@@ -44,6 +44,8 @@ TEST_CASE("QA-17: a sphere lens at an arbitrary placement is rebuilt exactly") {
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(lens.has_value(), message_of(lens.error()));
   CHECK(geom::validate_topology(lens.value().brep).ok());
+  CHECK(lens.value().brep.face_ids().size() == 2);
+  geom::test::check_one_shared_rim("QA-17", lens.value().brep);
   REQUIRE(lens.value().brep.solid_shells(lens.value().brep.solid_ids().front()).size() == 1);
 
   const std::optional<double> volume = geom::test::sphere_face_volume(lens.value().brep);
