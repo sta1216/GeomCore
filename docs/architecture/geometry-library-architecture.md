@@ -1124,7 +1124,7 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
 
 依赖关系：M1 依赖 M0 的谓词、曲线曲面与测试设施；M2 依赖 M1 的 arrangement/CDT/索引；M3 强依赖 M2 的拓扑、网格化与容差模型；M4 在 M3 之上；M5 依赖前五者的 API 稳定。
 
-### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3/M3c-1/M3c-2、M3c-3a 与 M3c-3b 出口状态（2026-11-16）
+### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3/M3c-1/M3c-2、M3c-3a、M3c-3b 与 M3c-3c-1 出口状态（2026-11-16）
 
 **M0 地基：已满足。** 谓词以独立整数/Fraction oracle 对拍（1e6 随机 + 共线、1 ulp、
 抵消、1e±200、次正规语料），NURBS 求值与导数对解析解校验，三平台 CI 矩阵已配置；
@@ -1354,6 +1354,8 @@ chart 体积 `5.34` / `3.56` / `3.70` ms，实测见 `docs/benchmarks/m3c3b.md`�
 ADR-0030。Debug 与 Release 各 949 个用例、659,600 条断言全绿，
 `/W4 /WX /utf-8` 零警告。一般位置球/球、包含/相切/分离、锥操作数、一般修剪网格化
 与 NURBS 仍待 M3c-3c；本行只关闭 M3c-3b，不得据此声称 M3c-3 完成。
+
+**M3c-3c-1（一般位置球/球：支持；M3c-3 未完成）**：`boolean_solid_curved` 的球/球重画不再要求中心线轴对齐——`axis` 直接取中心线单位向量（`boolean_solid_curved.hpp:1807`），8 ulp 比较（`kAxisAgreement`，`boolean_solid_curved.hpp:1809-1813`）只是重画后的不动点终止判据，不是放置门。整球判定与相交判定不变：非整球/部分球报 `"...need whole-sphere operands"`，包含、外切、内切、分离报 `"...need two crossing spheres"`。缝端点落在参数域内几个 ulp 时，`trim_face_split_seam_only` 用 `1e-12 * max(1, |u_lo|, |u_hi|)` 把它吸附到域侧，并重算 min/max 再做域检查（`trim_face.hpp:988-1015`）；整球缝环改由相对面积 `|area| <= 1e-12 * extent^2` 识别（`trim_face.hpp:1517`），斜置图卡缝环的舍入面积（实测 `6.16e-33`）不再把它误送进常规裁剪。没有 rim snapping：Task 3 实测两片 cap 的 rim 本就相同，投影到交圆的补丁是惰性的，未进入生产代码。QA-17（`tests/unit/curved_boolean_qa17_test.cpp`，37° 放置、`d = 1.5`）断言交集体积 `11π/96`（`1e-6` 相对）、恰 1 个 shell、`validate_topology` 干净、同参数两次 chart 体积逐位相同，共 10 条断言；Debug 与 Release 各 952 个用例、660,012 条断言全绿，`/W4 /WX /utf-8` 零警告。15° 已知难例、30°/10° 网格与 5 个固定种子随机抽样（33 次布尔、396 条断言）均通过。实测见 `docs/benchmarks/m3c3c.md`，取舍见 ADR-0031。包含/相切/分离、非整球操作数、锥、torus、NURBS 与布尔结果修剪面网格化仍未支持；本行只关闭 M3c-3c-1，不得据此声称 M3c-3 完成。
 
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外
