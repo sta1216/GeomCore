@@ -2018,6 +2018,37 @@ TEST_CASE("trim face: seam ends 1e-3 apart are an open cut") {
   check_sphere_face_unchanged(sphere, face);
 }
 
+TEST_CASE("curved boolean: a seam endpoint a few ulp inside is snapped") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance);
+  REQUIRE(sphere.has_value());
+  const geom::FaceId face = sphere.value().face_ids().front();
+
+  std::vector<geom::Point2d> ring;
+  constexpr std::size_t kSamples = 25;
+  const double v = std::asin(0.5);
+  for (std::size_t i = 0; i <= kSamples; ++i) {
+    const double u = 2.0 * 3.14159265358979323846 *
+                     static_cast<double>(i) / static_cast<double>(kSamples);
+    ring.push_back(geom::Point2d{u, v});
+  }
+  // The SSI projection of a seam point is not exactly on the seam meridian.
+  ring.front()[0] = 2.9101132668452026e-18;
+  const std::vector<geom::FaceCut> cuts{geom::FaceCut{ring}};
+  const geom::Result<std::vector<geom::CurvedFragment>> fragments =
+      geom::split_face_curved(sphere.value(), face, cuts, tolerance);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 2);
+  for (const geom::CurvedFragment& fragment : fragments.value()) {
+    REQUIRE(fragment.loops_uv.size() == 1);
+    // The zero-width ring produced by a dangling chain has 2 * kSamples + 2
+    // points; the two real pieces stay at kSamples + 1 (rim) plus one pole.
+    CHECK(fragment.loops_uv.front().size() <= kSamples + 3);
+    CHECK(geom::signed_area2(fragment.loops_uv.front()) != 0.0);
+  }
+}
+
 TEST_CASE("trim face: a closed cut crossing the seam twice is unsupported") {
   constexpr double kSplitTol = 1e-9;
   const Brep sphere = make_sphere(Point3d{0, 0, 0}, 1.0, kSplitTol).value();

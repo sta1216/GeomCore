@@ -981,6 +981,33 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
     for (Point2d& point : points) point[0] += shift;
     min_u += shift;
     max_u += shift;
+    // An SSI cut endpoint can project a few ulp inside the domain. The seam-pair
+    // closure tolerates that drift, but the arrangement does not: the cut would
+    // leave a dangling chain and build a zero-width face. Snap a coordinate that
+    // close to a side onto that side before the arrangement.
+    const double seam_eps =
+        1e-12 * std::max({1.0, std::fabs(u_lo), std::fabs(u_hi)});
+    for (Point2d& point : points) {
+      if (std::fabs(point[0] - u_lo) <= seam_eps) {
+        point[0] = u_lo;
+      } else if (std::fabs(point[0] - u_hi) <= seam_eps) {
+        point[0] = u_hi;
+      }
+      if (periodic_v) {
+        if (std::fabs(point[1] - v_lo) <= seam_eps) {
+          point[1] = v_lo;
+        } else if (std::fabs(point[1] - v_hi) <= seam_eps) {
+          point[1] = v_hi;
+        }
+      }
+    }
+    // The bounds check below uses these; the values above predate the snap.
+    min_u = points.front()[0];
+    max_u = min_u;
+    for (const Point2d& point : points) {
+      min_u = std::min(min_u, point[0]);
+      max_u = std::max(max_u, point[0]);
+    }
     if (!(min_u >= u_lo) || !(max_u <= u_hi)) {
       return Error{Errc::unsupported,
                    "split_face_curved: cut leaves the parameter domain",
