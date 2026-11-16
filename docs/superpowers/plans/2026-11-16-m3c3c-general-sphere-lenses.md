@@ -397,7 +397,7 @@ Expected: PASS.
 
 - [ ] **Step 3: Write ADR-0031 and the benchmark page**
 
-ADR-0031 records: accepted inputs (whole spheres, crossing, any centre line), the seam snapping rule (`1e-12` relative), the shared-rim rule (project onto the analytic pair circle within `max(64*tol, 1e-9*r)`), and remaining limits (non-crossing, non-whole-sphere, cone/torus/NURBS, tessellation of the result). `docs/benchmarks/m3c3c.md` records the 37-degree QA run and the 15-degree step cost.
+ADR-0031 records: accepted inputs (whole spheres, crossing, any centre line), the seam-endpoint snapping rule (`1e-12 * max(1, |u_lo|, |u_hi|)`), the seam-only area rule (`|area| <= 1e-12 * extent^2`, and why the magnitude of that bound, not the type-only domain gate, keeps trimmed faces on the regular path), the pole tolerance used by the test helper (`1e-6`, because `asin` amplifies `|axis|^2 = 1 +/- 1e-16` to about `2e-8` in product-side `face_loops_uv`), and remaining limits (non-crossing, non-whole-sphere, cone/torus/NURBS, tessellation of the result). `docs/benchmarks/m3c3c.md` records the 37-degree QA run and the 15-degree step cost.
 
 - [ ] **Step 4: Update §16.3 and run the full suites**
 
@@ -431,5 +431,5 @@ git commit -m "docs(m3c3c): record QA-17 and the general sphere lens limits"
 ## Self-review
 
 - Spec coverage: every Review Focus line is pinned by a task test (Task 1 seam drift, Task 2 acceptance, Task 3 rim identity, Task 4 corpus, Task 5 QA).
-- Type consistency: `curved_boolean_snap_rim_to_circle` is the only new production name; it is used only in `harvest`.
+- Type consistency: no new production API is introduced; the only production change is the relative seam-only area bound in `split_face_curved`.
 - No placeholders: all tests carry exact values; no step says "handle edge cases".
