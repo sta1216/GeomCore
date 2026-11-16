@@ -406,7 +406,7 @@ Do not run the plane reprojection block for a sphere.
 **Step 1 — failing test**
 
 Do not use `curved_solid_volume` on the lens result: its sphere-face rim has
-about 1800 points at tolerance 1e-9, and ear clipping over that ring stalls for
+about 4098 points at tolerance 1e-9 (1809 at 1e-4), and ear clipping over that ring stalls for
 minutes. The Task 3 report records the measurement; Task 5 validates the
 replacement below against `curved_solid_volume` on the 3a cap (66-point ring).
 
@@ -417,8 +417,9 @@ Add a test-local helper `sphere_face_volume(const Brep&)` in
   `face_loops_uv(..., tolerance)`; require exactly one loop;
 - take the loop's signed shoelace area for the sign (+ outward, - reversed);
 - take `v_lo`/`v_hi` of the loop: if `v_lo` is within 1e-9 of `-pi/2` the cap is
-  southern with height `h = r * (1 + v_hi)`, else if `v_hi` is within 1e-9 of
-  `+pi/2` it is northern with `h = r * (1 - v_lo)`, otherwise return `nullopt`;
+  southern with height `h = r * (1 + sin(v_hi))`, else if `v_hi` is within 1e-9
+  of `+pi/2` it is northern with `h = r * (1 - sin(v_lo))`, otherwise return
+  `nullopt`;
 - return `sign * pi * h * h * (3r - h) / 3`, summed over the faces.
 
 Then:
@@ -465,7 +466,7 @@ share the rim edge.
 
 Every face of the three results is a polar cap on its own `Sphere3` chart, so
 `sphere_face_volume` sums their exact cap volumes. Do not call
-`curved_solid_volume` on these solids: the lens rim carries about 1800 points at
+`curved_solid_volume` on these solids: the lens rim carries about 4098 points at
 tolerance 1e-9 and its ear clipping takes minutes (Task 3 report, Concern 1).
 
 Validate the helper itself in this task: on the M3c-3a cap solid
