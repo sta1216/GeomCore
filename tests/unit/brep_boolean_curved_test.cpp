@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <numbers>
 #include <optional>
+#include <random>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -2069,6 +2070,13 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   CHECK(fingerprint_of(unit_a) == unit_a_before);
 }
 
+namespace {
+// Defined with the M3c-3b lens corpus later in this file; the off-axis case
+// below reuses the same rim check so a rotated lens cannot close by a
+// different rule.
+void check_one_shared_rim(const char* name, const geom::Brep& brep);
+}  // namespace
+
 TEST_CASE("curved boolean: an off-axis sphere lens is built") {
   const double tolerance = 1e-9;
   const double angle = 15.0 * 3.14159265358979323846 / 180.0;
@@ -2085,6 +2093,8 @@ TEST_CASE("curved boolean: an off-axis sphere lens is built") {
       north.value().solid_ids().front(), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(lens.has_value(), message_of(lens.error()));
+  CHECK(geom::validate_topology(lens.value().brep).ok());
+  check_one_shared_rim("off-axis lens", lens.value().brep);
   const std::optional<double> volume = sphere_face_volume(lens.value().brep);
   REQUIRE(volume.has_value());
   CHECK(*volume == doctest::Approx(11.0 * 3.14159265358979323846 / 96.0)
@@ -2097,6 +2107,8 @@ TEST_CASE("curved boolean: an off-axis sphere lens is built") {
       north.value().solid_ids().front(), geom::SolidBooleanOp::union_,
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(united.has_value(), message_of(united.error()));
+  CHECK(geom::validate_topology(united.value().brep).ok());
+  check_one_shared_rim("off-axis union", united.value().brep);
   CHECK(*sphere_face_volume(united.value().brep) ==
         doctest::Approx(245.0 * 3.14159265358979323846 / 96.0).epsilon(1e-6));
 }
@@ -2436,4 +2448,111 @@ TEST_CASE("QA-16: sphere lens booleans are closed and deterministic") {
   const geom::Brep general_b = geom::make_sphere(center_b, radius_b, tolerance).value();
   check_lens_row("general", general_a, general_b, geom::SolidBooleanOp::intersection,
                  lens_reference, 1e-9);
+}
+
+// M3c-3c-1 general-placement acceptance corpus. The M3c-3b re-chart aligns each
+// whole sphere's chart with the centre line, so a lens whose centre line points
+// anywhere in the z = 0 plane must satisfy the same placement, volume and
+// topology assertions as the +x fixture it is a rotation of. The operation count
+// stays inside the 33-operation Debug budget set by the plan: 12 + 6 + 10 + 5.
+namespace {
+
+const char* boolean_op_name(geom::SolidBooleanOp op) {
+  switch (op) {
+    case geom::SolidBooleanOp::intersection:
+      return "intersection";
+    case geom::SolidBooleanOp::union_:
+      return "union";
+    case geom::SolidBooleanOp::difference:
+      return "difference";
+  }
+  return "unknown";
+}
+
+// Two unit spheres at centre distance d meet in two spherical caps of height
+// h = 1 - d / 2: the lens is 2 * pi * h^2 * (3 - h) / 3, the union is two full
+// spheres minus the lens, and subtracting the second operand leaves one full
+// sphere minus the lens. The cap-sum reference is analytic, never the
+// implementation.
+double rotated_lens_volume(double distance, geom::SolidBooleanOp op) {
+  const double height = 1.0 - 0.5 * distance;
+  const double lens = 2.0 * kPi * height * height * (3.0 - height) / 3.0;
+  switch (op) {
+    case geom::SolidBooleanOp::intersection:
+      return lens;
+    case geom::SolidBooleanOp::union_:
+      return 8.0 * kPi / 3.0 - lens;
+    case geom::SolidBooleanOp::difference:
+      return 4.0 * kPi / 3.0 - lens;
+  }
+  return 0.0;
+}
+
+// One rotated placement: the first operand is the unit sphere at the origin and
+// the second is the unit sphere centred at
+// `distance * (cos(degrees), sin(degrees), 0)`, so `degrees` is the direction of
+// the centre line. Operands stay ordered south then north, which makes
+// `difference` the south complement (39*pi/32 at distance 1.5).
+void check_rotated_lens(double degrees, double distance, geom::SolidBooleanOp op,
+                        double relative_tolerance) {
+  INFO("degrees " << degrees << " distance " << distance << " op " << boolean_op_name(op));
+  const double angle = degrees * kPi / 180.0;
+  const geom::Result<geom::Brep> south =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-9);
+  REQUIRE(south.has_value());
+  const geom::Result<geom::Brep> north = geom::make_sphere(
+      geom::Point3d{distance * std::cos(angle), distance * std::sin(angle), 0.0}, 1.0, 1e-9);
+  REQUIRE(north.has_value());
+
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      south.value(), south.value().solid_ids().front(), north.value(),
+      north.value().solid_ids().front(), op, geom::CurvedBooleanOptions{1e-9});
+  REQUIRE_MESSAGE(result.has_value(), "degrees " << degrees << " distance " << distance << " op "
+                                                << boolean_op_name(op) << ": "
+                                                << message_of(result.error()));
+  CHECK(geom::validate_topology(result.value().brep).ok());
+  check_one_shared_rim(boolean_op_name(op), result.value().brep);
+
+  const std::optional<double> volume = sphere_face_volume(result.value().brep);
+  REQUIRE_MESSAGE(volume.has_value(), "a face is not a polar cap");
+  const double expected = rotated_lens_volume(distance, op);
+  CHECK_MESSAGE(*volume == doctest::Approx(expected).epsilon(relative_tolerance),
+                "volume " << *volume << " expected " << expected);
+}
+
+}  // namespace
+
+TEST_CASE("curved boolean: sphere lenses accept rotated placements") {
+  // Intersection at every 30 degrees covers all four quadrants at the 1.5
+  // distance. The known-hard 15-degree placement stays pinned by the existing
+  // off-axis case above, not by this 30/10-degree grid.
+  for (int degrees = 0; degrees < 360; degrees += 30) {
+    check_rotated_lens(degrees, 1.5, geom::SolidBooleanOp::intersection, 1e-9);
+  }
+
+  // Union and difference take the other two classification paths through the
+  // same cut, so they are pinned at the axis, the 45-degree diagonal and the +y
+  // axis.
+  for (const int degrees : {0, 45, 90}) {
+    check_rotated_lens(degrees, 1.5, geom::SolidBooleanOp::union_, 1e-6);
+    check_rotated_lens(degrees, 1.5, geom::SolidBooleanOp::difference, 1e-6);
+  }
+
+  // Fine sweep over the first quadrant at the fixed 1.5 distance.
+  for (int degrees = 0; degrees <= 90; degrees += 10) {
+    check_rotated_lens(degrees, 1.5, geom::SolidBooleanOp::intersection, 1e-9);
+  }
+
+  // Five deterministic draws over the whole placement circle and the whole
+  // crossing distance band (1.05..1.95 for unit spheres). The seed pins the
+  // sequence so a failure names the exact placement above it.
+  std::mt19937 generator{20261116u};
+  std::uniform_real_distribution<double> degree_draw{0.0, 360.0};
+  std::uniform_real_distribution<double> distance_draw{1.05, 1.95};
+  for (int draw = 0; draw < 5; ++draw) {
+    const double degrees = degree_draw(generator);
+    const double distance = distance_draw(generator);
+    INFO("random draw " << draw);
+    check_rotated_lens(degrees, distance, geom::SolidBooleanOp::intersection, 1e-9);
+  }
 }
