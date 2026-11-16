@@ -2383,6 +2383,8 @@ const char* boolean_op_name(geom::SolidBooleanOp op) {
       return "union";
     case geom::SolidBooleanOp::difference:
       return "difference";
+    case geom::SolidBooleanOp::symmetric_difference:
+      return "symmetric_difference";
   }
   return "unknown";
 }
@@ -2402,6 +2404,8 @@ double rotated_lens_volume(double distance, geom::SolidBooleanOp op) {
       return 8.0 * kPi / 3.0 - lens;
     case geom::SolidBooleanOp::difference:
       return 4.0 * kPi / 3.0 - lens;
+    case geom::SolidBooleanOp::symmetric_difference:
+      return 2.0 * (4.0 * kPi / 3.0 - lens);
   }
   return 0.0;
 }
