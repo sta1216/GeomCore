@@ -315,9 +315,16 @@ TEST_CASE("curved boolean: sphere lenses accept rotated placements") {
 Run: `.\build\tests\Debug\geom_tests.exe --test-case="*accept rotated placements*"`
 Expected before Task 3: FAIL at degrees 15. After Task 3: PASS for every 15-degree step.
 
-- [ ] **Step 3: Extend with a one-degree sweep and a fixed random set**
+- [ ] **Step 3: Cap the corpus at a Debug-time budget**
 
-Add a second loop over `degrees = 0..359` that only runs `intersection` with `distance = 1.5`, and 200 deterministic `mt19937` draws (seed `20261116`) of `distance ∈ [1.05, 1.95]` and `degrees ∈ [0, 360)`, comparing to `11π/96` with `1e-3` relative (chord residual grows for large distances). Keep the runtime under 4 minutes on Debug; drop to 60 random draws if it does not.
+Measured at HEAD: the focused two-operation lens case takes 12.5 s in Debug, about 6 s per boolean. The brief's original 15-degree full sweep plus a one-degree sweep plus 200 random draws would run for over an hour, so the corpus is:
+
+- intersection at every 30 degrees (12 angles, distance 1.5);
+- union and difference at 0, 45, and 90 degrees;
+- intersection at 0..90 degrees in 10-degree steps (10 angles);
+- 5 deterministic `mt19937` draws (seed `20261116`, distance in [1.05, 1.95], degrees in [0, 360)), intersection only.
+
+That is 33 operations, about three minutes in Debug. For every successful result also assert that exactly one edge is shared by two distinct faces, reusing `check_one_shared_rim` (tests/unit/brep_boolean_curved_test.cpp:2274).
 
 - [ ] **Step 4: Run the extended corpus**
 
