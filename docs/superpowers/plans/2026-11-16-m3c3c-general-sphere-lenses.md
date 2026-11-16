@@ -193,19 +193,19 @@ git commit -m "feat(m3c3c): re-chart sphere pairs on any crossing direction"
 
 ---
 
-### Task 3: Share one exact rim between the two caps
+### Task 3: Detect seam-only sphere charts by relative area
 
 **Files:**
-- Modify: `include/geom/brep/boolean_solid_curved.hpp` (new helper in `namespace detail` near `curved_boolean_pair_circles`, and the `harvest` loop at `:2197-2205`)
-- Test: `tests/unit/brep_boolean_curved_test.cpp`
+- Modify: `include/geom/brep/trim_face.hpp:1511-1524` (seam-only dispatch in `split_face_curved`)
+- Modify: `tests/unit/brep_boolean_curved_test.cpp` (`sphere_face_cap_volume` pole threshold)
 
 **Interfaces:**
-- Consumes: `CurvedFragment{loops, loops_uv, reversed, arc_spans}`, `CircleCurve3{center, x_axis, y_axis, radius}`, `detail::split_solid_heal_fragment(CurvedFragment&, std::span<const CircleCurve3>, double)`.
-- Produces: `void curved_boolean_snap_rim_to_circle(CurvedFragment& fragment, const CircleCurve3& circle, double tolerance)`. It projects every loop point within `max(64*tolerance, 1e-9*radius)` of the circle onto the circle at the point's existing angle, leaves all other points unchanged, and does not alter `loops_uv` or `arc_spans` (the heal step rebuilds the spans from the now-identical points).
+- Consumes: `signed_area2(loops.front())`, `extent` (already computed at `trim_face.hpp:1493`), `detail::trim_face_seam_only_domain(const SurfaceGeometry&)`.
+- Produces: a seam-only face is recognized when `|signed_area2(loop)| <= 1e-12 * extent * extent`, not only when it is exactly zero. The seam-only branch still requires `trim_face_seam_only_domain` to return a domain, so a genuinely trimmed face is unaffected.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Keep the acceptance test and extend it**
 
-Add to the off-axis case from Task 2 (same fixture):
+The `curved boolean: an off-axis sphere lens is built` case (Task 2) already fails at its intersection assertion. Extend it with the union assertion from Task 3's original brief:
 
 ```cpp
   const geom::Result<geom::CurvedBooleanResult> united = geom::boolean_solid_curved(
@@ -217,51 +217,42 @@ Add to the off-axis case from Task 2 (same fixture):
         doctest::Approx(245.0 * 3.14159265358979323846 / 96.0).epsilon(1e-6));
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run the test to verify it fails for the diagnosed reason**
 
-Run: `.\build\tests\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
-Expected: FAIL at the intersection `REQUIRE` with `result touches itself along an edge` (the union check is not reached yet).
+Run: `.uild	ests\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
+Expected: FAIL with `boolean_solid_curved: result touches itself along an edge`. The splitter produced no fragment for operand A: its 64-point seam loop has uv area `6.1629758220391547e-33`, not exactly zero, so the dispatch took the regular trim path and its area filters dropped every fragment.
 
-- [ ] **Step 3: Snap rim points onto the pair circle before healing**
+- [ ] **Step 3: Use a relative area bound and widen the test helper's pole bound**
+
+At `trim_face.hpp:1515`, replace the exact comparison:
 
 ```cpp
-inline void curved_boolean_snap_rim_to_circle(CurvedFragment& fragment,
-                                              const CircleCurve3& circle,
-                                              double tolerance) {
-  const Vec3d normal = normalize(cross(circle.x_axis, circle.y_axis));
-  const double clamp =
-      std::max(64.0 * tolerance, 1e-9 * circle.radius);
-  for (std::vector<Point3d>& loop : fragment.loops) {
-    for (Point3d& point : loop) {
-      const Vec3d offset = point - circle.center;
-      const double off_plane = std::fabs(dot(offset, normal));
-      const double radial = std::fabs(norm2(offset) - circle.radius);
-      if (off_plane > clamp || radial > clamp) continue;
-      const double angle =
-          std::atan2(dot(offset, circle.y_axis), dot(offset, circle.x_axis));
-      point = circle.center +
-              circle.radius * (std::cos(angle) * circle.x_axis +
-                               std::sin(angle) * circle.y_axis);
-    }
-  }
-}
+  // The seam loop is a slit: its uv area is a rounding artefact, not a region
+  // area. A relative bound proportional to extent^2 recognizes it on charts
+  // whose frame is not axis aligned; a genuinely trimmed boundary stays far
+  // above it.
+  if (std::fabs(signed_area2(loops.front())) <= 1e-12 * extent * extent) {
 ```
 
-In `harvest`, after `split_face_curved` and before `split_solid_heal_fragment`, for each copied fragment and each circle in `circles[index]`, call the helper. Guard on `!circles[index].empty()`.
+Keep the `seam_domain` gate and both returns unchanged.
+
+In `tests/unit/brep_boolean_curved_test.cpp`, the helper `sphere_face_cap_volume` accepts a pole when `|v|` is within `1e-9` of `pi/2`. Off-axis charts recover the pole through `asin`, where the `|axis|^2 = 1 +/- 1e-16` rounding is amplified to about `2e-8`. Change that threshold to `1e-6` and add the reason as a comment; the cap height error introduced is `O(1e-12)`, far below the 1e-6 volume check.
+
+Remove any rim-snapping helper added during the blocked attempt (`curved_boolean_snap_rim_to_circle`): the 15-degree probe shows both caps' rims are already identical, so the helper is inert and out of scope.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `.\build\tests\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
-Expected: PASS — intersection volume `11π/96`, union `245π/96`.
+Run: `.uild	ests\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
+Expected: PASS; intersection `11π/96` and union `245π/96`.
+
+Then run the full Debug suite and the full Release suite; both must be green.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add include/geom/brep/boolean_solid_curved.hpp tests/unit/brep_boolean_curved_test.cpp
-git commit -m "fix(m3c3c): share one analytic rim between off-axis caps"
+git add include/geom/brep/trim_face.hpp tests/unit/brep_boolean_curved_test.cpp
+git commit -m "fix(m3c3c): detect seam-only sphere charts by relative area"
 ```
-
----
 
 ### Task 4: General-placement acceptance corpus
 
