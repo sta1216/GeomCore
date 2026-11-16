@@ -4,11 +4,17 @@
 // in trimmed faces.
 //
 // The driver is the curved counterpart of `boolean_solid` (which is planar
-// only). Operands must be built from planes, cylinders, and tori; a torus can only
-// be cut by a plane (perpendicular to its axis or containing it). Every other
-// analytic surface kind is reported as `unsupported` before any work is done
-// (cone and sphere operands are deferred to a later milestone, NURBS patches
-// have no analytic parameterization here).
+// only). Operands must be built from planes, cylinders, tori, and (for the
+// sphere/sphere lens only) whole spheres; a torus can only be cut by a plane
+// (perpendicular to its axis or containing it). Sphere operands are accepted only
+// as whole spheres whose centres lie on one axis-parallel line through both
+// centres; the pair is re-charted onto a shared sphere frame so the exact circle
+// where the two spheres cross becomes a latitude of both charts (ADR-0030). Every
+// other use of a sphere - trimmed or partial spheres, containment, tangency,
+// separation, and centre lines that are not axis-aligned within 8*eps - is
+// reported as `unsupported` before any work is done, as is every other analytic
+// surface kind (cone operands are deferred to M3c-3c, NURBS patches have no
+// analytic parameterization here).
 //
 // The driver pairs face bounding boxes, asks the surface/surface intersector for
 // a cut curve per pair, clips each cut to the face it will split, splits every
@@ -51,11 +57,13 @@
 // edge walking it in opposite directions, and keeps `curved_solid_volume`'s
 // planar area positively oriented.
 //
-// Deferred: coplanar and tangent face contact, cone and sphere operands,
-// overlapping torus/torus and torus/cylinder pairs (a torus is only cut by a plane),
-// NURBS operands, flipped fragments on curved surfaces (no reparameterization
-// here), results that fall apart into several connected components, and
-// results that touch themselves along an edge (for example the
+// Deferred: coplanar and tangent face contact, cone operands, sphere operands
+// other than two crossing whole spheres on an axis-parallel centre line
+// (containment, tangency, separation, and general placements are deferred to
+// M3c-3c), overlapping torus/torus and torus/cylinder pairs (a torus is only cut
+// by a plane), NURBS operands, flipped fragments on curved surfaces (no
+// reparameterization here), results that fall apart into several connected
+// components, and results that touch themselves along an edge (for example the
 // `symmetric_difference` of two boxes that share a face corner edge). All of
 // them are reported as `unsupported` instead of producing a wrong solid.
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -2227,4 +2228,211 @@ TEST_CASE("curved boolean: difference subtracts a sphere cap") {
       options);
   REQUIRE_MESSAGE(band.has_value(), message_of(band.error()));
   CHECK(!sphere_face_volume(band.value().brep).has_value());
+}
+
+// QA-16: the M3c-3b sphere/sphere lens corpus. Three operations on unit-sphere
+// lenses (intersection 11*pi/96, union 245*pi/96, difference 39*pi/32) and one
+// unequal-radii lens on a non-zero origin. Each row must be a validated
+// two-face single-shell solid that closes by coedge uses and carries exactly one
+// shared rim edge; a repeated call must reproduce the chart volume bits and the
+// topology counts.
+//
+// The lens rim at tolerance 1e-9 carries about 4098 points and
+// `detail::curved_solid_volume` stalls on it in ear clipping (Task 4), so the
+// rows measure the test-local `sphere_face_volume` chart sum instead. That helper
+// is cross-checked once against `curved_solid_volume` on the M3c-3a cap fixture,
+// whose single analytic rim circle the integrator does handle.
+namespace {
+
+struct LensTopology {
+  std::size_t solids = 0;
+  std::size_t shells = 0;
+  std::size_t faces = 0;
+  std::size_t edges = 0;
+  std::size_t coedges = 0;
+  std::size_t vertices = 0;
+  bool operator==(const LensTopology&) const = default;
+};
+
+LensTopology lens_topology(const geom::Brep& brep) {
+  LensTopology topology;
+  topology.solids = brep.solid_ids().size();
+  topology.faces = brep.face_ids().size();
+  topology.edges = brep.edge_ids().size();
+  topology.coedges = brep.coedge_ids().size();
+  topology.vertices = brep.vertex_ids().size();
+  if (topology.solids == 1) {
+    topology.shells = brep.solid_shells(brep.solid_ids().front()).size();
+  }
+  return topology;
+}
+
+// Exactly one edge may be used by two different faces, and those two coedges
+// must walk it in opposite directions; every other edge is used twice by one
+// face. For these lenses the shared edge is the rim circle.
+void check_one_shared_rim(const char* name, const geom::Brep& brep) {
+  std::size_t rim_edges = 0;
+  std::size_t edge_index = 0;
+  for (const geom::EdgeId edge_id : brep.edge_ids()) {
+    const std::size_t current = edge_index++;
+    std::vector<geom::FaceId> users;
+    std::vector<bool> senses;
+    for (const geom::CoedgeId coedge_id : brep.coedge_ids()) {
+      const geom::Coedge& coedge = brep.coedge(coedge_id);
+      if (coedge.edge != edge_id) continue;
+      senses.push_back(coedge.reversed);
+      if (std::find(users.begin(), users.end(), coedge.face) == users.end()) {
+        users.push_back(coedge.face);
+      }
+    }
+    CHECK_MESSAGE(senses.size() == 2, name << ": edge " << current << " is not used twice");
+    if (users.size() != 2) continue;
+    ++rim_edges;
+    REQUIRE(senses.size() == 2);
+    CHECK_MESSAGE(senses[0] != senses[1], name << ": the rim coedges agree on orientation");
+  }
+  CHECK_MESSAGE(rim_edges == 1, name << ": expected one shared rim edge, saw " << rim_edges);
+}
+
+// One QA-16 lens run. `volume` is the signed chart cap sum from
+// `sphere_face_volume`; its bits are kept so a repeat can be compared exactly.
+struct LensRun {
+  LensTopology topology;
+  double volume = 0.0;
+  std::uint64_t volume_bits = 0;
+  std::size_t cuts = 0;
+  std::size_t kept = 0;
+};
+
+LensRun run_lens_row(const char* name, const geom::Brep& a, const geom::Brep& b,
+                     geom::SolidBooleanOp op, double expected, double relative_tolerance) {
+  INFO(name);
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
+  REQUIRE_MESSAGE(result.has_value(), name << ": " << message_of(result.error()));
+  const geom::Brep& brep = result.value().brep;
+  LensRun run;
+  run.topology = lens_topology(brep);
+  CHECK_MESSAGE(run.topology.solids == 1, name << ": expected one solid, saw " << run.topology.solids);
+  CHECK_MESSAGE(run.topology.shells == 1, name << ": expected one shell, saw " << run.topology.shells);
+  CHECK_MESSAGE(run.topology.faces == 2, name << ": expected two faces, saw " << run.topology.faces);
+  CHECK_MESSAGE(geom::validate_topology(brep).ok(), name << ": invalid topology");
+  CHECK_MESSAGE(geom::detail::heal_detail::shell_is_closed_by_uses(
+                    brep, brep.solid_shells(only_solid(brep)).front()),
+                name << ": an edge is not used by exactly two coedges");
+  check_one_shared_rim(name, brep);
+
+  const std::optional<double> chart_volume = sphere_face_volume(brep);
+  REQUIRE_MESSAGE(chart_volume.has_value(), name << ": a face is not a polar cap");
+  run.volume = *chart_volume;
+  run.volume_bits = std::bit_cast<std::uint64_t>(run.volume);
+  const double residual = std::abs(run.volume - expected);
+  CHECK_MESSAGE(residual <= relative_tolerance * std::abs(expected),
+                name << ": chart volume " << run.volume << " expected " << expected << " residual "
+                     << residual);
+  run.cuts = result.value().report.cuts;
+  run.kept = result.value().report.kept;
+  return run;
+}
+
+// Runs the row twice and requires the two runs to agree exactly.
+void check_lens_row(const char* name, const geom::Brep& a, const geom::Brep& b,
+                    geom::SolidBooleanOp op, double expected, double relative_tolerance) {
+  INFO(name);
+  const LensRun first = run_lens_row(name, a, b, op, expected, relative_tolerance);
+  const LensRun second = run_lens_row(name, a, b, op, expected, relative_tolerance);
+  CHECK_MESSAGE(first.volume_bits == second.volume_bits, name << ": chart volume bits differ");
+  CHECK_MESSAGE(first.topology == second.topology, name << ": topology counts differ");
+  CHECK_MESSAGE(first.cuts == second.cuts, name << ": cut counts differ");
+  CHECK_MESSAGE(first.kept == second.kept, name << ": kept fragment counts differ");
+}
+
+}  // namespace
+
+TEST_CASE("QA-16: sphere lens booleans are closed and deterministic") {
+  constexpr double tolerance = 1e-9;
+
+  // Helper cross-check on the M3c-3a cap fixture: the library volume must
+  // reproduce the analytic cap (h = 0.5) and the chart helper must agree with it
+  // to 1e-12. The fixture is the two-face cap solid whose two faces share the one
+  // analytic rim circle.
+  const geom::Brep unit_sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance).value();
+  const geom::Brep cap_box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.5}, geom::Point3d{2.0, 2.0, 2.0}, tolerance)
+          .value();
+  {
+    const geom::Result<geom::CurvedBooleanResult> cap = geom::boolean_solid_curved(
+        unit_sphere, only_solid(unit_sphere), cap_box, only_solid(cap_box),
+        geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance});
+    REQUIRE_MESSAGE(cap.has_value(), "cap fixture: " << message_of(cap.error()));
+    const geom::Brep& cap_brep = cap.value().brep;
+    const geom::Result<double> library =
+        geom::detail::curved_solid_volume(cap_brep, only_solid(cap_brep), tolerance);
+    REQUIRE_MESSAGE(library.has_value(), "cap fixture: " << message_of(library.error()));
+    constexpr double kCapReference = 0.6544984694978736;
+    CHECK_MESSAGE(std::abs(library.value() - kCapReference) <= 1e-6 * kCapReference,
+                  "cap fixture: library volume " << library.value() << " expected "
+                                                << kCapReference);
+    const std::optional<double> helper = sphere_face_volume(cap_brep);
+    REQUIRE_MESSAGE(helper.has_value(), "cap fixture: a face is not a polar cap");
+    CHECK_MESSAGE(std::abs(*helper - library.value()) <= 1e-12 * std::abs(library.value()),
+                  "cap fixture: helper " << *helper << " vs library " << library.value());
+
+    // Pin the fixture: the spherical hat and its planar cap share one rim edge.
+    CHECK_MESSAGE(cap_brep.face_ids().size() == 2,
+                  "cap fixture: expected two faces, saw " << cap_brep.face_ids().size());
+    check_one_shared_rim("cap fixture", cap_brep);
+  }
+
+  // Equal unit spheres 1.5 apart: the pair circle has radius sqrt(7)/4 and caps
+  // of height 0.25. The lens is 2 * pi * 0.25^2 * (3 - 0.25) / 3 = 11*pi/96, the
+  // union is two complements (4*pi/3 - 11*pi/192 each), and either difference is
+  // 4*pi/3 - 11*pi/96 = 39*pi/32. Only the intersection match is exact in the
+  // chart formula, so it is held to 1e-9; the union and difference are held to
+  // 1e-6 like the rest of the curved boolean corpus.
+  const geom::Brep lens_a =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance).value();
+  const geom::Brep lens_b =
+      geom::make_sphere(geom::Point3d{1.5, 0.0, 0.0}, 1.0, tolerance).value();
+  struct Row {
+    const char* name;
+    geom::SolidBooleanOp op;
+    double expected;
+    double relative_tolerance;
+  };
+  const std::array<Row, 3> rows{{
+      {"intersection", geom::SolidBooleanOp::intersection, 11.0 * kPi / 96.0, 1e-9},
+      {"union", geom::SolidBooleanOp::union_, 245.0 * kPi / 96.0, 1e-6},
+      {"difference", geom::SolidBooleanOp::difference, 39.0 * kPi / 32.0, 1e-6},
+  }};
+  for (const Row& row : rows) {
+    check_lens_row(row.name, lens_a, lens_b, row.op, row.expected, row.relative_tolerance);
+  }
+
+  // Generality: the same unequal pair as the off-axis rejection case
+  // (ra = 1.2, rb = 0.8, d = 1.4) but placed along +x on a non-zero origin. The
+  // reference is the cap formula, never the implementation: each cap height
+  // follows from the centre distance, and the lens is their sum.
+  const double radius_a = 1.2;
+  const double radius_b = 0.8;
+  const double distance = 1.4;
+  const double height_a =
+      radius_a -
+      (distance * distance + radius_a * radius_a - radius_b * radius_b) / (2.0 * distance);
+  const double height_b =
+      radius_b -
+      (distance * distance + radius_b * radius_b - radius_a * radius_a) / (2.0 * distance);
+  const auto cap_volume = [](double radius, double height) {
+    return kPi * height * height * (3.0 * radius - height) / 3.0;
+  };
+  // ha = 3/14, hb = 27/70: 0.21428571428571441 / 0.38571428571428584, caps
+  // 0.16280410908909224 / 0.31382037635553112, lens 0.47662448544462332.
+  const double lens_reference = cap_volume(radius_a, height_a) + cap_volume(radius_b, height_b);
+  const geom::Point3d center_a{0.3, -0.2, 0.1};
+  const geom::Point3d center_b{center_a[0] + distance, center_a[1], center_a[2]};
+  const geom::Brep general_a = geom::make_sphere(center_a, radius_a, tolerance).value();
+  const geom::Brep general_b = geom::make_sphere(center_b, radius_b, tolerance).value();
+  check_lens_row("general", general_a, general_b, geom::SolidBooleanOp::intersection,
+                 lens_reference, 1e-9);
 }

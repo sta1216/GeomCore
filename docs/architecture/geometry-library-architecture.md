@@ -1124,7 +1124,7 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
 
 依赖关系：M1 依赖 M0 的谓词、曲线曲面与测试设施；M2 依赖 M1 的 arrangement/CDT/索引；M3 强依赖 M2 的拓扑、网格化与容差模型；M4 在 M3 之上；M5 依赖前五者的 API 稳定。
 
-### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3/M3c-1/M3c-2 与 M3c-3a 出口状态（2026-11-15）
+### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3/M3c-1/M3c-2、M3c-3a 与 M3c-3b 出口状态（2026-11-16）
 
 **M0 地基：已满足。** 谓词以独立整数/Fraction oracle 对拍（1e6 随机 + 共线、1 ulp、
 抵消、1e±200、次正规语料），NURBS 求值与导数对解析解校验，三平台 CI 矩阵已配置；
@@ -1330,8 +1330,30 @@ QA-15 三行体积 `0.6544984694978736` / `3.534291735288517` / `3.9542179533184
 相同；cap/complement 分类网格闭合，slab 的 band 轮廓无法三角化（`"a face outline
 could not be triangulated"`），该行改用每条边恰被两个 coedge 使用的结构判据。
 Debug 与 Release 各 940 个用例、659,153 条断言全绿，`/W4 /WX /utf-8` 零警告。
-球/球 lens、锥操作数、偏移/倾斜 torus 切平面、一般修剪网格化与 NURBS 仍待
-M3c-3b/3c；本行只关闭 M3c-3a，不得据此声称 M3c-3 完成。
+球/球 lens（已在 M3c-3b 关闭）、锥操作数、偏移/倾斜 torus 切平面、一般修剪网格化与
+NURBS 仍待 M3c-3b/3c；本行只关闭 M3c-3a，不得据此声称 M3c-3 完成。
+
+**M3c-3b（球/球透镜：支持；M3c-3 未完成）**：`boolean_solid_curved` 现在接受两个
+整球操作数，前提是球心连线在 8 ulp 内与某坐标轴对齐、两球相交。非整球或部分球报
+`"boolean_solid_curved: sphere/sphere booleans need whole-sphere operands"`；包含、
+外切、内切、分离报 `"...need two crossing spheres"`；斜置报
+`"...placement is not axis-aligned; general placements are deferred to M3c-3c"`。
+整球对在驱动内被重画到共享图卡（`axis = ±n`、共享 `x_axis`，
+`curved_boolean_rechart_whole_spheres`），使球/球精确交圆成为两张图卡的纬度，lens
+的两个球面 cap 走 M3c-3a 的闭合纬度环切分与装配；重画只改图卡朝向，圆心、半径、
+容差与报告语义不变，递归深度 2（一次重画 + 一次不动点），不设递归计数器。
+QA-16（`tests/unit/brep_boolean_curved_test.cpp`）四行：交 `11π/96`、并 `245π/96`、
+差 `39π/32`，以及不等半径 + 非零原点 + 中心线沿 `+x` 的通用行（参考值由 cap 公式
+给出 `0.476624485444623`）；每行 2 面、1 壳、`validate_topology` 干净、
+`shell_is_closed_by_uses` 通过、恰一条被两个 coedge 反向使用的 rim 边、两次运行
+chart 体积逐位相同。lens rim 在 `1e-9` 下约 4098 点，`curved_solid_volume` 在
+ear clipping 上不收敛，因此 QA-16 度量 chart cap 体积，并在 3a cap 语料上交叉校验
+helper 一次（库 `0.6544984694978736`、`1e-6`；helper 差 `<= 1e-12`）。基准
+`geom_bench_m3c3b`（Release，20 次/操作）布尔中位数 `421.0` / `416.4` / `421.3` ms、
+chart 体积 `5.34` / `3.56` / `3.70` ms，实测见 `docs/benchmarks/m3c3b.md`、取舍见
+ADR-0030。Debug 与 Release 各 949 个用例、659,595 条断言全绿，
+`/W4 /WX /utf-8` 零警告。一般位置球/球、包含/相切/分离、锥操作数、一般修剪网格化
+与 NURBS 仍待 M3c-3c；本行只关闭 M3c-3b，不得据此声称 M3c-3 完成。
 
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外
