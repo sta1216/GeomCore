@@ -89,9 +89,11 @@ Reviewers should try to break these five claims:
 4. **Orientation.** `difference` must subtract the B cap: `A - B` and `B - A`
    must have different volumes, both negative-correct, with one shared rim edge
    used in opposite directions.
-5. **Radii and placement generality.** Unequal radii and centres off every axis
-   work; the shared `x_axis` choice is deterministic; the seam-crossing point is
-   the same 3D point in both charts.
+5. **Radii and placement scope.** Unequal radii and non-zero origins work while
+   the centre line stays parallel to a coordinate axis; every other direction is
+   rejected with the documented `unsupported` message (general placements belong
+   to M3c-3c). The shared `x_axis` choice is deterministic and the seam-crossing
+   point is the same 3D point in both charts.
 
 ## File Map
 
@@ -289,9 +291,22 @@ curved_boolean_rebase_sphere_pair(const Brep& a, SolidId a_solid, const Brep& b,
    `d <= tolerance || d >= ra + rb - tolerance || d <= |ra - rb| + tolerance`,
    return `Errc::unsupported "boolean_solid_curved: sphere/sphere booleans need
    two crossing spheres"`.
-5. If `|dot(axis_a, n) - 1| <= 8*eps` and `|dot(axis_b, -n) - 1| <= 8*eps`,
-   return `nullopt` (already re-charted; this terminates the recursion).
-6. Choose one shared frame: `x_axis = unit(cross(n, candidate))` with the same
+5. Axis-aligned placement only. Let `k` be the index of the largest `|n[k]|`.
+   If `|n[k]| < 1 - 8 * std::numeric_limits<double>::epsilon()`, return `Errc::unsupported
+   "boolean_solid_curved: sphere/sphere placement is not axis-aligned; general
+   placements are deferred to M3c-3c"`. Snap `n` to `sign(n[k]) * e_k` so the
+   rebuilt charts carry an exact coordinate axis. This narrowing is deliberate:
+   the seam/chain heal downstream is not rotation-equivariant today, and
+   off-axis placements fail with internal topology errors (Task 3 report,
+   review round 2).
+6. If the snapped frames already match, return `nullopt` (this terminates the
+   recursion): `|dot(axis_a, n) - 1| <= 8*eps`,
+   `|dot(axis_b, -n) - 1| <= 8*eps`, and
+   `|dot(x_axis_a, x_axis_b) - 1| <= 8*eps`. The last term matters because two
+   whole spheres can be pre-charted on the same axis with different meridians;
+   without it the rim is split at two meridians (4 vertices/4 edges instead of
+   3/3) or the splitter fails.
+7. Choose one shared frame: `x_axis = unit(cross(n, candidate))` with the same
    candidate rule as Task 1. Rebuild
    `a2 = make_sphere(ca, n, x_axis, ra, tolerance)` and
    `b2 = make_sphere(cb, -n, x_axis, rb, tolerance)`. Propagate errors. Return
@@ -349,6 +364,16 @@ It must return the whole-sphere message and leave both inputs unchanged.
 `d = 2.0`, `0.5`, `2.5` return the crossing message and leave the input Breps
 unchanged (compare a volume/edge-count fingerprint).
 
+An off-axis pair (`ca = {0.3,-0.2,0.1}`, direction `unit({1,2,2})`, `d = 1.4`,
+`ra = 1.2`, `rb = 0.8`) and a 1e-13 tilt of the centre line must return the
+axis-aligned message with both inputs unchanged. A pre-charted pair with the same centres but `x_axis` meridians that
+differ (`+y` versus `-y`, axes `+x`/`-x`) must re-chart and produce the same
+3 vertices / 3 edges / 2 faces as the canonical pair.
+
+Also assert in the positive case that both face surfaces are `Sphere3` with axes
+`+x`/`-x` and one shared `x_axis`, that both faces use the same rim edge with
+opposite coedge senses, and that `unit_b` is unchanged as well.
+
 **Step 4 — commit**
 
 `feat(m3c3b): re-chart whole-sphere operands for lens booleans`
@@ -380,15 +405,32 @@ Do not run the plane reprojection block for a sphere.
 
 **Step 1 — failing test**
 
+Do not use `curved_solid_volume` on the lens result: its sphere-face rim has
+about 1800 points at tolerance 1e-9, and ear clipping over that ring stalls for
+minutes. The Task 3 report records the measurement; Task 5 validates the
+replacement below against `curved_solid_volume` on the 3a cap (66-point ring).
+
+Add a test-local helper `sphere_face_volume(const Brep&)` in
+`tests/unit/brep_boolean_curved_test.cpp`:
+
+- for every face whose surface is `Sphere3`, read its single uv loop with
+  `face_loops_uv(..., tolerance)`; require exactly one loop;
+- take the loop's signed shoelace area for the sign (+ outward, - reversed);
+- take `v_lo`/`v_hi` of the loop: if `v_lo` is within 1e-9 of `-pi/2` the cap is
+  southern with height `h = r * (1 + v_hi)`, else if `v_hi` is within 1e-9 of
+  `+pi/2` it is northern with `h = r * (1 - v_lo)`, otherwise return `nullopt`;
+- return `sign * pi * h * h * (3r - h) / 3`, summed over the faces.
+
+Then:
+
 ```cpp
 TEST_CASE("curved boolean: difference subtracts a sphere cap") {
   // A - B with d = 1.5, r = 1: 39*pi/32
   ...
   REQUIRE(result.has_value());
-  const double volume =
-      geom::detail::curved_solid_volume(result.value().brep, result.value().solid, 1e-9)
-          .value();
-  CHECK(volume == doctest::Approx(39.0 * std::numbers::pi / 32.0).epsilon(1e-9));
+  const auto volume = sphere_face_volume(result.value().brep);
+  REQUIRE(volume.has_value());
+  CHECK(*volume == doctest::Approx(39.0 * std::numbers::pi / 32.0).epsilon(1e-9));
 }
 ```
 
@@ -396,8 +438,11 @@ Today it fails at the pre-check with the flipped-fragment message.
 
 **Step 2 — implement, run**
 
-Both `A - B` and `B - A` pass with volumes 3.8288160465625605; both are
-validated, single-shell, and share one rim edge.
+Both `A - B` and `B - A` pass with chart volumes 3.8288160465625605; both are
+validated and single-shell. The result has two spherical faces (A complement and
+the reversed B cap), three edges (two seams plus the rim) and three vertices
+(two poles plus one rim seam point); assert those counts and that the two faces
+share the rim edge.
 
 **Step 3 — commit**
 
@@ -413,9 +458,21 @@ validated, single-shell, and share one rim edge.
 - Modify header comments in `boolean_solid_curved.hpp` (the "deferred" list).
 
 **Interfaces**
-- Consumes the whole pipeline:
-  `boolean_solid_curved`, `validate_topology`, `detail::curved_solid_volume`,
-  `shell_is_closed_by_uses`.
+- Consumes the whole pipeline: `boolean_solid_curved`, `validate_topology`,
+  `shell_is_closed_by_uses`, and the Task 4 test helper `sphere_face_volume`.
+
+**Volume measurement**
+
+Every face of the three results is a polar cap on its own `Sphere3` chart, so
+`sphere_face_volume` sums their exact cap volumes. Do not call
+`curved_solid_volume` on these solids: the lens rim carries about 1800 points at
+tolerance 1e-9 and its ear clipping takes minutes (Task 3 report, Concern 1).
+
+Validate the helper itself in this task: on the M3c-3a cap solid
+(`sphere` intersected with `box` z >= 0.5, 66-point rim)
+`curved_solid_volume(..., 1e-9)` must equal `0.6544984694978736` within 1e-6 and
+`sphere_face_volume` must agree with it within 1e-12. Record this cross-check in
+the ADR so the metric is not taken on faith.
 
 **Test corpus (QA-16)**
 
@@ -429,9 +486,11 @@ For each: exactly 2 faces, 1 shell, `validate_topology(brep).ok()`, closed by
 coedge uses, one shared rim edge (the two faces' loops use the same edge in
 opposite directions), and two consecutive calls produce the same volume bitwise.
 
-Generality cases: unequal radii (`ra = 1.2, rb = 0.8`, `d = 1.4`), and centres off
-all axes (`ca = {0.3,-0.2,0.1}`, `cb = ca + 1.5*unit({1,2,2})`). Compute the
-reference with the same closed-form expressions, not with the implementation.
+Generality case: unequal radii (`ra = 1.2, rb = 0.8`, `d = 1.4`) with the centre
+line along `+x` and a non-zero origin (`ca = {0.3,-0.2,0.1}`,
+`cb = ca + {1.4,0,0}`). Compute the reference with the same closed-form
+expressions, not with the implementation. Off-axis directions are rejected with
+the documented diagnostic (Task 3), not silently mishandled.
 
 **Step 1 — failing tests**
 

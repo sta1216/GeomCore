@@ -1804,7 +1804,9 @@ inline Result<std::optional<CurvedBooleanRebasedSpheres>> curved_boolean_rechart
   for (int i = 1; i < 3; ++i) {
     if (std::abs(unit[i]) > std::abs(unit[dominant])) dominant = i;
   }
-  constexpr double kAxisAlignment = 1.0 - 1e-12;
+  // Only floating-point rounding is accepted: a deliberate off-axis placement,
+  // however small, would re-chart onto a meridian the seam heal cannot follow.
+  constexpr double kAxisAlignment = 1.0 - 8.0 * std::numeric_limits<double>::epsilon();
   if (std::abs(unit[dominant]) < kAxisAlignment) {
     return Error{Errc::unsupported,
                  "boolean_solid_curved: sphere/sphere placement is not axis-aligned; "

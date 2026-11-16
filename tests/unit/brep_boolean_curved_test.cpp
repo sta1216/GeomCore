@@ -2087,6 +2087,16 @@ TEST_CASE("curved boolean: sphere/sphere rejects off-axis placements") {
         "placements are deferred to M3c-3c");
   CHECK(fingerprint_of(a) == a_before);
   CHECK(fingerprint_of(b) == b_before);
+
+  // A tilt that is inside the old 1e-12 band is still a deliberate placement:
+  // re-charting it would split the rim at a second meridian, so it must be
+  // refused rather than silently accepted.
+  const geom::Brep tilted =
+      geom::make_sphere(geom::Point3d{1.5 - 1e-13, 1.5 * 4.472e-7, 0.0}, 1.0, tolerance).value();
+  const geom::Result<geom::CurvedBooleanResult> tilted_result = geom::boolean_solid_curved(
+      a, only_solid(a), tilted, only_solid(tilted), geom::SolidBooleanOp::intersection, options);
+  REQUIRE_MESSAGE(!tilted_result.has_value(), "a 1e-13 tilt must be refused");
+  CHECK(tilted_result.error().code == geom::Errc::unsupported);
 }
 
 TEST_CASE("curved boolean: sphere/sphere re-charts opposite meridians") {
@@ -2128,10 +2138,12 @@ TEST_CASE("curved boolean: difference subtracts a sphere cap") {
     const char* name;
     const geom::Brep* a;
     const geom::Brep* b;
+    // x component of the chart axis of the subtracted (reversed) cap.
+    double reversed_axis_x;
   };
   const std::array<DifferenceCase, 2> cases{{
-      {"A - B", &unit_a, &unit_b},
-      {"B - A", &unit_b, &unit_a},
+      {"A - B", &unit_a, &unit_b, -1.0},
+      {"B - A", &unit_b, &unit_a, 1.0},
   }};
   for (const DifferenceCase& entry : cases) {
     INFO(entry.name);
@@ -2160,6 +2172,14 @@ TEST_CASE("curved boolean: difference subtracts a sphere cap") {
       const geom::Face& face = brep.face(face_id);
       const geom::SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
       if (!std::holds_alternative<geom::Sphere3>(surface)) continue;
+      const geom::Sphere3& sphere = std::get<geom::Sphere3>(surface);
+      // Re-charting puts the complement on the first operand's axis and the
+      // subtracted cap on the opposite one; B - A swaps which chart is which.
+      if (face.reversed) {
+        CHECK(sphere.axis[0] == doctest::Approx(entry.reversed_axis_x).epsilon(1e-12));
+      } else {
+        CHECK(sphere.axis[0] == doctest::Approx(-entry.reversed_axis_x).epsilon(1e-12));
+      }
       if (!face.reversed) continue;
       reversed_faces.push_back(face_id);
       reversed_cap_volume = sphere_face_cap_volume(brep, face_id);
