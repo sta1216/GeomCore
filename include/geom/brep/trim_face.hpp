@@ -1510,9 +1510,11 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
 
   // A seam-only face has no loop-derived uv area: its loop is the seam slit
   // itself, so the clipping below would discard every cut and return no
-  // fragments. Open the surface onto its full parameter rectangle instead. A
-  // genuinely trimmed face keeps its nonzero area and the old range.
-  if (std::fabs(signed_area2(loops.front())) == 0.0) {
+  // fragments. The slit's uv area is a rounding artefact, not a region area, so
+  // a relative bound proportional to extent^2 recognizes it on charts whose
+  // frame is not axis aligned; a genuinely trimmed boundary stays far above it.
+  // Open the surface onto its full parameter rectangle instead.
+  if (std::fabs(signed_area2(loops.front())) <= 1e-12 * extent * extent) {
     const SurfaceGeometry& surface =
         brep.geometry().surfaces[brep.face(face).surface];
     const std::optional<std::array<double, 4>> seam_domain =

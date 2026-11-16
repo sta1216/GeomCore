@@ -333,12 +333,17 @@ std::optional<double> sphere_face_cap_volume(const geom::Brep& brep, geom::FaceI
   if (twice_area == 0.0) return std::nullopt;
 
   constexpr double kHalfPi = 0.5 * kPi;
+  // An off-axis chart recovers the pole through asin(dot(offset, axis) / r),
+  // which amplifies the |axis|^2 = 1 +/- 1e-16 rounding to about 2e-8 in v.
+  // Accept poles within 1e-6; the induced cap-height error is O(1e-12), far
+  // below the 1e-6 volume assertions.
+  constexpr double kPoleTolerance = 1e-6;
   double height = 0.0;
-  if (std::abs(v_lo + kHalfPi) <= 1e-9) {
+  if (std::abs(v_lo + kHalfPi) <= kPoleTolerance) {
     // Southern cap: the pole is at v = -pi/2, so its axial extent is
     // r * (sin(v_hi) + 1).
     height = sphere->radius * (1.0 + std::sin(v_hi));
-  } else if (std::abs(v_hi - kHalfPi) <= 1e-9) {
+  } else if (std::abs(v_hi - kHalfPi) <= kPoleTolerance) {
     // Northern cap: r * (1 - sin(v_lo)).
     height = sphere->radius * (1.0 - std::sin(v_lo));
   } else {
@@ -2084,6 +2089,16 @@ TEST_CASE("curved boolean: an off-axis sphere lens is built") {
   REQUIRE(volume.has_value());
   CHECK(*volume == doctest::Approx(11.0 * 3.14159265358979323846 / 96.0)
                       .epsilon(1e-6));
+
+  // The union is the complementary two-cap solid, so the same rim must also
+  // stitch the outside of the lens: 8/3*pi - 11*pi/96 = 245*pi/96.
+  const geom::Result<geom::CurvedBooleanResult> united = geom::boolean_solid_curved(
+      south.value(), south.value().solid_ids().front(), north.value(),
+      north.value().solid_ids().front(), geom::SolidBooleanOp::union_,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(united.has_value(), message_of(united.error()));
+  CHECK(*sphere_face_volume(united.value().brep) ==
+        doctest::Approx(245.0 * 3.14159265358979323846 / 96.0).epsilon(1e-6));
 }
 
 TEST_CASE("curved boolean: sphere/sphere re-charts opposite meridians") {
