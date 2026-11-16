@@ -2047,8 +2047,8 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
     CHECK(fingerprint_of(other) == other_before);
   }
 
-  // The axis snap is index-based, so a +y centre line has to take the same
-  // re-chart path with unequal radii instead of only the canonical +x one.
+  // The re-chart uses the unit centre line directly, so a +y centre line has to
+  // take the same path with unequal radii instead of only the canonical +x one.
   const geom::Brep y_a =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.2, tolerance).value();
   const geom::Brep y_b =
@@ -2064,55 +2064,26 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   CHECK(fingerprint_of(unit_a) == unit_a_before);
 }
 
-TEST_CASE("curved boolean: sphere/sphere rejects off-axis placements") {
+TEST_CASE("curved boolean: an off-axis sphere lens is built") {
   const double tolerance = 1e-9;
-  const geom::CurvedBooleanOptions options{tolerance};
-  // The centre line is unit({1, 2, 2}); its dominant component is 2/3, so the
-  // placement is not axis-aligned and the whole-sphere chart cannot be rebuilt
-  // onto a coordinate axis.
-  const geom::Vec3d direction{1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0};
-  const geom::Point3d center_a{0.3, -0.2, 0.1};
-  const geom::Point3d center_b{center_a[0] + 1.4 * direction[0],
-                               center_a[1] + 1.4 * direction[1],
-                               center_a[2] + 1.4 * direction[2]};
-  const geom::Brep a = geom::make_sphere(center_a, 1.2, tolerance).value();
-  const geom::Brep b = geom::make_sphere(center_b, 0.8, tolerance).value();
-  const BrepFingerprint a_before = fingerprint_of(a);
-  const BrepFingerprint b_before = fingerprint_of(b);
+  const double angle = 15.0 * 3.14159265358979323846 / 180.0;
+  const geom::Result<geom::Brep> south =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance);
+  const geom::Result<geom::Brep> north = geom::make_sphere(
+      geom::Point3d{1.5 * std::cos(angle), 1.5 * std::sin(angle), 0.0}, 1.0,
+      tolerance);
+  REQUIRE(south.has_value());
+  REQUIRE(north.has_value());
 
-  const geom::Result<geom::CurvedBooleanResult> rejected = geom::boolean_solid_curved(
-      a, only_solid(a), b, only_solid(b), geom::SolidBooleanOp::intersection, options);
-  REQUIRE_MESSAGE(!rejected.has_value(), "an off-axis placement must be refused");
-  CHECK(rejected.error().code == geom::Errc::unsupported);
-  CHECK(message_of(rejected.error()) ==
-        "boolean_solid_curved: sphere/sphere placement is not axis-aligned; general "
-        "placements are deferred to M3c-3c");
-  CHECK(fingerprint_of(a) == a_before);
-  CHECK(fingerprint_of(b) == b_before);
-
-  // A tilt that is inside the old 1e-12 band is still a deliberate placement:
-  // re-charting it would split the rim at a second meridian, so it must be
-  // refused rather than silently accepted.
-  const geom::Brep tilted =
-      geom::make_sphere(geom::Point3d{1.5 - 1e-13, 1.5 * 4.472e-7, 0.0}, 1.0, tolerance).value();
-  geom::CurvedBooleanReport tilted_report{};
-  const geom::Result<geom::CurvedBooleanResult> tilted_result = geom::boolean_solid_curved(
-      a, only_solid(a), tilted, only_solid(tilted), geom::SolidBooleanOp::intersection, options,
-      &tilted_report);
-  REQUIRE_MESSAGE(!tilted_result.has_value(), "a 1e-13 tilt must be refused");
-  CHECK(tilted_result.error().code == geom::Errc::unsupported);
-  CHECK(tilted_report.face_pairs == 0);
-
-  // The guard admits only floating-point rounding. A deficit of ten ulps in one
-  // unit component is already a deliberate tilt and must be refused.
-  const double eps = std::numeric_limits<double>::epsilon();
-  const geom::Brep ten_ulps =
-      geom::make_sphere(geom::Point3d{1.5 * (1.0 - 10.0 * eps), 0.0, 0.0}, 1.0, tolerance).value();
-  const geom::Result<geom::CurvedBooleanResult> ten_ulps_result = geom::boolean_solid_curved(
-      a, only_solid(a), ten_ulps, only_solid(ten_ulps), geom::SolidBooleanOp::intersection,
-      options);
-  REQUIRE_MESSAGE(!ten_ulps_result.has_value(), "a ten-ulp tilt must be refused");
-  CHECK(ten_ulps_result.error().code == geom::Errc::unsupported);
+  const geom::Result<geom::CurvedBooleanResult> lens = geom::boolean_solid_curved(
+      south.value(), south.value().solid_ids().front(), north.value(),
+      north.value().solid_ids().front(), geom::SolidBooleanOp::intersection,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(lens.has_value(), message_of(lens.error()));
+  const std::optional<double> volume = sphere_face_volume(lens.value().brep);
+  REQUIRE(volume.has_value());
+  CHECK(*volume == doctest::Approx(11.0 * 3.14159265358979323846 / 96.0)
+                      .epsilon(1e-6));
 }
 
 TEST_CASE("curved boolean: sphere/sphere re-charts opposite meridians") {
@@ -2425,7 +2396,7 @@ TEST_CASE("QA-16: sphere lens booleans are closed and deterministic") {
     check_lens_row(row.name, lens_a, lens_b, row.op, row.expected, row.relative_tolerance);
   }
 
-  // Generality: the same unequal pair as the off-axis rejection case
+  // Generality: the unequal pair from the M3c-3b alignment-band fixture
   // (ra = 1.2, rb = 0.8, d = 1.4) but placed along +x on a non-zero origin. The
   // reference is the cap formula, never the implementation: each cap height
   // follows from the centre distance, and the lens is their sum.

@@ -7,12 +7,11 @@
 // only). Operands must be built from planes, cylinders, tori, and (for the
 // sphere/sphere lens only) whole spheres; a torus can only be cut by a plane
 // (perpendicular to its axis or containing it). Sphere operands are accepted only
-// as whole spheres whose centres lie on one axis-parallel line through both
-// centres; the pair is re-charted onto a shared sphere frame so the exact circle
-// where the two spheres cross becomes a latitude of both charts (ADR-0030). Every
-// other use of a sphere - trimmed or partial spheres, containment, tangency,
-// separation, and centre lines that are not axis-aligned within 8*eps - is
-// reported as `unsupported` before any work is done, as is every other analytic
+// as whole spheres that cross; the pair is re-charted onto a shared sphere frame
+// whose poles lie on the line through both centres, so the exact circle where the
+// two spheres cross becomes a latitude of both charts (ADR-0030). Every other use
+// of a sphere - trimmed or partial spheres, containment, tangency and separation -
+// is reported as `unsupported` before any work is done, as is every other analytic
 // surface kind (cone operands are deferred to M3c-3c, NURBS patches have no
 // analytic parameterization here).
 //
@@ -1805,24 +1804,7 @@ inline Result<std::optional<CurvedBooleanRebasedSpheres>> curved_boolean_rechart
                  "boolean_solid_curved: sphere/sphere booleans need two crossing spheres",
                  a_solid.index(), b_solid.index()};
   }
-  const Vec3d unit{delta[0] / distance, delta[1] / distance, delta[2] / distance};
-  // The rebuilt charts can only put their poles on a coordinate axis; anything
-  // else would leave the two seams on unrelated meridians.
-  int dominant = 0;
-  for (int i = 1; i < 3; ++i) {
-    if (std::abs(unit[i]) > std::abs(unit[dominant])) dominant = i;
-  }
-  // Only floating-point rounding is accepted: a deliberate off-axis placement,
-  // however small, would re-chart onto a meridian the seam heal cannot follow.
-  constexpr double kAxisAlignment = 1.0 - 8.0 * std::numeric_limits<double>::epsilon();
-  if (std::abs(unit[dominant]) < kAxisAlignment) {
-    return Error{Errc::unsupported,
-                 "boolean_solid_curved: sphere/sphere placement is not axis-aligned; "
-                 "general placements are deferred to M3c-3c",
-                 a_solid.index(), b_solid.index()};
-  }
-  Vec3d axis{0.0, 0.0, 0.0};
-  axis[dominant] = unit[dominant] < 0.0 ? -1.0 : 1.0;
+  const Vec3d axis{delta[0] / distance, delta[1] / distance, delta[2] / distance};
   const Vec3d negated_axis{-axis[0], -axis[1], -axis[2]};
   constexpr double kAxisAgreement = 8.0 * std::numeric_limits<double>::epsilon();
   if (std::abs(dot(first.axis, axis) - 1.0) <= kAxisAgreement &&
