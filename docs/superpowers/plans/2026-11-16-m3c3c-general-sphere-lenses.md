@@ -201,7 +201,7 @@ git commit -m "feat(m3c3c): re-chart sphere pairs on any crossing direction"
 
 **Interfaces:**
 - Consumes: `signed_area2(loops.front())`, `extent` (already computed at `trim_face.hpp:1493`), `detail::trim_face_seam_only_domain(const SurfaceGeometry&)`.
-- Produces: a seam-only face is recognized when `|signed_area2(loop)| <= 1e-12 * extent * extent`, not only when it is exactly zero. The seam-only branch still requires `trim_face_seam_only_domain` to return a domain, so a genuinely trimmed face is unaffected.
+- Produces: a seam-only face is recognized when `|signed_area2(loop)| <= 1e-12 * extent * extent`, not only when it is exactly zero. The seam-only branch still requires `trim_face_seam_only_domain` to return a domain, but that gate is type-only; what keeps a genuinely trimmed face on the regular path is the magnitude of the bound (`1e-12 * extent^2` is far below any resolvable patch area).
 
 - [ ] **Step 1: Keep the acceptance test and extend it**
 
