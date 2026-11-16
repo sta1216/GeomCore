@@ -219,19 +219,21 @@ The `curved boolean: an off-axis sphere lens is built` case (Task 2) already fai
 
 - [ ] **Step 2: Run the test to verify it fails for the diagnosed reason**
 
-Run: `.uild	ests\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
+Run: `.\build\testss\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
 Expected: FAIL with `boolean_solid_curved: result touches itself along an edge`. The splitter produced no fragment for operand A: its 64-point seam loop has uv area `6.1629758220391547e-33`, not exactly zero, so the dispatch took the regular trim path and its area filters dropped every fragment.
 
-- [ ] **Step 3: Use a relative area bound and widen the test helper's pole bound**
+- [ ] **Step 3: Use a relative area bound for sphere charts and widen the test helper's pole bound**
 
-At `trim_face.hpp:1515`, replace the exact comparison:
+At `trim_face.hpp:1515`, replace the exact comparison with a sphere-only relative bound; the torus path keeps the exact-zero rule because its near-tangent cuts are not covered by the seam-slit reasoning:
 
 ```cpp
-  // The seam loop is a slit: its uv area is a rounding artefact, not a region
-  // area. A relative bound proportional to extent^2 recognizes it on charts
-  // whose frame is not axis aligned; a genuinely trimmed boundary stays far
-  // above it.
-  if (std::fabs(signed_area2(loops.front())) <= 1e-12 * extent * extent) {
+  const SurfaceGeometry& surface =
+      brep.geometry().surfaces[brep.face(face).surface];
+  const double loop_area = std::fabs(signed_area2(loops.front()));
+  const bool sphere_slit =
+      std::holds_alternative<Sphere3>(surface) &&
+      loop_area <= 1e-12 * extent * extent;
+  if (loop_area == 0.0 || sphere_slit) {
 ```
 
 Keep the `seam_domain` gate and both returns unchanged.
@@ -242,7 +244,7 @@ Remove any rim-snapping helper added during the blocked attempt (`curved_boolean
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `.uild	ests\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
+Run: `.\build\testss\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
 Expected: PASS; intersection `11π/96` and union `245π/96`.
 
 Then run the full Debug suite and the full Release suite; both must be green.
@@ -415,7 +417,7 @@ Expected: all pass, counts recorded in the task report, zero warnings.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/unit/curved_boolean_qa17_test.cpp tests/CMakeLists.txt docs/adr/0031-general-sphere-lenses.md docs/benchmarks/m3c3c.md docs/architecture/geometry-library-architecture.md
+git add tests/unit/curved_boolean_qa17_test.cpp tests/unit/brep_boolean_curved_fixture.hpp tests/unit/brep_boolean_curved_test.cpp tests/CMakeLists.txt docs/adr/0031-general-sphere-lenses.md docs/benchmarks/m3c3c.md docs/architecture/geometry-library-architecture.md
 git commit -m "docs(m3c3c): record QA-17 and the general sphere lens limits"
 ```
 
@@ -423,13 +425,13 @@ git commit -m "docs(m3c3c): record QA-17 and the general sphere lens limits"
 
 ## Exit criteria
 
-- Tasks 1–5 committed; 15-degree, 1-degree and random rotated pairs all build valid single-shell lenses whose sphere-cap volume matches the analytic value.
+- Tasks 1–5 committed; the 15-degree case, the 33-operation rotated corpus (30-degree ring, 0/45/90 union and difference, 0–90 degree ten-degree grid, 5 seeded draws) and the near-aligned acceptance case all build valid single-shell lenses whose sphere-cap volume matches the analytic value.
 - A seam endpoint 2.9e-18 inside the domain yields two fragments, never a zero-width ring.
 - The axis-aligned guard is gone; non-crossing and non-whole-sphere inputs still return their documented `unsupported` messages with `face_pairs == 0`.
 - Debug and Release suites pass with zero warnings; ADR-0031/QA-17/§16.3 updated.
 
 ## Self-review
 
-- Spec coverage: every Review Focus line is pinned by a task test (Task 1 seam drift, Task 2 acceptance, Task 3 rim identity, Task 4 corpus, Task 5 QA).
-- Type consistency: no new production API is introduced; the only production change is the relative seam-only area bound in `split_face_curved`.
+- Spec coverage: every Review Focus line is pinned by a task test (Task 1 seam drift, Task 2 acceptance, Task 3 relative-area rule, Task 4 corpus, Task 5 QA); the 15-degree and near-aligned cases are separate tests, not part of the 33-operation corpus.
+- Type consistency: no new production API is introduced; the production diff is the seam-endpoint snap in `trim_face_split_seam_only`, the re-chart in `boolean_solid_curved`, and the sphere-only relative seam-only area bound in `split_face_curved`.
 - No placeholders: all tests carry exact values; no step says "handle edge cases".

@@ -1950,11 +1950,13 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
 
   const BrepFingerprint cap_before = fingerprint_of(cap);
   const BrepFingerprint cap_other_before = fingerprint_of(cap_other);
+  geom::CurvedBooleanReport not_whole_report{};
   const geom::Result<geom::CurvedBooleanResult> not_whole = geom::boolean_solid_curved(
       cap, only_solid(cap), cap_other, only_solid(cap_other),
-      geom::SolidBooleanOp::intersection, options);
+      geom::SolidBooleanOp::intersection, options, &not_whole_report);
   REQUIRE_MESSAGE(!not_whole.has_value(), "a cap solid and a whole sphere must be rejected");
   CHECK(not_whole.error().code == geom::Errc::unsupported);
+  CHECK(not_whole_report.face_pairs == 0u);
   CHECK(message_of(not_whole.error()) ==
         "boolean_solid_curved: sphere/sphere booleans need whole-sphere operands");
   CHECK(fingerprint_of(cap) == cap_before);
@@ -1976,11 +1978,13 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
     INFO(entry.name);
     const geom::Brep other = geom::make_sphere(entry.center, entry.radius, tolerance).value();
     const BrepFingerprint other_before = fingerprint_of(other);
+    geom::CurvedBooleanReport rejected_report{};
     const geom::Result<geom::CurvedBooleanResult> rejected = geom::boolean_solid_curved(
         unit_a, only_solid(unit_a), other, only_solid(other),
-        geom::SolidBooleanOp::intersection, options);
+        geom::SolidBooleanOp::intersection, options, &rejected_report);
     REQUIRE_MESSAGE(!rejected.has_value(), "expected the crossing-spheres diagnostic");
     CHECK(rejected.error().code == geom::Errc::unsupported);
+    CHECK(rejected_report.face_pairs == 0u);
     CHECK(message_of(rejected.error()) ==
           "boolean_solid_curved: sphere/sphere booleans need two crossing spheres");
     CHECK(fingerprint_of(other) == other_before);
@@ -1999,6 +2003,21 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   CHECK(y_lens.value().brep.face_ids().size() == 2);
   CHECK(y_lens.value().brep.edge_ids().size() == 3);
   CHECK(y_lens.value().brep.vertex_ids().size() == 3);
+
+  // A centre line within rounding of +x is accepted and still builds a lens;
+  // it exercises the 8-ulp fixed point that stops the re-chart recursion.
+  const geom::Brep near_a =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, tolerance).value();
+  const geom::Brep near_b =
+      geom::make_sphere(geom::Point3d{1.5, 1.5e-13, 0.0}, 1.0, tolerance).value();
+  const geom::Result<geom::CurvedBooleanResult> near_lens = geom::boolean_solid_curved(
+      near_a, only_solid(near_a), near_b, only_solid(near_b),
+      geom::SolidBooleanOp::intersection, options);
+  REQUIRE_MESSAGE(near_lens.has_value(), message_of(near_lens.error()));
+  CHECK(near_lens.value().brep.face_ids().size() == 2);
+  CHECK(near_lens.value().brep.edge_ids().size() == 3);
+  CHECK(near_lens.value().brep.vertex_ids().size() == 3);
+  check_one_shared_rim("near-aligned lens", near_lens.value().brep);
 
   CHECK(fingerprint_of(unit_a) == unit_a_before);
 }
@@ -2410,6 +2429,7 @@ void check_rotated_lens(double degrees, double distance, geom::SolidBooleanOp op
                                                 << boolean_op_name(op) << ": "
                                                 << message_of(result.error()));
   CHECK(geom::validate_topology(result.value().brep).ok());
+  CHECK(result.value().brep.solid_shells(result.value().brep.solid_ids().front()).size() == 1);
   check_one_shared_rim(boolean_op_name(op), result.value().brep);
 
   const std::optional<double> volume = sphere_face_volume(result.value().brep);
