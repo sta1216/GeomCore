@@ -2245,24 +2245,29 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
         }
         // A fragment whose result interior lies on the side its own surface
         // normal points to needs that normal flipped, exactly as
-        // `detail::solid_boolean_classify_face` negates the plane it emits. The
-        // `reversed` flag alone is not enough: two faces sharing a cut edge must
-        // walk it in opposite directions, so the rings are reversed too, and a
-        // planar face is re-expressed with the flipped normal baked into its
-        // plane (parameters reprojected into the new frame) so that `reversed`
-        // stays false and `curved_solid_volume` never sees a negatively oriented
-        // planar ring. A sphere cap is the one curved exception, emitted with
-        // reversed rings below; every other curved surface is deferred instead
-        // of being emitted with a winding the volume integral would misread.
+        // `detail::solid_boolean_classify_face` negates the plane it emits. Two
+        // faces sharing a cut edge must walk it in opposite directions, so the
+        // rings are reversed in every case, and a planar face is re-expressed
+        // with the flipped normal baked into its plane (parameters reprojected
+        // into the new frame) so that `reversed` stays false. A sphere cannot be
+        // reparameterized that way, so its cap keeps the charted sphere surface
+        // and carries the flipped orientation in the `reversed` face flag, which
+        // is also the sign `curved_solid_volume` multiplies the integral by. A
+        // sphere cap is the one curved exception; every other curved surface is
+        // deferred instead of being emitted with an orientation the volume
+        // integral would misread.
         const bool flip = brep.face(info.id).reversed != keep_plus;
         if (flip && std::holds_alternative<Sphere3>(assembled.surface)) {
-          // A reversed spherical cap keeps its surface and carries the sign in
-          // its ring winding: `curved_solid_volume` integrates the winding, so
-          // the reversed rings contribute negatively without setting `reversed`
-          // and without reparameterizing the sphere. `reverse_rings` keeps the
-          // (u, v) chart in step, so no plane-style reprojection is needed.
+          // A reversed spherical cap keeps its surface and sets the face flag:
+          // `reversed` carries the orientation and therefore the sign of the
+          // volume contribution, exactly as the flipped plane bakes its flipped
+          // normal into the plane. The rings are reversed as well so the two
+          // faces sharing the cut rim walk it in opposite directions; unlike a
+          // plane there is no plane-style reparameterization to bake the flip
+          // into, so the flag is the invariant, not the ring winding.
           detail::curved_boolean_reverse_rings(assembled.loops, assembled.loops_uv,
                                                assembled.arc_spans);
+          assembled.reversed = true;
         } else if (flip) {
           const Plane3* plane = std::get_if<Plane3>(&assembled.surface);
           if (plane == nullptr) {

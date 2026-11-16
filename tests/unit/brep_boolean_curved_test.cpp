@@ -300,55 +300,68 @@ BrepFingerprint fingerprint_of(const geom::Brep& brep) {
   return result;
 }
 
+// Signed chart volume of one spherical face, or nullopt when the face is not
+// spherical or is not a polar cap in its own chart. The face must be a polar cap:
+// its single uv loop has to reach a pole (v = +-pi/2), and the latitude range
+// gives the cap height. The loop's signed shoelace area carries the orientation
+// of the ring itself (+ outward, - reversed). The result does not consult the
+// face's `reversed` flag; callers that need the flag's sign apply it themselves.
+std::optional<double> sphere_face_cap_volume(const geom::Brep& brep, geom::FaceId face_id) {
+  constexpr double kTolerance = 1e-9;
+  const geom::Face& face = brep.face(face_id);
+  const geom::SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
+  const geom::Sphere3* sphere = std::get_if<geom::Sphere3>(&surface);
+  if (sphere == nullptr) return std::nullopt;
+  const geom::Result<std::vector<geom::FaceUvLoop>> loops =
+      geom::face_loops_uv(brep, face_id, kTolerance);
+  if (!loops.has_value() || loops.value().size() != 1) return std::nullopt;
+  const std::vector<geom::Point2d>& ring = loops.value().front().points;
+  if (ring.size() < 3) return std::nullopt;
+
+  double twice_area = 0.0;
+  double v_lo = 1e30;
+  double v_hi = -1e30;
+  for (std::size_t i = 0; i < ring.size(); ++i) {
+    const geom::Point2d& point = ring[i];
+    const geom::Point2d& next = ring[(i + 1) % ring.size()];
+    twice_area += point[0] * next[1] - next[0] * point[1];
+    v_lo = std::min(v_lo, point[1]);
+    v_hi = std::max(v_hi, point[1]);
+  }
+  if (twice_area == 0.0) return std::nullopt;
+
+  constexpr double kHalfPi = 0.5 * kPi;
+  double height = 0.0;
+  if (std::abs(v_lo + kHalfPi) <= 1e-9) {
+    // Southern cap: the pole is at v = -pi/2, so its axial extent is
+    // r * (sin(v_hi) + 1).
+    height = sphere->radius * (1.0 + std::sin(v_hi));
+  } else if (std::abs(v_hi - kHalfPi) <= 1e-9) {
+    // Northern cap: r * (1 - sin(v_lo)).
+    height = sphere->radius * (1.0 - std::sin(v_lo));
+  } else {
+    return std::nullopt;
+  }
+  const double sign = twice_area > 0.0 ? 1.0 : -1.0;
+  const double radius = sphere->radius;
+  return sign * kPi * height * height * (3.0 * radius - height) / 3.0;
+}
+
 // Signed chart volume of a solid built only from spherical faces. Task 5 also
 // uses this helper, so it stays test-local and generic. Each spherical face must
-// be a polar cap in its own chart: its single uv loop has to reach a pole
-// (v = +-pi/2), and the latitude range gives the cap height. The loop's signed
-// shoelace area carries the orientation (+ outward, - reversed), which is how a
-// subtracted cap contributes negative volume. A face without a pole at either v
-// end is not a polar cap and is reported as nullopt rather than as zero.
+// be a polar cap; `sphere_face_cap_volume` owns the per-face sign and the cap
+// geometry. A face without a pole at either v end is not a polar cap and is
+// reported as nullopt rather than as zero.
 std::optional<double> sphere_face_volume(const geom::Brep& brep) {
-  constexpr double kTolerance = 1e-9;
   double volume = 0.0;
   bool any_sphere = false;
   for (const geom::FaceId face_id : brep.face_ids()) {
     const geom::Face& face = brep.face(face_id);
     const geom::SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
-    const geom::Sphere3* sphere = std::get_if<geom::Sphere3>(&surface);
-    if (sphere == nullptr) continue;
-    const geom::Result<std::vector<geom::FaceUvLoop>> loops =
-        geom::face_loops_uv(brep, face_id, kTolerance);
-    if (!loops.has_value() || loops.value().size() != 1) return std::nullopt;
-    const std::vector<geom::Point2d>& ring = loops.value().front().points;
-    if (ring.size() < 3) return std::nullopt;
-
-    double twice_area = 0.0;
-    double v_lo = 1e30;
-    double v_hi = -1e30;
-    for (std::size_t i = 0; i < ring.size(); ++i) {
-      const geom::Point2d& point = ring[i];
-      const geom::Point2d& next = ring[(i + 1) % ring.size()];
-      twice_area += point[0] * next[1] - next[0] * point[1];
-      v_lo = std::min(v_lo, point[1]);
-      v_hi = std::max(v_hi, point[1]);
-    }
-    if (twice_area == 0.0) return std::nullopt;
-
-    constexpr double kHalfPi = 0.5 * kPi;
-    double height = 0.0;
-    if (std::abs(v_lo + kHalfPi) <= 1e-9) {
-      // Southern cap: the pole is at v = -pi/2, so its axial extent is
-      // r * (sin(v_hi) + 1).
-      height = sphere->radius * (1.0 + std::sin(v_hi));
-    } else if (std::abs(v_hi - kHalfPi) <= 1e-9) {
-      // Northern cap: r * (1 - sin(v_lo)).
-      height = sphere->radius * (1.0 - std::sin(v_lo));
-    } else {
-      return std::nullopt;
-    }
-    const double sign = twice_area > 0.0 ? 1.0 : -1.0;
-    const double radius = sphere->radius;
-    volume += sign * kPi * height * height * (3.0 * radius - height) / 3.0;
+    if (!std::holds_alternative<geom::Sphere3>(surface)) continue;
+    const std::optional<double> cap = sphere_face_cap_volume(brep, face_id);
+    if (!cap.has_value()) return std::nullopt;
+    volume += *cap;
     any_sphere = true;
   }
   if (!any_sphere) return std::nullopt;
@@ -2137,22 +2150,49 @@ TEST_CASE("curved boolean: difference subtracts a sphere cap") {
     REQUIRE_MESSAGE(volume.has_value(), entry.name << ": a face is not a polar cap");
     CHECK(*volume == doctest::Approx(expected).epsilon(1e-9));
 
+    // Only the subtracted B cap is flipped; the A complement stays outward.
+    // `curved_solid_volume` takes each face's sign from the `reversed` flag,
+    // not from the ring winding, so exactly one face may carry it, and it must
+    // be the smaller cap (cap height 0.25: 11*pi/192 = 0.179987...).
+    std::vector<geom::FaceId> reversed_faces;
+    std::optional<double> reversed_cap_volume;
+    for (const geom::FaceId face_id : brep.face_ids()) {
+      const geom::Face& face = brep.face(face_id);
+      const geom::SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
+      if (!std::holds_alternative<geom::Sphere3>(surface)) continue;
+      if (!face.reversed) continue;
+      reversed_faces.push_back(face_id);
+      reversed_cap_volume = sphere_face_cap_volume(brep, face_id);
+    }
+    REQUIRE(reversed_faces.size() == 1);
+    REQUIRE_MESSAGE(reversed_cap_volume.has_value(), entry.name << ": reversed face is not a cap");
+    const double smaller_cap = 11.0 * std::numbers::pi / 192.0;
+    CHECK(std::abs(*reversed_cap_volume) == doctest::Approx(smaller_cap).epsilon(1e-9));
+
     // The A complement cap and the reversed B cap meet on one rim edge used by
-    // both faces; each of the two seam edges is used twice by one face.
+    // both faces; each of the two seam edges is used twice by one face. The two
+    // faces walk the rim in opposite directions, so their coedges disagree on
+    // whether they run against the edge's own orientation.
     std::size_t rim_edges = 0;
     for (const geom::EdgeId edge_id : brep.edge_ids()) {
       std::vector<geom::FaceId> users;
+      std::vector<bool> senses;
       std::size_t uses = 0;
       for (const geom::CoedgeId coedge_id : brep.coedge_ids()) {
         const geom::Coedge& coedge = brep.coedge(coedge_id);
         if (coedge.edge != edge_id) continue;
         ++uses;
+        senses.push_back(coedge.reversed);
         if (std::find(users.begin(), users.end(), coedge.face) == users.end()) {
           users.push_back(coedge.face);
         }
       }
       CHECK(uses == 2);
-      if (users.size() == 2) ++rim_edges;
+      if (users.size() == 2) {
+        ++rim_edges;
+        REQUIRE(senses.size() == 2);
+        CHECK(senses[0] != senses[1]);
+      }
     }
     CHECK(rim_edges == 1);
   }
