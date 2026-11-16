@@ -1351,7 +1351,7 @@ ear clipping 上不收敛，因此 QA-16 度量 chart cap 体积，并在 3a cap
 helper 一次（库 `0.6544984694978736`、`1e-6`；helper 差 `<= 1e-12`）。基准
 `geom_bench_m3c3b`（Release，20 次/操作）布尔中位数 `421.0` / `416.4` / `421.3` ms、
 chart 体积 `5.34` / `3.56` / `3.70` ms，实测见 `docs/benchmarks/m3c3b.md`、取舍见
-ADR-0030。Debug 与 Release 各 949 个用例、659,595 条断言全绿，
+ADR-0030。Debug 与 Release 各 949 个用例、659,600 条断言全绿，
 `/W4 /WX /utf-8` 零警告。一般位置球/球、包含/相切/分离、锥操作数、一般修剪网格化
 与 NURBS 仍待 M3c-3c；本行只关闭 M3c-3b，不得据此声称 M3c-3 完成。
 

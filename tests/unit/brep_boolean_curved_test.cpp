@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <limits>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -2094,10 +2095,24 @@ TEST_CASE("curved boolean: sphere/sphere rejects off-axis placements") {
   // refused rather than silently accepted.
   const geom::Brep tilted =
       geom::make_sphere(geom::Point3d{1.5 - 1e-13, 1.5 * 4.472e-7, 0.0}, 1.0, tolerance).value();
+  geom::CurvedBooleanReport tilted_report{};
   const geom::Result<geom::CurvedBooleanResult> tilted_result = geom::boolean_solid_curved(
-      a, only_solid(a), tilted, only_solid(tilted), geom::SolidBooleanOp::intersection, options);
+      a, only_solid(a), tilted, only_solid(tilted), geom::SolidBooleanOp::intersection, options,
+      &tilted_report);
   REQUIRE_MESSAGE(!tilted_result.has_value(), "a 1e-13 tilt must be refused");
   CHECK(tilted_result.error().code == geom::Errc::unsupported);
+  CHECK(tilted_report.face_pairs == 0);
+
+  // The guard admits only floating-point rounding. A deficit of ten ulps in one
+  // unit component is already a deliberate tilt and must be refused.
+  const double eps = std::numeric_limits<double>::epsilon();
+  const geom::Brep ten_ulps =
+      geom::make_sphere(geom::Point3d{1.5 * (1.0 - 10.0 * eps), 0.0, 0.0}, 1.0, tolerance).value();
+  const geom::Result<geom::CurvedBooleanResult> ten_ulps_result = geom::boolean_solid_curved(
+      a, only_solid(a), ten_ulps, only_solid(ten_ulps), geom::SolidBooleanOp::intersection,
+      options);
+  REQUIRE_MESSAGE(!ten_ulps_result.has_value(), "a ten-ulp tilt must be refused");
+  CHECK(ten_ulps_result.error().code == geom::Errc::unsupported);
 }
 
 TEST_CASE("curved boolean: sphere/sphere re-charts opposite meridians") {

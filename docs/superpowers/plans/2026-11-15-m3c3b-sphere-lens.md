@@ -526,8 +526,8 @@ Debug and Release: QA-16 plus the full suite pass.
 
 ## Self-Check
 
-- [ ] Every task has Files, Interfaces, and the five steps.
-- [ ] Each task's RED is a concrete failing assertion or compile error.
-- [ ] Values in the corpus are closed forms, not implementation outputs.
-- [ ] The plan never claims cone, torus, NURBS or general closed-cut support.
-- [ ] No placeholder or self-correction note remains.
+- [x] Every task has Files, Interfaces, and the five steps.
+- [x] Each task's RED is a concrete failing assertion or compile error.
+- [x] Values in the corpus are closed forms, not implementation outputs.
+- [x] The plan never claims cone, torus, NURBS or general closed-cut support.
+- [x] No placeholder or self-correction note remains.
