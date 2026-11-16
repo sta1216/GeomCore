@@ -219,7 +219,7 @@ The `curved boolean: an off-axis sphere lens is built` case (Task 2) already fai
 
 - [ ] **Step 2: Run the test to verify it fails for the diagnosed reason**
 
-Run: `.\build\testss\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
+Run: `.\build\tests\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
 Expected: FAIL with `boolean_solid_curved: result touches itself along an edge`. The splitter produced no fragment for operand A: its 64-point seam loop has uv area `6.1629758220391547e-33`, not exactly zero, so the dispatch took the regular trim path and its area filters dropped every fragment.
 
 - [ ] **Step 3: Use a relative area bound for sphere charts and widen the test helper's pole bound**
@@ -244,7 +244,7 @@ Remove any rim-snapping helper added during the blocked attempt (`curved_boolean
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `.\build\testss\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
+Run: `.\build\tests\Debug\geom_tests.exe --test-case="*an off-axis sphere lens is built*"`
 Expected: PASS; intersection `11π/96` and union `245π/96`.
 
 Then run the full Debug suite and the full Release suite; both must be green.
@@ -315,7 +315,7 @@ TEST_CASE("curved boolean: sphere lenses accept rotated placements") {
 - [ ] **Step 2: Run the corpus to verify it fails on the first non-axis angle**
 
 Run: `.\build\tests\Debug\geom_tests.exe --test-case="*accept rotated placements*"`
-Expected before Task 3: FAIL at degrees 15. After Task 3: PASS for every 15-degree step.
+Expected before Task 3: FAIL at degrees 15. After Task 3: PASS at 15 degrees (the 33-op corpus replaces this sweep in Task 4).
 
 - [ ] **Step 3: Cap the corpus at a Debug-time budget**
 
@@ -425,7 +425,7 @@ git commit -m "docs(m3c3c): record QA-17 and the general sphere lens limits"
 
 ## Exit criteria
 
-- Tasks 1–5 committed; the 15-degree case, the 33-operation rotated corpus (30-degree ring, 0/45/90 union and difference, 0–90 degree ten-degree grid, 5 seeded draws) and the near-aligned acceptance case all build valid single-shell lenses whose sphere-cap volume matches the analytic value.
+- Tasks 1–5 committed; the 15-degree case, the 33-operation rotated corpus (30-degree ring, 0/45/90 union and difference, 0–90 degree ten-degree grid, 5 seeded draws) and the near-aligned acceptance case all build valid single-shell lenses with two faces and one shared rim; the 15-degree case and the 33-operation corpus also match the analytic sphere-cap volume.
 - A seam endpoint 2.9e-18 inside the domain yields two fragments, never a zero-width ring.
 - The axis-aligned guard is gone; non-crossing and non-whole-sphere inputs still return their documented `unsupported` messages with `face_pairs == 0`.
 - Debug and Release suites pass with zero warnings; ADR-0031/QA-17/§16.3 updated.

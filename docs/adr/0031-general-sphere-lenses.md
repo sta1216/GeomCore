@@ -119,9 +119,7 @@ snapping**；本 ADR 只记录实际进入生产代码的规则。
   `uniform_real_distribution` 实现，换工具链位置会移动，但仍落在 `[0,360)` 与
   `[1.05,1.95]` 内。
 - **全套计数（实测）。** Debug 与 Release 各 **952 个用例、660,068 条断言**，
-  0 失败、0 跳过，`/W4 /WX /utf-8` 零警告；基线 951/660,002，本任务新增 1 个
-  用例、17 条断言（QA-17 含 6 条共享 rim 断言）。`sphere_face_volume` 与
-  `check_one_shared_rim` 迁出只改测试组织，不改变原有用例的断言数。
+  0 失败、0 跳过，`/W4 /WX /utf-8` 零警告；基线 951/660,002；Task 5 的 QA-17 新增 1 个用例、17 条断言；终审修复波再新增 49 条断言（33 条 corpus 单壳、4 条 `face_pairs`、近轴用例 10 条及 splitter 的其余断言），最终 952/660,068。`sphere_face_volume` 与 `check_one_shared_rim` 迁出只改测试组织，不改变原有用例的断言数。
 - **基准与耗时（实测）。** 本任务不新增 bench 可执行文件；QA-17 与 15° 用例
   的聚焦墙钟时间、33 次语料与全套耗时见 `docs/benchmarks/m3c3c.md`（同一台
   i7-8550U / Windows 10 / MSVC 19.44，Debug 与 Release 分列，informational、
