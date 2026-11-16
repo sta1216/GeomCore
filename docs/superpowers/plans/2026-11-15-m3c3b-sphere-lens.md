@@ -408,7 +408,7 @@ Do not run the plane reprojection block for a sphere.
 Do not use `curved_solid_volume` on the lens result: its sphere-face rim has
 about 4098 points at tolerance 1e-9 (1809 at 1e-4), and ear clipping over that ring stalls for
 minutes. The Task 3 report records the measurement; Task 5 validates the
-replacement below against `curved_solid_volume` on the 3a cap (66-point ring).
+replacement below against `curved_solid_volume` on the 3a cap (4098-point ring).
 
 Add a test-local helper `sphere_face_volume(const Brep&)` in
 `tests/unit/brep_boolean_curved_test.cpp`:
@@ -470,7 +470,7 @@ Every face of the three results is a polar cap on its own `Sphere3` chart, so
 tolerance 1e-9 and its ear clipping takes minutes (Task 3 report, Concern 1).
 
 Validate the helper itself in this task: on the M3c-3a cap solid
-(`sphere` intersected with `box` z >= 0.5, 66-point rim)
+(`sphere` intersected with `box` z >= 0.5, 4098-point rim)
 `curved_solid_volume(..., 1e-9)` must equal `0.6544984694978736` within 1e-6 and
 `sphere_face_volume` must agree with it within 1e-12. Record this cross-check in
 the ADR so the metric is not taken on faith.

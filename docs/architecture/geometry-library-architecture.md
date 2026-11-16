@@ -1330,8 +1330,8 @@ QA-15 三行体积 `0.6544984694978736` / `3.534291735288517` / `3.9542179533184
 相同；cap/complement 分类网格闭合，slab 的 band 轮廓无法三角化（`"a face outline
 could not be triangulated"`），该行改用每条边恰被两个 coedge 使用的结构判据。
 Debug 与 Release 各 940 个用例、659,153 条断言全绿，`/W4 /WX /utf-8` 零警告。
-球/球 lens（已在 M3c-3b 关闭）、锥操作数、偏移/倾斜 torus 切平面、一般修剪网格化与
-NURBS 仍待 M3c-3b/3c；本行只关闭 M3c-3a，不得据此声称 M3c-3 完成。
+球/球 lens 已在 M3c-3b 关闭（见下）；锥操作数、偏移/倾斜 torus 切平面、一般修剪网格化与
+NURBS 仍待 M3c-3c；本行只关闭 M3c-3a，不得据此声称 M3c-3 完成。
 
 **M3c-3b（球/球透镜：支持；M3c-3 未完成）**：`boolean_solid_curved` 现在接受两个
 整球操作数，前提是球心连线在 8 ulp 内与某坐标轴对齐、两球相交。非整球或部分球报

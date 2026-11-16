@@ -334,4 +334,3 @@ int main() {
 
   return verified ? 0 : 2;
 }
-
