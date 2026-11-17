@@ -294,6 +294,49 @@ Brep make_planar_face(std::span<const Point3d> outer,
   return editor.commit().value();
 }
 
+// Builds a one-face sphere band bounded by two latitude rings: the outer ring at
+// v = 0.3 and a stored inner ring at v = 0.6. The splitter cannot carry stored
+// inner rings yet, so this face is the public path's stored-hole input.
+Brep make_sphere_band() {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(sphere);
+  const FaceId face = editor.add_face(surface, false, 0.0).value();
+  const auto add_ring = [&editor, &sphere, face](double latitude, bool outer_ring) {
+    constexpr int kRingPoints = 64;
+    std::vector<Point3d> ring;
+    ring.reserve(kRingPoints);
+    for (int i = 0; i < kRingPoints; ++i) {
+      ring.push_back(sphere.eval(2.0 * kPi * i / kRingPoints, latitude));
+    }
+    std::vector<VertexId> vertices;
+    vertices.reserve(kRingPoints);
+    for (const Point3d& p : ring) {
+      vertices.push_back(editor.add_vertex(p, 0.0).value());
+    }
+    std::vector<CoedgeSpec> specs(kRingPoints);
+    for (int i = 0; i < kRingPoints; ++i) {
+      const Point3d& from = ring[static_cast<std::size_t>(i)];
+      const Point3d& to = ring[static_cast<std::size_t>((i + 1) % kRingPoints)];
+      const std::uint32_t curve = editor.add_curve(
+          LineCurve3{from, Vec3d{to[0] - from[0], to[1] - from[1],
+                                 to[2] - from[2]}});
+      specs[static_cast<std::size_t>(i)].edge =
+          editor
+              .add_edge(vertices[static_cast<std::size_t>(i)],
+                        vertices[static_cast<std::size_t>((i + 1) % kRingPoints)],
+                        curve, 0.0, 1.0, 0.0)
+              .value();
+    }
+    editor.add_loop(face, specs, outer_ring).value();
+  };
+  add_ring(0.3, true);
+  add_ring(0.6, false);
+  const std::array<FaceId, 1> faces{face};
+  editor.add_shell(faces, false).value();
+  return editor.commit().value();
+}
+
 // Checks that the uv rings are the cycle rings (outer counter-clockwise, holes
 // clockwise) and that every 3D vertex is the planar lift of its uv vertex.
 void check_plane_fragment(const Brep& brep, FaceId face,
@@ -2601,4 +2644,16 @@ TEST_CASE("trim_face: a cylinder has no synthetic domain") {
   REQUIRE_FALSE(domain.has_value());
   CHECK(domain.error().message ==
         std::string_view("trim_face: no synthetic domain for this surface"));
+}
+
+TEST_CASE("trim face: a stored inner loop is refused publicly") {
+  constexpr double kSplitTol = 1e-9;
+  const Brep band = make_sphere_band();
+  const FaceId face = band.face_ids().front();
+  const Result<std::vector<CurvedFragment>> result =
+      split_face_curved(band, face, {}, kSplitTol);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "split_face_curved: stored holes are not supported yet");
 }

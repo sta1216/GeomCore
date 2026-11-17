@@ -2017,6 +2017,15 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
       std::holds_alternative<Sphere3>(surface) &&
       loop_area <= 1e-12 * extent * extent;
   if (loop_area == 0.0 || sphere_slit) {
+    // The seam-only splitter splits the outer ring only. A synthetic-domain face
+    // that already carries a stored inner ring (a band with a hole) would lose
+    // that hole silently, so refuse it explicitly until the splitter carries
+    // multiple cycles.
+    if (sphere_slit && loops.size() > 1) {
+      return Error{Errc::unsupported,
+                   "split_face_curved: stored holes are not supported yet",
+                   face.index(), static_cast<std::uint32_t>(loops.size() - 1)};
+    }
     const std::optional<std::array<double, 4>> seam_domain =
         detail::trim_face_seam_only_domain(surface);
     if (seam_domain.has_value()) {
