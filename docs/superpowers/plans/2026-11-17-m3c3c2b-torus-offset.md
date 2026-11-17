@@ -457,7 +457,7 @@ Add only the missing coverage:
 
 - `trim face: a stored inner loop is refused publicly`: exact message and
   `context_b == 1u` (already present from M3c-3c-2a at
-  `tests/unit/brep_trim_face_test.cpp (before the new pins)`; keep it, do not duplicate).
+  `tests/unit/brep_trim_face_test.cpp (already present from M3c-3c-2a; keep it, do not duplicate)`; keep it, do not duplicate).
 - `trim_face: a closed cut crossing the u seam at two different v values is a
   twisted crossing`: polygon `{(1.0,1.0),(6.0,1.1),(0.2,1.2),(3.0,1.15),(1.0,1.0)}`
   with exact message `"split_face_curved: closed cut crosses the seam at different

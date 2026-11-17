@@ -110,8 +110,11 @@ environment are recorded in `docs/benchmarks/m3c3c2b.md`.
   (`island = closed && no point on any side`), so the all-islands partition guard
   does not run: the cut is split and the complement ring is pinched at the contact
   point. A 32-gon of radius 0.2 tangent to `u = 0` at `(0, 0.5)` yields two
-  fragments of areas `39.353559798267149` and `0.12485780609032211`. Interior
-  islands are refused earlier with the dedicated nested-cut message.
+  fragments of areas `39.353559798267149` and `0.12485780609032211`. An interior
+  island set on the periodic router is refused by the `islands_only` pre-check with
+  `split_face_curved: closed cuts on a periodic face are not supported yet`; the
+  general splitter refuses nested or mixed island cuts with
+  `split_face_curved: nested closed cuts are not supported`.
 - Sphere behaviour, including the seam-only wrapper and every refusal message, is
   byte-for-byte unchanged.
 - Deferred to M3c-3c-4: multi-cycle holes, cone apex topology, general twisted
