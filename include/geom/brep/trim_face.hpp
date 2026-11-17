@@ -922,12 +922,14 @@ inline void trim_face_seam_only_append_side(
   }
 }
 
-// Splits a seam-only face: a face whose uv loop is the seam slit with zero
-// area, so the ordinary pipeline clips every cut away. The surface is opened
-// onto the full parameter rectangle, the four synthetic sides join the cut
-// chains as source 0, and every material cycle is emitted with only its runs of
-// cut geometry.
-inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
+// The public seam-only splitter still routes sphere faces here, so it keeps the
+// historical input screening: an interior island, an open chain, a cut that
+// leaves the rectangle or one that crosses the seam twice used to be refused
+// before any arrangement work. Task 3 moves the dispatch, and only then does the
+// public path accept those inputs; this screen keeps the old errors stable until
+// it does. The geometric checks do not modify the cuts: the splitter below
+// windows them again, on the same descriptors the caller passes.
+inline Result<void> trim_face_seam_only_screen(
     FaceId face, const FaceUvProjection& projection,
     std::span<const FaceCut> cuts, const std::array<double, 4>& domain) {
   const double u_lo = domain[0];
@@ -1111,11 +1113,210 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
                    static_cast<std::uint32_t>(c)};
     }
   }
+  return Result<void>{};
+}
 
-  // Four synthetic sides, counter-clockwise: bottom, right, top, left.
+// The side of the domain an arrangement edge lies on, in the TrimFaceDomain
+// order (0 = u_lo, 1 = u_hi, 2 = v_lo, 3 = v_hi), or -1 for a real cut edge. The
+// arrangement carries no source tag on its half-edges, so this geometric test
+// is how the synthetic chains are recognized after the build. Requiring the
+// same side (not merely two endpoints that each touch some side) keeps a cut
+// that joins two different sides from being misclassified as synthetic.
+inline int trim_face_domain_edge_side(const Point2d& a, const Point2d& b,
+                                      const TrimFaceDomain& domain) noexcept {
+  if (a[0] == domain.bounds[0] && b[0] == domain.bounds[0]) return 0;
+  if (a[0] == domain.bounds[1] && b[0] == domain.bounds[1]) return 1;
+  if (a[1] == domain.bounds[2] && b[1] == domain.bounds[2]) return 2;
+  if (a[1] == domain.bounds[3] && b[1] == domain.bounds[3]) return 3;
+  return -1;
+}
+
+// Splits a synthetic parameter rectangle along cut chains. The rectangle sides
+// are synthetic: a seam copy is dropped (the ring closes across the seam), a
+// collapsed side becomes the single pole point, and a real boundary side stays
+// in the ring as if it were a cut. Closed chains that touch no side bound
+// material on both sides, so they are emitted as an island plus the complement
+// of the rectangle around them.
+//
+// `holes` are the stored inner uv rings of the face (material outside them).
+// They are handled together with the other cut geometry in Task 3; this entry
+// point only splits on `cuts`, so an empty span is the expected input here.
+inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
+    FaceId face, const FaceUvProjection& projection,
+    std::span<const FaceCut> cuts, const TrimFaceDomain& domain,
+    std::span<const std::vector<Point2d>> holes, double tolerance) {
+  (void)holes;
+  const double u_lo = domain.bounds[0];
+  const double u_hi = domain.bounds[1];
+  const double v_lo = domain.bounds[2];
+  const double v_hi = domain.bounds[3];
+
+  // The cut polylines are windowed first, so every piece lies inside the
+  // rectangle and its open ends sit exactly on a side. A closed island comes
+  // back as one closed piece; a latitude-like chain is one piece whose two ends
+  // are the two copies of one seam point.
+  Result<std::vector<std::vector<Point2d>>> windowed =
+      trim_face_window_chains(cuts, domain, tolerance);
+  if (!windowed) return windowed.error();
+  std::vector<std::vector<Point2d>> pieces = std::move(windowed.value());
+
+  const double slack_u =
+      1e-9 * std::max({1.0, std::fabs(u_lo), std::fabs(u_hi)});
+  const double slack_v =
+      1e-9 * std::max({1.0, std::fabs(v_lo), std::fabs(v_hi)});
+  for (std::size_t i = 0; i < pieces.size(); ++i) {
+    std::vector<Point2d>& piece = pieces[i];
+    for (const Point2d& point : piece) {
+      if (!trim_face_finite2(point)) {
+        return Error{Errc::non_finite,
+                     "split_face_curved: cut point is not finite", face.index(),
+                     static_cast<std::uint32_t>(i)};
+      }
+    }
+    // SSI seam endpoints can land a few ulp inside the chart. The seam pairing
+    // and the synthetic-side recognition are exact, so snap a coordinate that
+    // close to a side onto that side; otherwise the cut leaves a
+    // near-degenerate sliver along the seam and its ring no longer closes.
+    const double seam_eps_u =
+        1e-12 * std::max({1.0, std::fabs(u_lo), std::fabs(u_hi)});
+    const double seam_eps_v =
+        1e-12 * std::max({1.0, std::fabs(v_lo), std::fabs(v_hi)});
+    for (Point2d& point : piece) {
+      if (std::fabs(point[0] - u_lo) <= seam_eps_u) {
+        point[0] = u_lo;
+      } else if (std::fabs(point[0] - u_hi) <= seam_eps_u) {
+        point[0] = u_hi;
+      }
+      if (std::fabs(point[1] - v_lo) <= seam_eps_v) {
+        point[1] = v_lo;
+      } else if (std::fabs(point[1] - v_hi) <= seam_eps_v) {
+        point[1] = v_hi;
+      }
+    }
+    for (Point2d& point : piece) {
+      if (!domain.periodic_u) {
+        if (point[0] < u_lo - slack_u || point[0] > u_hi + slack_u) {
+          return Error{Errc::unsupported,
+                       "split_face_curved: cut leaves the parameter domain",
+                       face.index(), static_cast<std::uint32_t>(i)};
+        }
+        if (point[0] < u_lo) {
+          point[0] = u_lo;
+        } else if (point[0] > u_hi) {
+          point[0] = u_hi;
+        }
+      }
+      if (!domain.periodic_v) {
+        if (point[1] < v_lo - slack_v || point[1] > v_hi + slack_v) {
+          return Error{Errc::unsupported,
+                       "split_face_curved: cut leaves the parameter domain",
+                       face.index(), static_cast<std::uint32_t>(i)};
+        }
+        // A pole touched within the allowed slack is the pole exactly.
+        if (point[1] < v_lo) {
+          point[1] = v_lo;
+        } else if (point[1] > v_hi) {
+          point[1] = v_hi;
+        }
+      }
+    }
+    for (std::size_t k = 1; k < piece.size(); ++k) {
+      if (trim_face_seam_only_on_same_side(piece[k - 1], piece[k],
+                                           domain.bounds)) {
+        return Error{Errc::unsupported,
+                     "split_face_curved: cut lies on the parameter domain "
+                     "boundary",
+                     face.index(), static_cast<std::uint32_t>(i)};
+      }
+    }
+  }
+
+  // One entry per glued chain. A closed chain that touches no side is an
+  // interior island: it bounds material on both sides inside the rectangle.
+  struct DomainChain {
+    std::vector<Point2d> points;
+    bool island = false;
+  };
+  std::vector<DomainChain> chains;
+  std::vector<char> paired(pieces.size(), 0);
+  for (std::size_t i = 0; i < pieces.size(); ++i) {
+    if (paired[i]) continue;
+    std::vector<Point2d>& piece = pieces[i];
+    if (piece.size() < 2) continue;
+    paired[i] = 1;
+    const bool closed =
+        trim_face_same_xy_rel(piece.front(), piece.back(), tolerance);
+    const bool seam_closed =
+        trim_face_seam_only_seam_pair(piece.front(), piece.back(),
+                                      domain.bounds, domain.periodic_u,
+                                      domain.periodic_v);
+    if (closed || seam_closed) {
+      DomainChain chain;
+      chain.points = std::move(piece);
+      if (closed) {
+        chain.island = true;
+        for (const Point2d& point : chain.points) {
+          if (trim_face_point_on_domain_side(point, domain, tolerance)) {
+            chain.island = false;
+            break;
+          }
+        }
+      }
+      chains.push_back(std::move(chain));
+      continue;
+    }
+    // Two open pieces that meet at the seam are the two halves of one chain
+    // that crosses the seam: join them in order and let the arrangement close
+    // the physical loop across the seam.
+    std::size_t match = pieces.size();
+    for (std::size_t j = i + 1; j < pieces.size(); ++j) {
+      if (paired[j] || pieces[j].size() < 2) continue;
+      if (trim_face_same_xy_rel(pieces[j].front(), pieces[j].back(),
+                                tolerance)) {
+        continue;
+      }
+      if (trim_face_seam_only_seam_pair(piece.back(), pieces[j].front(),
+                                        domain.bounds, domain.periodic_u,
+                                        domain.periodic_v) &&
+          trim_face_seam_only_seam_pair(pieces[j].back(), piece.front(),
+                                        domain.bounds, domain.periodic_u,
+                                        domain.periodic_v)) {
+        match = j;
+        break;
+      }
+    }
+    if (match == pieces.size()) {
+      return Error{Errc::unsupported,
+                   "split_face_curved: open cuts on a seam-only face",
+                   face.index(), static_cast<std::uint32_t>(i)};
+    }
+    paired[match] = 1;
+    DomainChain chain;
+    chain.points = std::move(piece);
+    chain.points.insert(chain.points.end(), pieces[match].begin(),
+                        pieces[match].end());
+    chains.push_back(std::move(chain));
+  }
+  for (std::size_t c = 0; c < chains.size(); ++c) {
+    bool degenerate = true;
+    for (const Point2d& point : chains[c].points) {
+      if (!trim_face_same_xy(point, chains[c].points.front())) {
+        degenerate = false;
+        break;
+      }
+    }
+    if (degenerate) {
+      return Error{Errc::degenerate,
+                   "split_face_curved: cut collapses to a point", face.index(),
+                   static_cast<std::uint32_t>(c)};
+    }
+  }
+
+  // Four synthetic sides, counter-clockwise: bottom, right, top, left. The
+  // classification below recovers them by their geometry, not by this order.
   const double step = kFaceUvPi / 32.0;
   std::vector<ArrangementSegment> segments;
-  segments.reserve(4u * 65u + cut_points.size() * 64u);
+  segments.reserve(4u * 65u + chains.size() * 64u);
   const Point2d bottom_left{u_lo, v_lo};
   const Point2d bottom_right{u_hi, v_lo};
   const Point2d top_right{u_hi, v_hi};
@@ -1124,12 +1325,14 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
   trim_face_seam_only_append_side(segments, bottom_right, top_right, step);
   trim_face_seam_only_append_side(segments, top_right, top_left, step);
   trim_face_seam_only_append_side(segments, top_left, bottom_left, step);
-  for (std::size_t c = 0; c < cut_points.size(); ++c) {
+  for (std::size_t c = 0; c < chains.size(); ++c) {
     const std::uint32_t source = static_cast<std::uint32_t>(1u + c);
-    for (std::size_t i = 0; i + 1 < cut_points[c].size(); ++i) {
-      if (trim_face_same_xy(cut_points[c][i], cut_points[c][i + 1])) continue;
-      segments.push_back(
-          ArrangementSegment{cut_points[c][i], cut_points[c][i + 1], source});
+    for (std::size_t i = 0; i + 1 < chains[c].points.size(); ++i) {
+      if (trim_face_same_xy(chains[c].points[i], chains[c].points[i + 1])) {
+        continue;
+      }
+      segments.push_back(ArrangementSegment{chains[c].points[i],
+                                            chains[c].points[i + 1], source});
     }
   }
 
@@ -1150,7 +1353,7 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
   for (std::uint32_t f = 0; f < arrangement.face_count(); ++f) {
     if (!faces[f].bounded) continue;
     // The synthetic rectangle is source 0, so a nonzero winding of source 0 is
-    // exactly the material side of the seam-only face.
+    // exactly the material side of the synthetic domain.
     if (arrangement.winding(f, 0u) == 0) continue;
 
     const std::uint32_t start = faces[f].edge;
@@ -1162,42 +1365,46 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
     } while (h != start && cycle.size() <= half_edges.size());
     if (h != start || cycle.size() < 3) continue;
 
-    // On the sphere chart a material cycle that owns part of the top or bottom
-    // synthetic row reaches that pole: the row is one 3D point, so the ring is
-    // the rim plus exactly one pole point instead of a seam-pair closure.
+    // A material cycle that owns part of a collapsed side reaches that pole:
+    // the side is one 3D point, so the ring is the rim plus exactly one pole
+    // point instead of a seam-pair closure.
     double pole_v = 0.0;
-    const bool pole_chart = trim_face_seam_only_pole_v(domain, pole_v);
     bool touches_pole = false;
     std::vector<char> synthetic(cycle.size(), 0);
-    std::size_t cut_edges = 0;
+    std::size_t kept_edges = 0;
     for (std::size_t i = 0; i < cycle.size(); ++i) {
       const Arrangement2::HalfEdge& edge = half_edges[cycle[i]];
       const Point2d& from = vertices[edge.origin];
       const Point2d& to = vertices[half_edges[edge.twin].origin];
-      if (trim_face_seam_only_synthetic_edge(from, to, domain)) {
-        synthetic[i] = 1;
-        if (pole_chart && from[1] == domain[3] && to[1] == domain[3]) {
-          pole_v = domain[3];
-          touches_pole = true;
-        } else if (pole_chart && from[1] == domain[2] && to[1] == domain[2]) {
-          pole_v = domain[2];
-          touches_pole = true;
-        }
-      } else {
-        ++cut_edges;
+      const int side = trim_face_domain_edge_side(from, to, domain);
+      if (side < 0) {
+        ++kept_edges;
+        continue;
+      }
+      const TrimSideKind kind = domain.sides[static_cast<std::size_t>(side)];
+      if (kind == TrimSideKind::kRealBoundary) {
+        // A real boundary is material: it stays in the ring like a cut edge.
+        ++kept_edges;
+        continue;
+      }
+      synthetic[i] = 1;
+      if (kind == TrimSideKind::kCollapsed) {
+        pole_v =
+            domain.bounds[side == 2 ? 2u : 3u];
+        touches_pole = true;
       }
     }
-    if (cut_edges == 0) continue;
+    if (kept_edges == 0) continue;
 
-    // Split the cycle into maximal runs of cut edges. trim_face_seam_runs
+    // Split the cycle into maximal runs of kept edges. trim_face_seam_runs
     // starts its walk at a run head, so a run that straddles the end of the
-    // cycle array is emitted once and whole (a cycle with no cut edge was
+    // cycle array is emitted once and whole (a cycle with no kept edge was
     // skipped above).
-    struct SeamRing {
+    struct DomainRing {
       std::vector<Point2d> points;
       bool seam = false;
     };
-    std::vector<SeamRing> rings;
+    std::vector<DomainRing> rings;
     const std::vector<std::vector<std::size_t>> runs =
         trim_face_seam_runs(std::span<const char>(synthetic));
     for (const std::vector<std::size_t>& run : runs) {
@@ -1214,12 +1421,12 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
         // The rim ends on a pole row, and that row is one 3D point: close the
         // ring through the exact pole between the last rim sample and the
         // repeated first point, i.e. along the meridian chords rim -> pole ->
-        // rim. The pole comes from the domain, so v is exactly -pi/2 or +pi/2.
+        // rim. The pole comes from the domain, so v is exactly the panel edge.
         points.push_back(Point2d{points.back()[0], pole_v});
         points.push_back(points.front());
         if (points.size() < 3) continue;
         trim_face_normalize_ring(points, true);
-        rings.push_back(SeamRing{std::move(points), false});
+        rings.push_back(DomainRing{std::move(points), false});
         continue;
       }
       const Point2d front = points.front();
@@ -1239,9 +1446,9 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
         // is a meridian, not a loop. Closure uses the same 1e-12 relative bound
         // as the input classification, so a seam copy that drifted by rounding
         // still closes; the ring is then closed by repeating its first point.
-        seam = trim_face_seam_only_seam_pair(front, back, domain,
-                                             projection.periodic_u(),
-                                             periodic_v);
+        seam = trim_face_seam_only_seam_pair(front, back, domain.bounds,
+                                             domain.periodic_u,
+                                             domain.periodic_v);
         if (!seam) {
           return Error{Errc::numeric_failure,
                        "split_face_curved: synthetic boundary chain is open",
@@ -1257,7 +1464,7 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
       // A seam ring is explicitly closed by the repeated first point, whose
       // other parameter copy is the point before the last. It keeps the
       // arrangement's direction and is not rotated.
-      rings.push_back(SeamRing{std::move(points), seam});
+      rings.push_back(DomainRing{std::move(points), seam});
     }
     if (rings.empty()) continue;
 
@@ -1269,10 +1476,10 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
     // pole) and is never joined. Both runs are seam rings here: their ends
     // are the two parameter copies of the seam, one whole turn apart, so the
     // seam flag itself cannot decide.
-    if (pole_chart && !touches_pole && rings.size() == 2) {
+    if (domain.collapsed_v() && !touches_pole && rings.size() == 2) {
       std::vector<Point2d> merged;
       merged.reserve(rings[0].points.size() + rings[1].points.size());
-      for (const SeamRing& ring : rings) {
+      for (const DomainRing& ring : rings) {
         // Each seam ring repeats its first point at the end; the join closes
         // the merged ring instead, so that repeat is dropped.
         for (std::size_t i = 0; i + 1 < ring.points.size(); ++i) {
@@ -1287,7 +1494,7 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
       if (merged.size() >= 4) {
         trim_face_normalize_ring(merged, true);
         rings.clear();
-        rings.push_back(SeamRing{std::move(merged), false});
+        rings.push_back(DomainRing{std::move(merged), false});
       }
     }
 
@@ -1300,7 +1507,7 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
     // band has two of them) are broken by the lexicographic minimum point,
     // which does not depend on where the arrangement's walk started.
     std::stable_sort(rings.begin(), rings.end(),
-                     [](const SeamRing& lhs, const SeamRing& rhs) {
+                     [](const DomainRing& lhs, const DomainRing& rhs) {
                        if (lhs.seam != rhs.seam) return lhs.seam;
                        if (!lhs.seam) {
                          const double lhs_area =
@@ -1331,11 +1538,56 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
     fragments.push_back(std::move(fragment));
   }
 
-  // Defensive backstop, not a rejection path: the closed-cut, boundary and
-  // pole checks above already refuse every input that could strip all the cut
-  // geometry, so a correctly handled seam-only face always yields at least one
-  // fragment. This guard keeps a future regression from silently returning an
-  // empty success.
+  // An interior island owns material on both sides, but the arrangement stores
+  // its outer side as the unbounded record of the island ring, so only the
+  // island itself becomes a fragment above. When every cut is such an island
+  // the material is exactly the islands plus one complement region, and that
+  // complement is a single keyhole ring: the rectangle walked clockwise, with
+  // each island spliced in at one point through a doubled bridge (the two
+  // bridge edges cancel in the shoelace, so the ring area is -(area of the
+  // rectangle) plus the island areas). Marking it a seam ring keeps the
+  // arrangement's clockwise direction: the island and its complement must
+  // traverse their shared edge in the same direction to partition the chart,
+  // which is the convention the island fragment test asserts.
+  bool all_islands = !chains.empty();
+  for (const DomainChain& chain : chains) {
+    if (!chain.island) all_islands = false;
+  }
+  if (all_islands) {
+    const Point2d corner{u_lo, v_lo};
+    std::vector<Point2d> ring;
+    ring.reserve(5u + chains.size() * 5u);
+    // Start at a corner, splice every island in through a bridge that leaves and
+    // returns to that same corner, then walk the rest of the rectangle. Each
+    // bridge is traversed twice in opposite directions, so the two edges cancel
+    // in the shoelace and the ring area is -(rectangle) plus the island areas.
+    // The return to the corner before the rectangle continues is what keeps the
+    // ring free of a zero-width spike: a ring that left and came back through
+    // the bridge at its very end would walk the closing edge backwards.
+    ring.push_back(corner);
+    for (const DomainChain& chain : chains) {
+      const Point2d hub = chain.points.front();
+      ring.push_back(hub);
+      for (std::size_t i = 1; i + 1 < chain.points.size(); ++i) {
+        ring.push_back(chain.points[i]);
+      }
+      ring.push_back(hub);
+      ring.push_back(corner);
+    }
+    ring.push_back(Point2d{u_lo, v_hi});
+    ring.push_back(Point2d{u_hi, v_hi});
+    ring.push_back(Point2d{u_hi, v_lo});
+    ring.push_back(corner);
+    CurvedFragment fragment;
+    fragment.reversed = false;
+    fragment.loops_uv.push_back(std::move(ring));
+    fragments.push_back(std::move(fragment));
+  }
+
+  // Defensive backstop: the checks above refuse every input that could strip
+  // all the cut geometry, so a handled synthetic domain always yields at least
+  // one fragment. This guard keeps a future regression from silently returning
+  // an empty success.
   if (fragments.empty()) {
     return Error{Errc::numeric_failure, "split_face_curved: no fragments",
                  face.index(), 0u};
@@ -1372,6 +1624,34 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
     }
   }
   return fragments;
+}
+
+// Splits a seam-only face: a face whose uv loop is the seam slit with zero
+// area, so the ordinary pipeline clips every cut away. The surface is opened
+// onto the full parameter rectangle and handed to trim_face_split_domain with
+// the four sides classified as seam copies (and poles collapsed). The screen
+// keeps the historical rejections of the public path; the general splitter does
+// not need it, because it can carry an island with its complement.
+inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
+    FaceId face, const FaceUvProjection& projection,
+    std::span<const FaceCut> cuts, const std::array<double, 4>& domain) {
+  const Result<void> screen =
+      trim_face_seam_only_screen(face, projection, cuts, domain);
+  if (!screen) return screen.error();
+  TrimFaceDomain descriptor;
+  descriptor.bounds = domain;
+  descriptor.periodic_u = projection.periodic_u();
+  descriptor.periodic_v = projection.periodic_v();
+  descriptor.sides = {TrimSideKind::kSeamCopy, TrimSideKind::kSeamCopy,
+                      TrimSideKind::kSeamCopy, TrimSideKind::kSeamCopy};
+  double pole_v = 0.0;
+  if (trim_face_seam_only_pole_v(domain, pole_v)) {
+    // Both v sides of the sphere chart are pole rows: each collapses to its own
+    // 3D point, which is which is decided per cycle by the row it touches.
+    descriptor.sides[2] = TrimSideKind::kCollapsed;
+    descriptor.sides[3] = TrimSideKind::kCollapsed;
+  }
+  return trim_face_split_domain(face, projection, cuts, descriptor, {}, 1e-12);
 }
 
 }  // namespace detail

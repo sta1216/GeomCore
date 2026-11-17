@@ -1948,6 +1948,72 @@ TEST_CASE("trim face: a closed cut tangent to the seam is unsupported") {
   check_sphere_face_unchanged(sphere, face);
 }
 
+TEST_CASE("trim_face: a closed island splits into two fragments") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  std::vector<geom::Point2d> ring;
+  for (int i = 0; i < 33; ++i) {
+    const double a = 2.0 * kPi * i / 33.0;
+    ring.push_back(geom::Point2d{1.0 + 0.2 * std::cos(a),
+                                 0.3 + 0.2 * std::sin(a)});
+  }
+  ring.push_back(ring.front());
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(domain.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{ring}};
+  const auto fragments = geom::detail::trim_face_split_domain(
+      sf, sp, cuts, domain.value(), std::span<const std::vector<geom::Point2d>>{},
+      1e-12);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 2u);
+  CHECK(fragments.value().at(0).loops_uv.size() == 1u);
+  CHECK(fragments.value().at(1).loops_uv.size() == 1u);
+  const double a0 = geom::signed_area2(fragments.value().at(0).loops_uv[0]);
+  const double a1 = geom::signed_area2(fragments.value().at(1).loops_uv[0]);
+  // The island is material on one side and the rest of the sphere on the
+  // other: the two rings keep opposite traversal and partition the chart.
+  CHECK(a0 * a1 < 0.0);
+  CHECK(std::fabs(a0) + std::fabs(a1) ==
+        doctest::Approx(2.0 * kPi * kPi).epsilon(1e-12));
+  // The island is the inscribed 33-gon, 0.6% smaller than its circle, so the
+  // exact pi*0.04 is out of reach; the loosened bound still pins it to 0.04*pi.
+  CHECK(std::min(std::fabs(a0), std::fabs(a1)) ==
+        doctest::Approx(kPi * 0.04).epsilon(1e-2));
+}
+
+TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  std::vector<geom::Point2d> low;
+  std::vector<geom::Point2d> high;
+  for (int i = 0; i < 64; ++i) {
+    const double u = 2.0 * kPi * i / 64.0;
+    low.push_back(geom::Point2d{u, 0.6});
+    high.push_back(geom::Point2d{u, 2.5});
+  }
+  low.push_back(low.front());
+  high.push_back(high.front());
+  const geom::detail::FaceUvProjection tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(domain.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{low},
+                                           geom::FaceCut{high}};
+  const auto fragments = geom::detail::trim_face_split_domain(
+      tf, tp, cuts, domain.value(), std::span<const std::vector<geom::Point2d>>{},
+      1e-12);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 3u);
+  CHECK(fragments.value().at(0).loops_uv.size() == 1u);
+  CHECK(fragments.value().at(1).loops_uv.size() == 2u);
+  CHECK(fragments.value().at(2).loops_uv.size() == 1u);
+}
+
 TEST_CASE("trim face: seam run extraction wraps the cut tail") {
   // 1 marks a synthetic edge, 0 a cut edge. Edge 0 is the tail of the run that
   // wraps around the end of the cycle, so a non-wrapping walk would lose it.
