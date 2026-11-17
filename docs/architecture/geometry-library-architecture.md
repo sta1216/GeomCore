@@ -1279,7 +1279,7 @@ ADR-0028，实测见 `docs/benchmarks/m3c2.md`）。
 `CurvedFragment::loops`。切链只接受**经过缝合线的闭环**：开放链返回
 `"split_face_curved: open cuts on a seam-only face"`，不接触缝合线的内部闭环
 返回 `"closed cut crosses the seam twice"`。环的 `v` 图卡从 `(-π, π]` 包装进
-`[0, 2π]` 并在该轴缝合线处切分（`trim_face_window_chains`），跨
+`[0, 2π]` 并在该轴缝合线处切分（`trim_face_window_polyline`），跨
 `v = 0/2π` 的切链不会留下 `2π` 跳变。
 
 环面切平面受限制：必须垂直于环轴（归一化后 `|n·axis|` 在 8 ulp 内为 1）或

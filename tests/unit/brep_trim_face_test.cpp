@@ -2299,3 +2299,53 @@ TEST_CASE("trim_face: the windowing tolerance widens ring closure") {
   REQUIRE_FALSE(narrow.has_value());
   CHECK(narrow.error().code == geom::Errc::unsupported);
 }
+
+TEST_CASE("trim_face: a chain ending on a collapsed side is accepted") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  const auto sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto sd = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(sd.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{
+      {geom::Point2d{1.0, 0.5}, geom::Point2d{1.0, 0.5 * kPi}}}};
+  const auto chains =
+      geom::detail::trim_face_window_chains(cuts, sd.value(), 1e-12);
+  REQUIRE(chains.has_value());
+  REQUIRE(chains.value().size() == 1u);
+  CHECK(chains.value()[0].back()[1] == doctest::Approx(0.5 * kPi));
+}
+
+TEST_CASE("trim_face: a side offset inside the tolerance is accepted") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const auto tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(td.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{
+      {geom::Point2d{5e-10, 0.3}, geom::Point2d{5e-10, 0.6}}}};
+  const auto wide =
+      geom::detail::trim_face_window_chains(cuts, td.value(), 1e-9);
+  REQUIRE(wide.has_value());
+  REQUIRE(wide.value().size() == 1u);
+  const auto narrow =
+      geom::detail::trim_face_window_chains(cuts, td.value(), 1e-12);
+  REQUIRE_FALSE(narrow.has_value());
+}
+
+TEST_CASE("trim_face: a cylinder has no synthetic domain") {
+  const geom::Brep cylinder = geom::make_cylinder(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+      1e-12).value();
+  const geom::FaceId cf = face_with_surface<geom::Cylinder3>(cylinder);
+  const auto cp =
+      geom::detail::face_uv_projection(cylinder, cylinder.face(cf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(cylinder, cf, cp, 1e-12);
+  REQUIRE_FALSE(domain.has_value());
+  CHECK(domain.error().message ==
+        std::string_view("trim_face: no synthetic domain for this surface"));
+}

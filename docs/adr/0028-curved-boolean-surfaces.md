@@ -57,7 +57,7 @@ M3b-2 的 `boolean_solid_curved` 只接受 `Plane3`/`Cylinder3` 面：圆柱面�
   `CurvedFragment::loops`，装配只看到真实切线。
 - **v 图卡包装。** 环的 `face_uv_project_torus` 返回 `(−π, π]`，而域是
   `[0, 2π]`；切链先在每个周期轴上展开，再包装进 `[base, base + 2π)` 并在该轴
-  的缝合线处切分（`trim_face_window_chains`）。跨 `v = 0/2π` 的闭链因此
+  的缝合线处切分（`trim_face_window_polyline`）。跨 `v = 0/2π` 的闭链因此
   不会留下 `2π` 跳变或开放端点。
 - **只支持缝合线锚定的闭合切链。** 开放切链返回
   `unsupported "split_face_curved: open cuts on a seam-only face"`；不接触缝合线
