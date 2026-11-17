@@ -1255,6 +1255,17 @@ inline bool trim_face_closed_cut_twisted(const std::vector<Point2d>& points,
          trim_face_seam_only_near_side(points.back()[axis], hi))) {
       crossings.push_back(points.back()[transverse]);
     }
+    // A ring closed by repeating its first point (rather than by the two copies
+    // of a seam point) that starts exactly on this seam has its closing pass
+    // exactly at that vertex: the edge scan above skips t == 1, and the interior
+    // vertex scan skips the duplicated tail, so the pass is counted here. Without
+    // it a ring that straddles the seam through its own start point sees a single
+    // crossing and is misread as an open chain instead of a twisted one.
+    if (trim_face_same_xy_rel(points.front(), points.back(), tolerance) &&
+        (trim_face_seam_only_near_side(points.front()[axis], lo) ||
+         trim_face_seam_only_near_side(points.front()[axis], hi))) {
+      crossings.push_back(points.front()[transverse]);
+    }
     if (crossings.size() < 2) continue;
     if (crossings.size() % 2 != 0) return true;
     std::sort(crossings.begin(), crossings.end());
@@ -1923,9 +1934,9 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
 // must lie on the face boundary within `tolerance`, weld to another open cut
 // endpoint within that distance, or T-junction onto another cut (its projection
 // is inserted into that cut). A closed cut (first point repeated as last) may
-// lie anywhere on an ordinary face, where it bounds an interior island. On a
-// seam-only face (a sphere or torus face whose boundary loop has zero area) the
-// parameter rectangle is synthesized and the closed cuts must be latitude-like:
+// lie anywhere on an ordinary face, where it bounds an interior island. A
+// sphere seam-only face (its boundary loop is the zero-area seam slit) has its
+// parameter rectangle synthesized and its closed cuts must be latitude-like:
 // the two ends must be the two copies of one physical seam point, matched with
 // the same 1e-12 relative bound the parameter projection uses (so a seam point
 // that drifted by rounding still counts as one point), and no other vertex may
@@ -1933,15 +1944,20 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_seam_only(
 // at one physical point; a cap fragment that reaches a pole is emitted with
 // exactly one pole point (v = -pi/2 or +pi/2, taken from the domain, not a
 // projected approximation), and a pole-free band between two latitudes is
-// emitted as one ring joined through the seam columns. The contact test and
-// this path inspect the u sides only, so a torus closed cut that meets the v
-// seam is not supported by this path and is rejected. A closed cut that never
-// touches the seam (an island on a seam-only face), a closed cut tangent to the
-// seam, a closed cut crossing the seam more than once ("crosses the seam
-// twice"), and any cut running along a domain side are rejected as unsupported
-// before any arrangement work. Cut segments shorter than `tolerance` and
-// fragments whose surface area is at most tolerance^2 are dropped. Errors
-// returned by face_loops_uv() are propagated unchanged.
+// emitted as one ring joined through the seam columns. That path inspects the u
+// sides only. A closed cut that never touches the seam (an island on a
+// seam-only face), a closed cut tangent to the seam, a closed cut crossing the
+// seam more than once ("crosses the seam twice"), and any cut running along a
+// domain side are rejected as unsupported before any arrangement work. A torus
+// face whose stored outer loop covers the full parameter rectangle (area
+// 4*pi^2) is split on that synthetic domain instead, where both seams are
+// periodic: a latitude cut becomes whole-cycle bands and a meridian cut closes
+// through the v seam. Closed cuts wholly inside that chart and stored inner
+// rings are refused as unsupported, and so is a torus face whose loop covers
+// less than the full chart, so a genuinely trimmed patch is never reopened and
+// its trim discarded. Cut segments shorter than `tolerance` and fragments whose
+// surface area is at most tolerance^2 are dropped. Errors returned by
+// face_loops_uv() are propagated unchanged.
 inline Result<std::vector<CurvedFragment>> split_face_curved(
     const Brep& brep, FaceId face, std::span<const FaceCut> cuts,
     double tolerance) {
@@ -2088,6 +2104,25 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
                      "split_face_curved: closed cuts on a periodic face are "
                      "not supported yet",
                      face.index(), 0u};
+      }
+      // Only the full parameter rectangle is a synthetic chart. A stored loop
+      // that covers less of the rectangle is a trimmed torus patch whose
+      // removed material is real: dispatching it here would reopen the full
+      // chart and split away the trim, so refuse it instead. The bound is
+      // relative to the chart area so a canonical torus, whose loop area is
+      // exactly 4*pi^2, keeps passing.
+      if (holes.empty()) {
+        const double chart_area =
+            (domain.value().bounds[1] - domain.value().bounds[0]) *
+            (domain.value().bounds[3] - domain.value().bounds[2]);
+        const double loop_area = std::fabs(signed_area2(loops.front()));
+        if (loops.size() != 1u ||
+            std::fabs(loop_area - chart_area) > 1e-9 * chart_area) {
+          return Error{Errc::unsupported,
+                       "split_face_curved: trimmed torus faces are not "
+                       "supported yet",
+                       face.index(), 0u};
+        }
       }
       return detail::trim_face_split_domain(face, projection, cuts,
                                             domain.value(), holes, tolerance);

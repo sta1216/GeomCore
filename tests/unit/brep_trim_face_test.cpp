@@ -337,6 +337,47 @@ Brep make_sphere_band() {
   return editor.commit().value();
 }
 
+// Builds a one-face torus patch whose outer loop is a 48-gon around the
+// parameter chart centre (1.0, 0.5) with radius 0.1. This is a genuinely
+// trimmed torus face: the stored loop covers far less than the full parameter
+// rectangle, so the public splitter must not reopen it to the full chart.
+Brep make_torus_patch() {
+  const Torus3 torus{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0, 0.5};
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(torus);
+  const FaceId face = editor.add_face(surface, false, 0.0).value();
+  constexpr int kRingPoints = 48;
+  std::vector<Point3d> ring;
+  ring.reserve(kRingPoints);
+  for (int i = 0; i < kRingPoints; ++i) {
+    const double a = 2.0 * kPi * i / kRingPoints;
+    ring.push_back(torus.eval(1.0 + 0.1 * std::cos(a), 0.5 + 0.1 * std::sin(a)));
+  }
+  std::vector<VertexId> vertices;
+  vertices.reserve(kRingPoints);
+  for (const Point3d& p : ring) {
+    vertices.push_back(editor.add_vertex(p, 0.0).value());
+  }
+  std::vector<CoedgeSpec> specs(kRingPoints);
+  for (int i = 0; i < kRingPoints; ++i) {
+    const Point3d& from = ring[static_cast<std::size_t>(i)];
+    const Point3d& to = ring[static_cast<std::size_t>((i + 1) % kRingPoints)];
+    const std::uint32_t curve = editor.add_curve(
+        LineCurve3{from, Vec3d{to[0] - from[0], to[1] - from[1],
+                               to[2] - from[2]}});
+    specs[static_cast<std::size_t>(i)].edge =
+        editor
+            .add_edge(vertices[static_cast<std::size_t>(i)],
+                      vertices[static_cast<std::size_t>((i + 1) % kRingPoints)],
+                      curve, 0.0, 1.0, 0.0)
+            .value();
+  }
+  editor.add_loop(face, specs, true).value();
+  const std::array<FaceId, 1> faces{face};
+  editor.add_shell(faces, false).value();
+  return editor.commit().value();
+}
+
 // Checks that the uv rings are the cycle rings (outer counter-clockwise, holes
 // clockwise) and that every 3D vertex is the planar lift of its uv vertex.
 void check_plane_fragment(const Brep& brep, FaceId face,
@@ -2164,6 +2205,48 @@ TEST_CASE("trim_face: a torus island is refused before the arrangement") {
   CHECK(std::string_view(fragments.error().message) ==
         "split_face_curved: closed cuts on a periodic face are not supported "
         "yet");
+}
+
+TEST_CASE("trim_face: a trimmed torus face is refused instead of reopened") {
+  const Brep patch = make_torus_patch();
+  const FaceId tf = face_with_surface<Torus3>(patch);
+  // A full latitude ring at v = 0.6 whose ends are the two copies of one seam
+  // point: on the full chart it is a band cut, but the patch's stored loop cuts
+  // that chart away and the splitter must not silently reopen it.
+  std::vector<Point2d> ring;
+  ring.reserve(65);
+  for (int i = 0; i <= 64; ++i) {
+    ring.push_back(Point2d{2.0 * kPi * i / 64.0, 0.6});
+  }
+  const std::vector<FaceCut> cuts = {FaceCut{ring}};
+  const auto fragments = split_face_curved(patch, tf, cuts, 1e-12);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == Errc::unsupported);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: trimmed torus faces are not supported yet");
+}
+
+TEST_CASE("trim_face: an island straddling the v seam is a twisted crossing") {
+  const Brep torus = make_torus(
+      Point3d{0.0, 0.0, 0.0}, Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5, 1e-12).value();
+  const FaceId tf = face_with_surface<Torus3>(torus);
+  // A closed 33-gon centred on the v = 0 seam. Its start vertex lies exactly on
+  // the seam, and the closing pass through the seam lands on that vertex, so the
+  // tail crossing must be counted or the ring is misread as an open chain.
+  std::vector<Point2d> ring;
+  ring.reserve(34);
+  for (int i = 0; i < 33; ++i) {
+    const double a = 2.0 * kPi * i / 33.0;
+    ring.push_back(Point2d{1.0 + 0.2 * std::cos(a), 0.2 * std::sin(a)});
+  }
+  ring.push_back(ring.front());
+  const std::vector<FaceCut> cuts = {FaceCut{ring}};
+  const auto fragments = split_face_curved(torus, tf, cuts, 1e-12);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == Errc::unsupported);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: closed cut crosses the seam at different transverse "
+        "coordinates; twisted seam crossings are deferred to M3c-3c-4");
 }
 
 TEST_CASE("trim_face: an island crossing the seam is a twisted crossing") {
