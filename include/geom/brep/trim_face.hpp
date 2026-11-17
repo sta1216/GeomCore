@@ -2040,6 +2040,60 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
   // boundary must still be reported as an open endpoint.
   const double junction_tol = std::max(64.0 * tolerance, 1e-5 * extent);
 
+  const SurfaceGeometry& surface =
+      brep.geometry().surfaces[brep.face(face).surface];
+
+  // A full torus face stores its whole parameter rectangle as the outer loop, so
+  // its uv area is nonzero and the clipping below would treat the rectangle's
+  // four sides as real face boundary: a latitude cut in the chart interior then
+  // lands as an island and the arrangement splits it the wrong way. The synthetic
+  // domain splitter knows the seam copies, so route a periodic-v torus through it
+  // with the same domain its fragments are built from. A sphere keeps its
+  // historical seam-only path below (its slit loop has zero area and its v sides
+  // collapse to poles); only the torus is dispatched here.
+  if (std::holds_alternative<Torus3>(surface)) {
+    const Result<detail::TrimFaceDomain> domain =
+        detail::trim_face_domain(brep, face, projection, tolerance);
+    if (!domain) return domain.error();
+    // A stored inner ring is refused by the splitter with the historical message;
+    // a face with no cuts and no holes has nothing to split and falls through to
+    // the ordinary path, which returns it unchanged instead of building an empty
+    // synthetic arrangement.
+    const std::span<const std::vector<Point2d>> holes(loops.data() + 1,
+                                                      loops.size() - 1);
+    if (!cuts.empty() || !holes.empty()) {
+      // A closed cut that touches no synthetic side is an island: it bounds
+      // material on both sides of the chart, but a fragment cannot carry the
+      // complement as a hole. Refuse this scoped input explicitly before the
+      // arrangement instead of leaving the generic partition guard to report it.
+      bool islands_only = holes.empty() && !cuts.empty();
+      for (const FaceCut& cut : cuts) {
+        const std::vector<Point2d>& uv = cut.uv;
+        if (!islands_only) break;
+        if (uv.size() < 4 ||
+            !detail::trim_face_same_xy_rel(uv.front(), uv.back(), tolerance)) {
+          islands_only = false;
+          break;
+        }
+        for (const Point2d& point : uv) {
+          if (detail::trim_face_point_on_domain_side(point, domain.value(),
+                                                     tolerance)) {
+            islands_only = false;
+            break;
+          }
+        }
+      }
+      if (islands_only) {
+        return Error{Errc::unsupported,
+                     "split_face_curved: closed cuts on a periodic face are "
+                     "not supported yet",
+                     face.index(), 0u};
+      }
+      return detail::trim_face_split_domain(face, projection, cuts,
+                                            domain.value(), holes, tolerance);
+    }
+  }
+
   // A seam-only face has no loop-derived uv area: its loop is the seam slit
   // itself, so the clipping below would discard every cut and return no
   // fragments. On a sphere the slit's uv area is a rounding artefact (a chart
@@ -2047,8 +2101,6 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
   // bound below recognizes it without touching the torus path, whose loop area
   // stays exactly zero and whose near-tangent cuts are not covered by that
   // reasoning. Open the surface onto its full parameter rectangle instead.
-  const SurfaceGeometry& surface =
-      brep.geometry().surfaces[brep.face(face).surface];
   const double loop_area = std::fabs(signed_area2(loops.front()));
   const bool sphere_slit =
       std::holds_alternative<Sphere3>(surface) &&

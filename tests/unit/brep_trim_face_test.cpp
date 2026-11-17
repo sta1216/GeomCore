@@ -2076,6 +2076,96 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
   }
 }
 
+TEST_CASE("trim_face: the public split of an offset torus band is one ring") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  std::vector<geom::Point2d> low;
+  std::vector<geom::Point2d> high;
+  for (int i = 0; i < 64; ++i) {
+    const double u = 2.0 * kPi * i / 64.0;
+    low.push_back(geom::Point2d{u, kPi / 6.0});
+    high.push_back(geom::Point2d{u, 5.0 * kPi / 6.0});
+  }
+  low.push_back(low.front());
+  high.push_back(high.front());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{low},
+                                           geom::FaceCut{high}};
+  const auto fragments = geom::split_face_curved(torus, tf, cuts, 1e-12);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 3u);
+  for (const geom::CurvedFragment& fragment : fragments.value()) {
+    REQUIRE(fragment.loops_uv.size() == 1u);
+  }
+  CHECK(signed_area2(fragments.value().at(0).loops_uv.front()) ==
+        doctest::Approx(3.289868133696453).epsilon(1e-9));
+  CHECK(signed_area2(fragments.value().at(1).loops_uv.front()) ==
+        doctest::Approx(13.159472534785811).epsilon(1e-9));
+  CHECK(signed_area2(fragments.value().at(2).loops_uv.front()) ==
+        doctest::Approx(23.029076935899213).epsilon(1e-9));
+
+  // The public dispatch must return exactly what the direct domain splitter
+  // returns for the same face and cuts: same ring counts, same areas.
+  const geom::detail::FaceUvProjection tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(domain.has_value());
+  const auto direct = geom::detail::trim_face_split_domain(
+      tf, tp, cuts, domain.value(),
+      std::span<const std::vector<geom::Point2d>>{}, 1e-12);
+  REQUIRE(direct.has_value());
+  REQUIRE(direct.value().size() == fragments.value().size());
+  for (std::size_t i = 0; i < direct.value().size(); ++i) {
+    REQUIRE(direct.value()[i].loops_uv.size() ==
+            fragments.value()[i].loops_uv.size());
+    for (std::size_t l = 0; l < direct.value()[i].loops_uv.size(); ++l) {
+      CHECK(signed_area2(direct.value()[i].loops_uv[l]) ==
+            signed_area2(fragments.value()[i].loops_uv[l]));
+    }
+  }
+}
+
+TEST_CASE("trim_face: a torus face without cuts is returned unchanged") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const auto fragments = geom::split_face_curved(torus, tf, {}, 1e-12);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 1u);
+  REQUIRE(fragments.value().front().loops_uv.size() == 1u);
+  CHECK(signed_area2(fragments.value().front().loops_uv.front()) ==
+        doctest::Approx(4.0 * kPi * kPi).epsilon(1e-9));
+  REQUIRE(fragments.value().front().loops.size() == 1u);
+  CHECK(fragments.value().front().loops.front().size() ==
+        fragments.value().front().loops_uv.front().size());
+}
+
+TEST_CASE("trim_face: a torus island is refused before the arrangement") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  // A closed 33-gon wholly inside the periodic-v parameter rectangle bounds
+  // material on both sides, so the fragment would need a hole the periodic chart
+  // cannot carry. Refuse it with a dedicated message before the arrangement.
+  std::vector<geom::Point2d> ring;
+  for (int i = 0; i < 33; ++i) {
+    const double a = 2.0 * kPi * i / 33.0;
+    ring.push_back(geom::Point2d{1.0 + 0.2 * std::cos(a),
+                                 0.5 + 0.2 * std::sin(a)});
+  }
+  ring.push_back(ring.front());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{ring}};
+  const auto fragments = geom::split_face_curved(torus, tf, cuts, 1e-12);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: closed cuts on a periodic face are not supported "
+        "yet");
+}
+
 TEST_CASE("trim_face: an island crossing the seam is a twisted crossing") {
   const geom::Brep sphere =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
