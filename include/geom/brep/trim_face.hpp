@@ -1576,17 +1576,54 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
     }
     if (kept_edges == 0) continue;
 
-    // Split the cycle into maximal runs of kept edges. trim_face_seam_runs
-    // starts its walk at a run head, so a run that straddles the end of the
-    // cycle array is emitted once and whole (a cycle with no kept edge was
-    // skipped above).
     struct DomainRing {
       std::vector<Point2d> points;
       bool seam = false;
     };
     std::vector<DomainRing> rings;
-    const std::vector<std::vector<std::size_t>> runs =
-        trim_face_seam_runs(std::span<const char>(synthetic));
+
+    // A domain that is periodic on both axes and has no pole is a torus chart.
+    // A band across it is already one closed walk: the cycle carries both rims
+    // and both seam columns, so walking it once closes the band. Emitting the
+    // rims as separate seam rings would put two zero-area boundaries on one
+    // region, so the whole cycle becomes a single ring. A chart that is
+    // collapsed in v keeps the rim runs: its band is joined below instead.
+    bool built_whole_cycle = false;
+    if (domain.periodic_u && domain.periodic_v && !domain.collapsed_v()) {
+      // Start at a real (cut) edge where one exists, never at the seam column.
+      std::size_t first_kept = cycle.size();
+      for (std::size_t i = 0; i < cycle.size(); ++i) {
+        if (!synthetic[i]) {
+          first_kept = i;
+          break;
+        }
+      }
+      if (first_kept == cycle.size()) first_kept = 0;
+      std::vector<Point2d> whole;
+      whole.reserve(cycle.size() + 1);
+      bool seam = false;
+      for (std::size_t k = 0; k < cycle.size(); ++k) {
+        const std::size_t index = (first_kept + k) % cycle.size();
+        const Arrangement2::HalfEdge& edge = half_edges[cycle[index]];
+        whole.push_back(vertices[edge.origin]);
+        seam = seam || (synthetic[index] != 0);
+      }
+      whole.push_back(vertices[half_edges[cycle[first_kept]].origin]);
+      trim_face_normalize_ring(whole, true);
+      if (whole.size() >= 3) {
+        rings.push_back(DomainRing{std::move(whole), seam});
+        built_whole_cycle = true;
+      }
+    }
+
+    // Split the cycle into maximal runs of kept edges. trim_face_seam_runs
+    // starts its walk at a run head, so a run that straddles the end of the
+    // cycle array is emitted once and whole (a cycle with no kept edge was
+    // skipped above). A whole-cycle ring above already covers the cycle.
+    std::vector<std::vector<std::size_t>> runs;
+    if (!built_whole_cycle) {
+      runs = trim_face_seam_runs(std::span<const char>(synthetic));
+    }
     for (const std::vector<std::size_t>& run : runs) {
       const Arrangement2::HalfEdge& first_edge =
           half_edges[cycle[run.front()]];
@@ -1733,7 +1770,7 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
   for (const DomainChain& chain : chains) {
     if (!chain.island) all_islands = false;
   }
-  if (all_islands) {
+  if (all_islands && !domain.periodic_v) {
     const Point2d corner{u_lo, v_lo};
     std::vector<Point2d> ring;
     ring.reserve(5u + chains.size() * 5u);

@@ -2057,9 +2057,23 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
       1e-12);
   REQUIRE(fragments.has_value());
   REQUIRE(fragments.value().size() == 3u);
-  CHECK(fragments.value().at(0).loops_uv.size() == 1u);
-  CHECK(fragments.value().at(1).loops_uv.size() == 2u);
-  CHECK(fragments.value().at(2).loops_uv.size() == 1u);
+  for (const geom::CurvedFragment& fragment : fragments.value()) {
+    REQUIRE(fragment.loops_uv.size() == 1u);
+    CHECK(fragment.loops_uv.front().size() > 100u);
+  }
+  CHECK(signed_area2(fragments.value().at(0).loops_uv.front()) ==
+        doctest::Approx(3.7699111843077517).epsilon(1e-9));
+  CHECK(signed_area2(fragments.value().at(1).loops_uv.front()) ==
+        doctest::Approx(11.938052083641214).epsilon(1e-9));
+  CHECK(signed_area2(fragments.value().at(2).loops_uv.front()) ==
+        doctest::Approx(23.770454336408466).epsilon(1e-9));
+  for (const geom::CurvedFragment& fragment : fragments.value()) {
+    const geom::Point2d front = fragment.loops_uv.front().front();
+    const geom::Point2d back = fragment.loops_uv.front().back();
+    CHECK(front[0] == doctest::Approx(0.0).scale(1.0));
+    CHECK(back[0] == doctest::Approx(0.0).scale(1.0));
+    CHECK(std::abs(front[1] - back[1]) > 1e-6);
+  }
 }
 
 TEST_CASE("trim_face: an island crossing the seam is a twisted crossing") {
