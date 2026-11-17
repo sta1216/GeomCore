@@ -1124,6 +1124,60 @@ geom::Brep make_tilted_slab(double tolerance) {
   return editor.commit().value();
 }
 
+TEST_CASE("curved boolean: an offset torus plane splits both ways") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> torus_result =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                       1.0, 0.5, tolerance);
+  const geom::Result<geom::Brep> box_result =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.25},
+                     geom::Point3d{2.0, 2.0, 2.0}, tolerance);
+  REQUIRE(torus_result.has_value());
+  REQUIRE(box_result.has_value());
+  const geom::Brep& torus = torus_result.value();
+  const geom::Brep& box = box_result.value();
+
+  const auto run = [&](geom::SolidBooleanOp op) {
+    return geom::boolean_solid_curved(
+        torus, only_solid(torus), box, only_solid(box), op,
+        geom::CurvedBooleanOptions{tolerance});
+  };
+
+  const auto cut = run(geom::SolidBooleanOp::intersection);
+  REQUIRE_MESSAGE(cut.has_value(),
+                  (cut.has_value() ? std::string_view{} : message_of(cut.error())));
+  CHECK(geom::validate_topology(cut.value().brep).ok());
+  CHECK(cut.value().brep.face_ids().size() == 2u);
+  CHECK(cut.value().brep.edge_ids().size() == 24u);
+  CHECK(cut.value().brep.vertex_ids().size() == 23u);
+  CHECK(cut.value().brep.solid_shells(only_solid(cut.value().brep)).size() == 1u);
+  CHECK(volume_of(cut.value().brep) ==
+        doctest::Approx(0.9647593052603948).epsilon(1e-6));
+  const auto cut_again = run(geom::SolidBooleanOp::intersection);
+  REQUIRE(cut_again.has_value());
+  CHECK(volume_of(cut_again.value().brep) == volume_of(cut.value().brep));
+
+  const auto joined = run(geom::SolidBooleanOp::union_);
+  REQUIRE_MESSAGE(joined.has_value(),
+                  (joined.has_value() ? std::string_view{} : message_of(joined.error())));
+  CHECK(geom::validate_topology(joined.value().brep).ok());
+  CHECK(joined.value().brep.face_ids().size() == 9u);
+  CHECK(joined.value().brep.edge_ids().size() == 122u);
+  CHECK(joined.value().brep.vertex_ids().size() == 116u);
+  CHECK(volume_of(joined.value().brep) ==
+        doctest::Approx(31.970042895284287).epsilon(1e-6));
+
+  const auto removed = run(geom::SolidBooleanOp::difference);
+  REQUIRE_MESSAGE(removed.has_value(),
+                  (removed.has_value() ? std::string_view{} : message_of(removed.error())));
+  CHECK(geom::validate_topology(removed.value().brep).ok());
+  CHECK(removed.value().brep.face_ids().size() == 3u);
+  CHECK(removed.value().brep.edge_ids().size() == 110u);
+  CHECK(removed.value().brep.vertex_ids().size() == 108u);
+  CHECK(volume_of(removed.value().brep) ==
+        doctest::Approx(3.970042895284284).epsilon(1e-6));
+}
+
 TEST_CASE("curved boolean: torus cut by an offset parallel plane is rejected") {
   const double tolerance = 1e-9;
   const geom::Result<geom::Brep> torus =
