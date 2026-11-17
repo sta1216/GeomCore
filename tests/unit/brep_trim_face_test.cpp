@@ -1978,10 +1978,15 @@ TEST_CASE("trim_face: a closed island splits into two fragments") {
   CHECK(a0 * a1 < 0.0);
   CHECK(std::fabs(a0) + std::fabs(a1) ==
         doctest::Approx(2.0 * kPi * kPi).epsilon(1e-12));
-  // The island is the inscribed 33-gon, 0.6% smaller than its circle, so the
-  // exact pi*0.04 is out of reach; the loosened bound still pins it to 0.04*pi.
+  // The island is the inscribed 33-gon; its exact shoelace area pins the ring.
   CHECK(std::min(std::fabs(a0), std::fabs(a1)) ==
-        doctest::Approx(kPi * 0.04).epsilon(1e-2));
+        doctest::Approx(0.12490582127787074).epsilon(1e-12));
+  // Documented fragment order: the splitter sorts by the first ring's ring_key
+  // (the lexicographic minimum uv of the ring), then by loop count. The
+  // complement includes the chart corner at u = 0, which sorts before every
+  // island point, so the complement (negative, the larger part) comes first.
+  CHECK(a0 < 0.0);
+  CHECK(a1 > 0.0);
 }
 
 TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
@@ -2012,6 +2017,69 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
   CHECK(fragments.value().at(0).loops_uv.size() == 1u);
   CHECK(fragments.value().at(1).loops_uv.size() == 2u);
   CHECK(fragments.value().at(2).loops_uv.size() == 1u);
+}
+
+TEST_CASE("trim_face: an island crossing the seam is a twisted crossing") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  // Centred just inside the u = 0 seam, so the ring leaves the chart through
+  // u = 0 and comes back at a different v: the two seam crossings do not share
+  // a transverse coordinate.
+  std::vector<geom::Point2d> ring;
+  for (int i = 0; i < 33; ++i) {
+    const double a = 2.0 * kPi * i / 33.0;
+    ring.push_back(geom::Point2d{0.05 + 0.2 * std::cos(a),
+                                 0.3 + 0.2 * std::sin(a)});
+  }
+  ring.push_back(ring.front());
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(domain.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{ring}};
+  const auto fragments = geom::detail::trim_face_split_domain(
+      sf, sp, cuts, domain.value(), std::span<const std::vector<geom::Point2d>>{},
+      1e-12);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: closed cut crosses the seam at different "
+        "transverse coordinates; twisted seam crossings are deferred to "
+        "M3c-3c-4");
+}
+
+TEST_CASE("trim_face: overlapping islands do not partition the chart") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  std::vector<geom::Point2d> first;
+  std::vector<geom::Point2d> second;
+  for (int i = 0; i < 33; ++i) {
+    const double a = 2.0 * kPi * i / 33.0;
+    first.push_back(geom::Point2d{1.0 + 0.2 * std::cos(a),
+                                  0.3 + 0.2 * std::sin(a)});
+    second.push_back(geom::Point2d{1.12 + 0.2 * std::cos(a),
+                                   0.3 + 0.2 * std::sin(a)});
+  }
+  first.push_back(first.front());
+  second.push_back(second.front());
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(domain.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{first},
+                                           geom::FaceCut{second}};
+  // The arrangement splits the overlap into extra material faces, but the island
+  // complement still counts both full islands: the fragments would cover more
+  // than the chart, so the splitter refuses instead of returning a bad tiling.
+  const auto fragments = geom::detail::trim_face_split_domain(
+      sf, sp, cuts, domain.value(), std::span<const std::vector<geom::Point2d>>{},
+      1e-12);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == geom::Errc::numeric_failure);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: fragments do not partition the chart");
 }
 
 TEST_CASE("trim face: seam run extraction wraps the cut tail") {

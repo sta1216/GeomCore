@@ -1131,6 +1131,76 @@ inline int trim_face_domain_edge_side(const Point2d& a, const Point2d& b,
   return -1;
 }
 
+// The transverse coordinates where a closed cut passes through one periodic
+// seam: the interpolated value at each u/v wrap, plus the value at any interior
+// vertex that lies exactly on the seam. A chain whose two ends are the seam
+// copies is closed by that seam itself, so its end vertices are not crossings.
+inline std::vector<double> trim_face_seam_crossings(
+    const std::vector<Point2d>& points, const TrimFaceDomain& domain,
+    int axis) {
+  std::vector<double> crossings;
+  if (points.size() < 3) return crossings;
+  const int transverse = axis == 0 ? 1 : 0;
+  const double lo = domain.bounds[2 * axis];
+  const double hi = domain.bounds[2 * axis + 1];
+  const double period = hi - lo;
+  if (!(period > 0.0)) return crossings;
+  std::vector<double> unwrapped(points.size(), points.front()[axis]);
+  for (std::size_t i = 1; i < points.size(); ++i) {
+    double value = points[i][axis];
+    while (value - unwrapped[i - 1] > 0.5 * period) value -= period;
+    while (unwrapped[i - 1] - value > 0.5 * period) value += period;
+    unwrapped[i] = value;
+  }
+  for (std::size_t i = 0; i + 1 < points.size(); ++i) {
+    const double from = unwrapped[i];
+    const double to = unwrapped[i + 1];
+    if (from == to) continue;
+    const double band_from = std::floor((from - lo) / period);
+    const double band_to = std::floor((to - lo) / period);
+    if (band_from == band_to) continue;
+    const double boundary =
+        band_to > band_from ? lo + (band_from + 1.0) * period
+                            : lo + band_from * period;
+    const double t = (boundary - from) / (to - from);
+    // A crossing at a chain vertex is that vertex (handled below), not an
+    // additional pass through the seam.
+    if (!(t > 1e-12) || !(t < 1.0 - 1e-12)) continue;
+    crossings.push_back(points[i][transverse] +
+                        t * (points[i + 1][transverse] -
+                             points[i][transverse]));
+  }
+  for (std::size_t i = 1; i + 1 < points.size(); ++i) {
+    if (trim_face_seam_only_near_side(points[i][axis], lo) ||
+        trim_face_seam_only_near_side(points[i][axis], hi)) {
+      crossings.push_back(points[i][transverse]);
+    }
+  }
+  return crossings;
+}
+
+// True when a closed chain crosses a periodic seam twice with different
+// transverse coordinates. Equal coordinates pair up (the tail can be translated
+// by one period without changing the shoelace); a twisted pair cannot, because
+// the closing chord would cut across the chart instead of following the seam.
+inline bool trim_face_closed_cut_twisted(const std::vector<Point2d>& points,
+                                         const TrimFaceDomain& domain,
+                                         double tolerance) {
+  for (int axis = 0; axis < 2; ++axis) {
+    const bool periodic = axis == 0 ? domain.periodic_u : domain.periodic_v;
+    if (!periodic) continue;
+    std::vector<double> crossings =
+        trim_face_seam_crossings(points, domain, axis);
+    if (crossings.size() < 2) continue;
+    if (crossings.size() % 2 != 0) return true;
+    std::sort(crossings.begin(), crossings.end());
+    for (std::size_t i = 0; i < crossings.size(); i += 2) {
+      if (std::fabs(crossings[i + 1] - crossings[i]) > tolerance) return true;
+    }
+  }
+  return false;
+}
+
 // Splits a synthetic parameter rectangle along cut chains. The rectangle sides
 // are synthetic: a seam copy is dropped (the ring closes across the seam), a
 // collapsed side becomes the single pole point, and a real boundary side stays
@@ -1150,6 +1220,29 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
   const double u_hi = domain.bounds[1];
   const double v_lo = domain.bounds[2];
   const double v_hi = domain.bounds[3];
+
+  // A closed chain that crosses a periodic seam is windowed into open pieces
+  // and rejoined through the seam. The join is only area-preserving when the two
+  // crossings keep the same transverse coordinate: translating the tail by one
+  // period must not move it. A twisted crossing (different transverse
+  // coordinates) would need the chart re-origined, so refuse it before any
+  // arrangement work instead of building a chord across the chart.
+  for (std::size_t c = 0; c < cuts.size(); ++c) {
+    const std::vector<Point2d>& uv = cuts[c].uv;
+    if (uv.size() < 2) continue;
+    const bool closed =
+        trim_face_same_xy_rel(uv.front(), uv.back(), tolerance) ||
+        trim_face_seam_only_seam_pair(uv.front(), uv.back(), domain.bounds,
+                                      domain.periodic_u, domain.periodic_v);
+    if (!closed) continue;
+    if (trim_face_closed_cut_twisted(uv, domain, tolerance)) {
+      return Error{Errc::unsupported,
+                   "split_face_curved: closed cut crosses the seam at "
+                   "different transverse coordinates; twisted seam crossings "
+                   "are deferred to M3c-3c-4",
+                   face.index(), static_cast<std::uint32_t>(c)};
+    }
+  }
 
   // The cut polylines are windowed first, so every piece lies inside the
   // rectangle and its open ends sit exactly on a side. A closed island comes
@@ -1591,6 +1684,30 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
   if (fragments.empty()) {
     return Error{Errc::numeric_failure, "split_face_curved: no fragments",
                  face.index(), 0u};
+  }
+
+  // The fragments must tile the chart exactly: outer loops cover, holes remove.
+  // The budget is well defined only for the keyhole decomposition. A seam ring
+  // closes across a periodic seam, so its planar shoelace is a chord artefact
+  // (see the ring sort) rather than a region area; where every cut is a closed
+  // island the rings are true planar polygons. There overlapping islands come
+  // apart as several material faces while the island complement still counts
+  // each full island, so the covered area can exceed the chart: reject that
+  // instead of returning a tiling that double-covers material.
+  if (all_islands) {
+    const double chart_area = (u_hi - u_lo) * (v_hi - v_lo);
+    double covered = 0.0;
+    for (const CurvedFragment& fragment : fragments) {
+      for (std::size_t l = 0; l < fragment.loops_uv.size(); ++l) {
+        const double area = std::fabs(signed_area2(fragment.loops_uv[l]));
+        covered += l == 0 ? area : -area;
+      }
+    }
+    if (std::fabs(covered - chart_area) > 1e-9 * chart_area) {
+      return Error{Errc::numeric_failure,
+                   "split_face_curved: fragments do not partition the chart",
+                   face.index(), 0u};
+    }
   }
 
   std::stable_sort(fragments.begin(), fragments.end(),
