@@ -85,8 +85,8 @@ warnings):
 | union | 9 | 122 | 116 | `31.970042895284287` |
 | difference | 3 | 110 | 108 | `3.970042895284284` |
 
-All three result in one shell, pass `validate_topology`, and a second intersection
-run matches the first bitwise. The torus band contract is pinned separately: two
+All three result in one shell, pass `validate_topology`, and the volume of a
+second intersection run matches the first bitwise. The torus band contract is pinned separately: two
 latitude cuts at `v = 0.6` and `v = 2.5` yield three one-ring fragments with
 positive areas `2*pi*height` (measured within `1.4e-14`), and the public offset
 split at `v = pi/6` and `v = 5*pi/6` yields the same three rings and areas as the
@@ -94,8 +94,7 @@ direct splitter (`3.289868133696453`, `13.159472534785811`,
 `23.029076935899213`, relative test tolerance `1e-9`). The no-cut torus face is
 returned unchanged as one fragment of area `4*pi^2`.
 
-Task 4 pins the refusal messages (stored hole, twisted u-seam crossing,
-domain-boundary cut) and re-measures the suites: Debug and Release each report 983
+Task 4 pins the twisted u-seam crossing and the domain-boundary cut and re-measures the suites: Debug and Release each report 983
 cases / 660,301 assertions, zero warnings, with `GEOM_WERROR=ON`. The counts and
 environment are recorded in `docs/benchmarks/m3c3c2b.md`.
 
@@ -107,9 +106,12 @@ environment are recorded in `docs/benchmarks/m3c3c2b.md`.
 - Only a canonical full-chart `Torus3` face is split. A trimmed `Torus3` patch is
   refused instead of reopened; a trimmed patch that carries no cuts and no holes is
   still returned unchanged (a pre-existing edge, unchanged here).
-- Islands that touch (but are not identical to) a synthetic side still reach the
-  generic `"fragments do not partition the chart"` guard; interior islands are
-  refused earlier with the dedicated message.
+- A closed cut that touches a synthetic side is not classified as an island
+  (`island = closed && no point on any side`), so the all-islands partition guard
+  does not run: the cut is split and the complement ring is pinched at the contact
+  point. A 32-gon of radius 0.2 tangent to `u = 0` at `(0, 0.5)` yields two
+  fragments of areas `39.353559798267149` and `0.12485780609032211`. Interior
+  islands are refused earlier with the dedicated nested-cut message.
 - Sphere behaviour, including the seam-only wrapper and every refusal message, is
   byte-for-byte unchanged.
 - Deferred to M3c-3c-4: multi-cycle holes, cone apex topology, general twisted
