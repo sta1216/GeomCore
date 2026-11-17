@@ -456,22 +456,23 @@ message, and `report.face_pairs == 0`. Do not duplicate them.
 Add only the missing coverage:
 
 - `trim face: a stored inner loop is refused publicly`: exact message and
-  `context_b == 1u`.
+  `context_b == 1u` (already present from M3c-3c-2a at
+  `tests/unit/brep_trim_face_test.cpp:2836`; keep it, do not duplicate).
 - `trim_face: a closed cut crossing the u seam at two different v values is a
   twisted crossing`: polygon `{(1.0,1.0),(6.0,1.1),(0.2,1.2),(3.0,1.15),(1.0,1.0)}`
   with exact message `"split_face_curved: closed cut crosses the seam at different
   transverse coordinates; twisted seam crossings are deferred to M3c-3c-4"`.
 - `trim_face: a cut on the parameter domain boundary is refused`: exact message
   `"split_face_curved: cut lies on the parameter domain boundary"`.
-- If the axis-parallel offset case is not already covered, add one via
-  `make_plane_slab({0,0,1}, tolerance)` translated off the torus centre; expect the
-  same torus-plane guard message.
-- `trim face: a torus face with no cuts is unchanged` (if not already covered in
-  Task 2).
+- The axis-parallel offset refusal already exists (see above); do not add another.
+- `trim face: a torus face with no cuts is unchanged` is already covered by Task 2
+  (`trim_face: a torus face without cuts is returned unchanged`); do not duplicate.
 
 **Step 2: run and confirm**
 
-All refusal cases fail (or are missing) before the assertions are added, then pass.
+The missing pins are added first and then pass against the Task 1–3 behaviour; no
+production change is expected. The RED evidence for that behaviour is in the
+Task 1–3 reports, not in a stale binary.
 
 **Step 3: documentation**
 
@@ -517,13 +518,14 @@ assertion counts after the final full-suite run.
 
 ## Self-check
 
-- [ ] Every task has a failing test and captured RED evidence.
-- [ ] No assembler change; no guard change; no sphere behaviour change.
-- [ ] Ring directions and area values are exact, not approximate tolerances beyond
+- [x] Every production change has a failing test and captured RED evidence (Task 4
+      is test-and-docs only; its two new pins pass against the Task 1–3 behaviour).
+- [x] No assembler change; no guard change; no sphere behaviour change.
+- [x] Ring directions and area values are exact, not approximate tolerances beyond
       1e-9.
-- [ ] Volumes/counts come from the analyst probe and are re-measured, not copied
+- [x] Volumes/counts come from the analyst probe and are re-measured, not copied
       blindly.
-- [ ] Test files registered (they already are); no new CMake entries needed.
-- [ ] Header edits force a rebuild (touch or `/t:Rebuild`) before trusting results.
-- [ ] No placeholders, TODOs, or self-correction notes remain in this plan.
-- [ ] Documentation counts match the final full-suite output.
+- [x] Test files registered (they already are); no new CMake entries needed.
+- [x] Header edits force a rebuild (touch or `/t:Rebuild`) before trusting results.
+- [x] No placeholders, TODOs, or self-correction notes remain in this plan.
+- [x] Documentation counts match the final full-suite output.

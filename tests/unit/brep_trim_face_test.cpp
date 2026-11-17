@@ -2249,6 +2249,58 @@ TEST_CASE("trim_face: an island straddling the v seam is a twisted crossing") {
         "coordinates; twisted seam crossings are deferred to M3c-3c-4");
 }
 
+TEST_CASE("trim_face: a closed cut crossing the u seam at two different v "
+          "values is a twisted crossing") {
+  constexpr double kSplitTol = 1e-12;
+  const Brep torus =
+      make_torus(Point3d{0.0, 0.0, 0.0}, Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5, kSplitTol)
+          .value();
+  const FaceId tf = face_with_surface<Torus3>(torus);
+  // Reading u = 6 as -0.283 wraps the first segment through the u = 0 seam,
+  // and the segment from u = 6 to u = 0.2 wraps through the same seam again:
+  // the two crossings land at v = 1.08 and v = 1.16, so no single band ring
+  // can close them. The public torus entry refuses this polygon earlier as an
+  // island, so the general splitter is exercised directly.
+  const std::vector<Point2d> ring = {
+      {1.0, 1.0}, {6.0, 1.1}, {0.2, 1.2}, {3.0, 1.15}, {1.0, 1.0}};
+  const detail::FaceUvProjection projection =
+      detail::face_uv_projection(torus, torus.face(tf), kSplitTol).value();
+  const auto domain = detail::trim_face_domain(torus, tf, projection, kSplitTol);
+  REQUIRE(domain.has_value());
+  const std::vector<FaceCut> cuts = {FaceCut{ring}};
+  const auto fragments = detail::trim_face_split_domain(
+      tf, projection, cuts, domain.value(),
+      std::span<const std::vector<Point2d>>{}, kSplitTol);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == Errc::unsupported);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: closed cut crosses the seam at different transverse "
+        "coordinates; twisted seam crossings are deferred to M3c-3c-4");
+  CHECK(fragments.error().context_a == tf.index());
+  CHECK(fragments.error().context_b == 0u);
+}
+
+TEST_CASE("trim_face: a cut on the parameter domain boundary is refused") {
+  constexpr double kSplitTol = 1e-12;
+  const Brep torus =
+      make_torus(Point3d{0.0, 0.0, 0.0}, Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5, kSplitTol)
+          .value();
+  const FaceId tf = face_with_surface<Torus3>(torus);
+  // A meridian run laid exactly on the u = 0 copy of the seam. The side is a
+  // synthetic boundary of the chart, so an arrangement edge running along it
+  // cannot be told apart from the chart side itself: refuse the cut instead of
+  // emitting a sliver or silently dropping it.
+  const std::vector<Point2d> run = {{0.0, 0.3}, {0.0, 0.5}, {0.0, 0.7}};
+  const std::vector<FaceCut> cuts = {FaceCut{run}};
+  const auto fragments = split_face_curved(torus, tf, cuts, kSplitTol);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == Errc::unsupported);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: cut lies on the parameter domain boundary");
+  CHECK(fragments.error().context_a == tf.index());
+  CHECK(fragments.error().context_b == 0u);
+}
+
 TEST_CASE("trim_face: an island crossing the seam is a twisted crossing") {
   const geom::Brep sphere =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
