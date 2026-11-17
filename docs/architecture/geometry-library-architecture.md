@@ -1124,7 +1124,7 @@ void parallel_for(Exec, size_t n, size_t grain, F&& f);
 
 依赖关系：M1 依赖 M0 的谓词、曲线曲面与测试设施；M2 依赖 M1 的 arrangement/CDT/索引；M3 强依赖 M2 的拓扑、网格化与容差模型；M4 在 M3 之上；M5 依赖前五者的 API 稳定。
 
-### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3/M3c-1/M3c-2、M3c-3a、M3c-3b 与 M3c-3c-1 出口状态（2026-11-16）
+### 16.3 M0/M1/M2/M3a/M3b-1/M3b-2/M3b-3/M3c-1/M3c-2、M3c-3a、M3c-3b、M3c-3c-1 与 M3c-3c-2a 出口状态（2026-11-18）
 
 **M0 地基：已满足。** 谓词以独立整数/Fraction oracle 对拍（1e6 随机 + 共线、1 ulp、
 抵消、1e±200、次正规语料），NURBS 求值与导数对解析解校验，三平台 CI 矩阵已配置；
@@ -1356,6 +1356,8 @@ ADR-0030。Debug 与 Release 各 949 个用例、659,600 条断言全绿，
 与 NURBS 仍待 M3c-3c；本行只关闭 M3c-3b，不得据此声称 M3c-3 完成。
 
 **M3c-3c-1（一般位置球/球：支持；M3c-3 未完成）**：`boolean_solid_curved` 的球/球重画不再要求中心线轴对齐——`axis` 直接取中心线单位向量（`boolean_solid_curved.hpp:1807`），8 ulp 比较（`kAxisAgreement`，`boolean_solid_curved.hpp:1809-1813`）只是重画后的不动点终止判据，不是放置门。整球判定与相交判定不变：非整球/部分球报 `"...need whole-sphere operands"`，包含、外切、内切、分离报 `"...need two crossing spheres"`。缝端点落在参数域内几个 ulp 时，`trim_face_split_seam_only` 用 `1e-12 * max(1, |u_lo|, |u_hi|)` 把它吸附到域侧，并重算 min/max 再做域检查（`trim_face.hpp:988-1015`）；整球缝环改由相对面积 `|area| <= 1e-12 * extent^2` 识别（`trim_face.hpp:1517`），斜置图卡缝环的舍入面积（实测 `6.16e-33`）不再把它误送进常规裁剪。没有 rim snapping：Task 3 实测两片 cap 的 rim 本就相同，投影到交圆的补丁是惰性的，未进入生产代码。QA-17（`tests/unit/curved_boolean_qa17_test.cpp`，37° 放置、`d = 1.5`）断言交集体积 `11π/96`（`1e-6` 相对）、恰 1 个 shell、恰好 2 个面（两片 cap）、单条被两个 coedge 反向使用的共享 rim、`validate_topology` 干净、同参数两次 chart 体积逐位相同，共 17 条断言；Debug 与 Release 各 952 个用例、660,068 条断言全绿，`/W4 /WX /utf-8` 零警告。15° 已知难例是独立用例（既有 off-axis 用例，2 次布尔、21 条断言，现复用 `check_one_shared_rim`），分列于 33 次旋转语料之外；后者由 30° 全圈 12 次、0°/45°/90° 并/差 6 次、10° 细网格 10 次与 5 个固定种子随机抽样组成（429 条断言），均通过。实测见 `docs/benchmarks/m3c3c.md`，取舍见 ADR-0031。包含/相切/分离、非整球操作数、锥、torus、NURBS 与布尔结果修剪面网格化仍未支持；本行只关闭 M3c-3c-1，不得据此声称 M3c-3 完成。
+
+**M3c-3c-2a（合成参数域分割器基础设施：部分；torus 偏移切面延后）**：新增 `trim_domain.hpp`（`TrimFaceDomain`、`TrimSideKind`、`trim_face_domain`、`trim_face_window_polyline/chains`）与 arrangement 型 `trim_face_split_domain`；`split_face_curved` 对球面合成参数域改由该分割器处理，带存储内环的合成面在分割前返回 `unsupported "split_face_curved: stored holes are not supported yet"`，不再静默丢洞；twisted 缝交叉返回 `unsupported "...twisted seam crossings are deferred to M3c-3c-4"`，嵌套/混合封闭切割返回 `numeric_failure "...nested closed cuts are not supported"`，等大小岛重叠返回 `numeric_failure "...fragments do not partition the chart"`。torus 保持 M3c-2 的平面切契约与守卫；偏移/倾斜平面需要周期 v 带的两 rim 契约与装配 rim 配对，实测 v 原点平移与全宽 v 侧环两种做法均未通过偏移验收、并使 5 个居中平面 torus 布尔回归，故延后 M3c-3c-2b，受阻工作树保存为 `.superpowers/sdd/m3c3c2a-splitter/task-3-blocked.patch`。QA-18a（`tests/unit/curved_boolean_qa18_test.cpp`）断言整球双纬线经公共分派得到 3 个单环片段、每片非空、两次运行环数一致；Debug 与 Release 各 975 个用例、660,199 条断言全绿，`/W4 /WX /utf-8` 零警告。取舍见 ADR-0032，本里程碑无新增基准（`docs/benchmarks/m3c3c2a.md`）。偏移/倾斜 torus、twisted 交叉、多环洞、布尔结果修剪网格化与 NURBS 仍未支持；本行只关闭 M3c-3c-2a 的收窄范围，不得据此声称 M3c-3c-2 或 M3c-3 完成。
 
 依赖检查：M0/M1a 的公开头文件不依赖 doctest；`Result` 只用于可失败构造与算法
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外
