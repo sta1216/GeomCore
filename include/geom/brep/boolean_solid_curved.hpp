@@ -94,6 +94,7 @@
 #include <geom/brep/ssi.hpp>
 #include <geom/brep/tessellate.hpp>
 #include <geom/brep/topology.hpp>
+#include <geom/brep/trim_domain.hpp>
 #include <geom/brep/trim_face.hpp>
 #include <geom/brep/validate.hpp>
 #include <geom/cgeom/polygon2.hpp>
@@ -689,157 +690,12 @@ inline Result<TriMesh> curved_boolean_solid_mesh(const Brep& brep,
   return mesh;
 }
 
-// Wraps a periodic parameter into [base, base + 2 pi).
-inline double curved_boolean_wrap_periodic(double value, double base) noexcept {
-  const double offset = value - base;
-  const double wrapped =
-      offset - kCurvedBooleanTwoPi * std::floor(offset / kCurvedBooleanTwoPi);
-  return base + wrapped;
-}
-
-// Unwraps one parameter axis of a cut chain so consecutive samples differ by
-// less than half a period; a non-periodic axis is only clamped to the face.
-inline void curved_boolean_unwrap_axis(std::vector<Point2d>& points, int axis, bool periodic,
-                                       const std::array<double, 2>& range) {
-  if (points.empty()) return;
-  if (!periodic) {
-    for (Point2d& point : points) {
-      point[axis] = std::min(std::max(point[axis], range[0]), range[1]);
-    }
-    return;
-  }
-  for (std::size_t i = 1; i < points.size(); ++i) {
-    const double delta = points[i][axis] - points[i - 1][axis];
-    const double wrapped =
-        delta - kCurvedBooleanTwoPi * std::floor((delta + kCurvedBooleanPi) / kCurvedBooleanTwoPi);
-    points[i][axis] = points[i - 1][axis] + wrapped;
-  }
-}
-
-// Splits a chain whose values on `axis` are wrapped into [base, base + 2 pi)
-// where it steps across the periodic seam, inserting the seam point itself so
-// both new ends land exactly on the seam edge they cross.
-inline std::vector<std::vector<Point2d>> curved_boolean_split_at_seam(
-    const std::vector<Point2d>& points, int axis, double base, double tolerance) {
-  const double high = base + kCurvedBooleanTwoPi;
-  const int other = 1 - axis;
-  std::vector<std::vector<Point2d>> chains;
-  if (points.size() < 2) return chains;
-  std::vector<Point2d> current{points.front()};
-  const auto finish = [&chains, &current, tolerance]() {
-    if (current.size() < 2) {
-      current.clear();
-      return;
-    }
-    std::vector<Point2d> chain;
-    chain.reserve(current.size());
-    for (const Point2d& point : current) {
-      if (!chain.empty()) {
-        const double du = point[0] - chain.back()[0];
-        const double dv = point[1] - chain.back()[1];
-        if (du * du + dv * dv <= tolerance * tolerance) continue;
-      }
-      chain.push_back(point);
-    }
-    if (chain.size() >= 2) chains.push_back(std::move(chain));
-    current.clear();
-  };
-  const auto seam_point = [axis, other](double along, double across) {
-    Point2d point{};
-    point[axis] = along;
-    point[other] = across;
-    return point;
-  };
-  for (std::size_t i = 1; i < points.size(); ++i) {
-    const Point2d& previous = points[i - 1];
-    const Point2d& point = points[i];
-    const double delta = point[axis] - previous[axis];
-    if (std::abs(delta) <= kCurvedBooleanPi) {
-      current.push_back(point);
-      continue;
-    }
-    // The step wraps across the seam: `rising` marks a jump from the high seam
-    // edge down to the low one.
-    const bool rising = delta < 0.0;
-    const double low_part = previous[axis] - base;
-    const double high_part = high - point[axis];
-    const double span = rising ? (high - previous[axis]) + (point[axis] - base) : low_part + high_part;
-    double t = 0.5;
-    if (span > 0.0) t = rising ? (high - previous[axis]) / span : low_part / span;
-    const double crossing = rising ? high : base;
-    const double across = previous[other] + t * (point[other] - previous[other]);
-    current.push_back(seam_point(crossing, across));
-    finish();
-    current.push_back(seam_point(rising ? base : high, across));
-    current.push_back(point);
-  }
-  finish();
-  return chains;
-}
-
-// True when every sample of a chain sits on one of the face's periodic parameter
-// boundaries. Such a chain traces the seam edge the face already has: splitting
-// the face on it would only shave slivers off the loop copy instead of cutting
-// the face, so the chain is dropped.
-inline bool curved_boolean_chain_on_domain_side(const std::vector<Point2d>& points,
-                                                const CurvedBooleanFaceInfo& face,
-                                                double tolerance) {
-  if (points.size() < 2) return false;
-  const double slack = std::max(64.0 * tolerance, 1e-6 * kCurvedBooleanTwoPi);
-  for (int axis = 0; axis < 2; ++axis) {
-    const bool periodic = axis == 0 ? face.projection.periodic_u() : face.projection.periodic_v();
-    if (!periodic) continue;
-    const std::array<double, 2>& range = axis == 0 ? face.u : face.v;
-    const double base = range[0];
-    bool on_side = true;
-    for (const Point2d& point : points) {
-      double offset = point[axis] - base;
-      offset -= kCurvedBooleanTwoPi * std::floor(offset / kCurvedBooleanTwoPi);
-      const double gap = std::min(offset, kCurvedBooleanTwoPi - offset);
-      if (gap > slack) {
-        on_side = false;
-        break;
-      }
-    }
-    if (on_side) return true;
-  }
-  return false;
-}
-
-// Wraps every periodic axis of a chain into the face's parameter window and
-// splits it at each seam it crosses, so every returned piece lies inside the
-// window with its open ends exactly on a seam edge.
-inline std::vector<std::vector<Point2d>> curved_boolean_window_chains(
-    const std::vector<Point2d>& chain, const CurvedBooleanFaceInfo& face, double tolerance) {
-  std::vector<std::vector<Point2d>> pieces{chain};
-  for (int axis = 0; axis < 2; ++axis) {
-    const bool periodic = axis == 0 ? face.projection.periodic_u() : face.projection.periodic_v();
-    if (!periodic) continue;
-    const double base = (axis == 0 ? face.u : face.v)[0];
-    std::vector<std::vector<Point2d>> split;
-    split.reserve(pieces.size());
-    for (const std::vector<Point2d>& piece : pieces) {
-      if (piece.size() < 2) continue;
-      std::vector<Point2d> wrapped = piece;
-      for (Point2d& point : wrapped) {
-        point[axis] = curved_boolean_wrap_periodic(point[axis], base);
-      }
-      for (std::vector<Point2d>& run : curved_boolean_split_at_seam(wrapped, axis, base, tolerance)) {
-        split.push_back(std::move(run));
-      }
-    }
-    pieces.swap(split);
-  }
-  return pieces;
-}
 
 // Turns one intersector curve into the cut chains of one side. `segment.ua` /
 // `ub` are the A-side parameters at the segment's two endpoints, `va` / `vb` the
-// B-side ones. On a face with a periodic u a chain that winds once around the
-// face is re-expressed as a single chain whose ends land exactly on the two seam
-// edges, and a chain that steps across the seam is split there; both forms give
-// the splitter ends that lie on the seam boundary instead of in the middle of
-// the face.
+// B-side ones. The generic unwrapping, deduplication, domain-side rejection and
+// seam windowing live in trim_domain.hpp; only the boolean-specific re-basing of
+// a closed cut that winds once around a periodic axis stays here.
 inline std::vector<std::vector<Point2d>> curved_boolean_cut_chains(
     const SsiCurve& curve, bool a_side, const CurvedBooleanFaceInfo& face, double tolerance) {
   std::vector<Point2d> points;
@@ -854,27 +710,15 @@ inline std::vector<std::vector<Point2d>> curved_boolean_cut_chains(
     push(a_side ? curve.segments.back().ub : curve.segments.back().vb);
   }
 
-  curved_boolean_unwrap_axis(points, 0, face.projection.periodic_u(), face.u);
-  curved_boolean_unwrap_axis(points, 1, face.projection.periodic_v(), face.v);
+  trim_face_unwrap_axis(points, 0, face.projection.periodic_u(), face.u);
+  trim_face_unwrap_axis(points, 1, face.projection.periodic_v(), face.v);
+  trim_face_dedupe_chain(points, tolerance);
+  if (points.size() < 2) return {};
 
-  // Drop the points that only duplicate their predecessor: a segment shorter
-  // than the tolerance carries no cutting information.
-  std::vector<Point2d> unique;
-  unique.reserve(points.size());
-  for (const Point2d& point : points) {
-    if (!unique.empty()) {
-      const double du = point[0] - unique.back()[0];
-      const double dv = point[1] - unique.back()[1];
-      if (du * du + dv * dv <= tolerance * tolerance) continue;
-    }
-    unique.push_back(point);
-  }
-  if (unique.size() < 2) return {};
-  if (curved_boolean_chain_on_domain_side(unique, face, tolerance)) return {};
-
-  if (!face.projection.periodic_u() && !face.projection.periodic_v()) {
-    return {std::move(unique)};
-  }
+  const TrimFaceDomain domain =
+      trim_face_domain_from_ranges(face.projection, face.u, face.v);
+  if (trim_face_chain_on_domain_side(points, domain, tolerance)) return {};
+  if (!domain.periodic_u && !domain.periodic_v) return {std::move(points)};
 
   // A closed cut that winds once around a periodic axis is re-expressed as a
   // single chain whose ends land exactly on the two seam edges: the intersector
@@ -884,41 +728,41 @@ inline std::vector<std::vector<Point2d>> curved_boolean_cut_chains(
   // both ends are boundary points and the cut closes over the seam instead of
   // through the middle of the face.
   for (const int axis : {0, 1}) {
-    const bool periodic = axis == 0 ? face.projection.periodic_u() : face.projection.periodic_v();
+    const bool periodic = axis == 0 ? domain.periodic_u : domain.periodic_v;
     if (!periodic || !curve.closed) continue;
     const int other = 1 - axis;
-    const double base = (axis == 0 ? face.u : face.v)[0];
-    const double high = base + kCurvedBooleanTwoPi;
-    const double winding = unique.back()[axis] - unique.front()[axis];
-    if (!(std::fabs(winding) > kCurvedBooleanPi)) continue;
+    const double base = domain.bounds[2 * static_cast<std::size_t>(axis)];
+    const double high = domain.bounds[2 * static_cast<std::size_t>(axis) + 1];
+    const double period = high - base;
+    const double winding = points.back()[axis] - points.front()[axis];
+    if (!(std::fabs(winding) > 0.5 * period)) continue;
     const bool forward = winding > 0.0;
     bool monotone = true;
-    for (std::size_t i = 1; i < unique.size(); ++i) {
-      const double delta = unique[i][axis] - unique[i - 1][axis];
+    for (std::size_t i = 1; i < points.size(); ++i) {
+      const double delta = points[i][axis] - points[i - 1][axis];
       if (forward ? delta < -tolerance : delta > tolerance) {
         monotone = false;
         break;
       }
     }
     const double span = std::fabs(winding);
-    if (!monotone || !(span <= kCurvedBooleanTwoPi + 64.0 * tolerance)) continue;
-    if (!forward) std::reverse(unique.begin(), unique.end());
-    const double start = unique.front()[axis];
-    const double seam =
-        base + std::ceil((start - base) / kCurvedBooleanTwoPi - 1e-12) * kCurvedBooleanTwoPi;
-    double crossing_other = unique.front()[other];
-    std::size_t after = unique.size();
-    for (std::size_t i = 1; i < unique.size(); ++i) {
-      const double low = unique[i - 1][axis];
-      const double next = unique[i][axis];
+    if (!monotone || !(span <= period + 64.0 * tolerance)) continue;
+    if (!forward) std::reverse(points.begin(), points.end());
+    const double start = points.front()[axis];
+    const double seam = base + std::ceil((start - base) / period - 1e-12) * period;
+    double crossing_other = points.front()[other];
+    std::size_t after = points.size();
+    for (std::size_t i = 1; i < points.size(); ++i) {
+      const double low = points[i - 1][axis];
+      const double next = points[i][axis];
       if (next < seam) continue;
       const double length = next - low;
       const double t = length > 0.0 ? (seam - low) / length : 0.0;
-      crossing_other = unique[i - 1][other] + t * (unique[i][other] - unique[i - 1][other]);
+      crossing_other = points[i - 1][other] + t * (points[i][other] - points[i - 1][other]);
       after = i;
       break;
     }
-    if (after >= unique.size()) continue;
+    if (after >= points.size()) continue;
     const auto point_at = [axis, other](double along, double across) {
       Point2d point{};
       point[axis] = along;
@@ -928,24 +772,24 @@ inline std::vector<std::vector<Point2d>> curved_boolean_cut_chains(
     // Re-order the lap so it starts at the seam: the samples after the crossing
     // come first, the samples before it follow shifted by one turn.
     std::vector<Point2d> chain;
-    chain.reserve(unique.size() + 2);
+    chain.reserve(points.size() + 2);
     chain.push_back(point_at(base, crossing_other));
-    for (std::size_t step = 0; step < unique.size(); ++step) {
-      const std::size_t i = (after + step) % unique.size();
-      double along = unique[i][axis] + (i < after ? kCurvedBooleanTwoPi : 0.0);
+    for (std::size_t step = 0; step < points.size(); ++step) {
+      const std::size_t i = (after + step) % points.size();
+      double along = points[i][axis] + (i < after ? period : 0.0);
       along = base + (along - seam);
       if (along >= high - tolerance) continue;
       if (along <= base + tolerance) continue;
-      const Point2d candidate = point_at(along, unique[i][other]);
+      const Point2d candidate = point_at(along, points[i][other]);
       const double du = candidate[0] - chain.back()[0];
       const double dv = candidate[1] - chain.back()[1];
       if (du * du + dv * dv <= tolerance * tolerance) continue;
       chain.push_back(candidate);
     }
     chain.push_back(point_at(high, crossing_other));
-    return curved_boolean_window_chains(chain, face, tolerance);
+    return trim_face_window_polyline(chain, domain, tolerance, true);
   }
-  return curved_boolean_window_chains(unique, face, tolerance);
+  return trim_face_window_polyline(points, domain, tolerance, true);
 }
 
 // A closed cut that crosses a periodic seam becomes a single closed rim on the
@@ -1208,10 +1052,12 @@ inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
       other_u_hint = project.value()[0];
       Point2d foreign_uv = project.value();
       if (other.projection.periodic_u()) {
-        foreign_uv[0] = curved_boolean_wrap_periodic(foreign_uv[0], other.u[0]);
+        foreign_uv[0] =
+            trim_face_wrap_periodic(foreign_uv[0], other.u[0], other.u[1] - other.u[0]);
       }
       if (other.projection.periodic_v()) {
-        foreign_uv[1] = curved_boolean_wrap_periodic(foreign_uv[1], other.v[0]);
+        foreign_uv[1] =
+            trim_face_wrap_periodic(foreign_uv[1], other.v[0], other.v[1] - other.v[0]);
       }
       foreign = trim_face_uv_inside(other_loops, foreign_uv, tolerance);
     }
@@ -1319,11 +1165,13 @@ inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
   // splitting at each seam keeps every piece inside the window with its ends
   // exactly on the seam edges.
   if (face.projection.periodic_u() || face.projection.periodic_v()) {
+    const TrimFaceDomain domain =
+        trim_face_domain_from_ranges(face.projection, face.u, face.v);
     std::vector<std::vector<Point2d>> windowed;
     windowed.reserve(pieces.size());
     for (const std::vector<Point2d>& piece : pieces) {
       if (piece.size() < 2) continue;
-      for (std::vector<Point2d>& run : curved_boolean_window_chains(piece, face, tolerance)) {
+      for (std::vector<Point2d>& run : trim_face_window_polyline(piece, domain, tolerance, true)) {
         windowed.push_back(std::move(run));
       }
     }

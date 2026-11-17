@@ -12,6 +12,7 @@
 
 #include <geom/brep/face_query.hpp>
 #include <geom/brep/face_uv.hpp>
+#include <geom/brep/trim_domain.hpp>
 #include <geom/cgeom/arrangement2.hpp>
 #include <geom/cgeom/polygon2.hpp>
 #include <geom/cgeom/triangulate2.hpp>
@@ -22,13 +23,6 @@
 
 namespace geom {
 inline namespace v1 {
-
-// One curve along which a curved face is split. The polyline lives in the
-// surface parameter domain reported by face_loops_uv() for the same face. A
-// closed cut repeats its first point as its last point.
-struct FaceCut {
-  std::vector<Point2d> uv;
-};
 
 // One piece of a boundary arc carried by a fragment ring: the circle and the
 // parameter interval the ring follows. t0 < t1 and t1 - t0 <= 2*pi; a segment

@@ -18,6 +18,7 @@
 #include <geom/brep/solid_editor.hpp>
 #include <geom/brep/tessellate.hpp>
 #include <geom/brep/topology.hpp>
+#include <geom/brep/trim_domain.hpp>
 #include <geom/brep/trim_face.hpp>
 #include <geom/brep/validate.hpp>
 #include <geom/cgeom/polygon2.hpp>
@@ -2068,4 +2069,78 @@ TEST_CASE("trim face: a closed cut crossing the seam twice is unsupported") {
   CHECK(std::string_view(result.error().message) ==
         "split_face_curved: closed cut crosses the seam twice");
   check_sphere_face_unchanged(sphere, face);
+}
+
+TEST_CASE("trim_face: sphere and torus synthetic domains") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto sd = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(sd.has_value());
+  const geom::detail::TrimFaceDomain& sphere_domain = sd.value();
+  CHECK(sphere_domain.bounds[0] == 0.0);
+  CHECK(sphere_domain.bounds[1] == doctest::Approx(2.0 * kPi));
+  CHECK(sphere_domain.bounds[2] == doctest::Approx(-kPi / 2.0));
+  CHECK(sphere_domain.bounds[3] == doctest::Approx(kPi / 2.0));
+  CHECK(sphere_domain.periodic_u);
+  CHECK_FALSE(sphere_domain.periodic_v);
+  CHECK(sphere_domain.sides[0] == geom::detail::TrimSideKind::kSeamCopy);
+  CHECK(sphere_domain.sides[2] == geom::detail::TrimSideKind::kCollapsed);
+  CHECK(sphere_domain.sides[3] == geom::detail::TrimSideKind::kCollapsed);
+
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const geom::detail::FaceUvProjection tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(td.has_value());
+  const geom::detail::TrimFaceDomain& torus_domain = td.value();
+  CHECK(torus_domain.periodic_u);
+  CHECK(torus_domain.periodic_v);
+  for (int i = 0; i < 4; ++i) {
+    CHECK(torus_domain.sides[i] == geom::detail::TrimSideKind::kSeamCopy);
+  }
+}
+
+TEST_CASE("trim_face: windowing splits a chain at the periodic seam") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto sd = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(sd.has_value());
+  const std::vector<geom::FaceCut> cuts = {
+      geom::FaceCut{{geom::Point2d{0.2, 0.3}, geom::Point2d{3.0, 0.5},
+                     geom::Point2d{6.2, 0.4}, geom::Point2d{0.3, 0.6}}}};
+  const auto chains = geom::detail::trim_face_window_chains(cuts, sd.value(), 1e-12);
+  REQUIRE(chains.has_value());
+  const std::vector<std::vector<geom::Point2d>>& pieces = chains.value();
+  REQUIRE(pieces.size() == 2u);
+  CHECK(pieces[0].back()[0] == doctest::Approx(2.0 * kPi));
+  CHECK(pieces[1].front()[0] == 0.0);
+  CHECK(pieces[0].size() + pieces[1].size() >= 5u);
+}
+
+TEST_CASE("trim_face: an interior dangling cut endpoint is rejected") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const geom::detail::FaceUvProjection tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(td.has_value());
+  const std::vector<geom::FaceCut> cuts = {
+      geom::FaceCut{{geom::Point2d{1.0, 0.4}, geom::Point2d{2.0, 0.4}}}};
+  const auto chains = geom::detail::trim_face_window_chains(cuts, td.value(), 1e-12);
+  REQUIRE_FALSE(chains.has_value());
+  CHECK(chains.error().code == geom::Errc::unsupported);
+  CHECK(chains.error().message ==
+        std::string_view("trim_face: cut chain ends inside the parameter "
+                         "domain"));
 }
