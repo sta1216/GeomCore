@@ -2,7 +2,7 @@
 
 ## Goal
 
-Replace the seam-only special case in `split_face_curved` with one synthetic-domain splitter that works whenever a curved face's uv chart is a parameter rectangle with seam copies and collapsed sides. This milestone covers **closed cuts** on sphere and torus charts, refuses stored holes explicitly, fixes the torus silent-empty-success bug, and makes offset/tilted **plane** cuts of a torus produce valid boolean results. Cone apex and open cut chains are deliberately left for M3c-3c-2b.
+Generalize the seam-only splitter into one synthetic-domain splitter for **closed cuts on sphere charts**, and remove the silent losses around it: a synthetic chart that already carries a stored inner ring is refused explicitly instead of dropping the hole, and the public tangent-loop rejection is pinned. Torus charts keep their current plane-only contract; their periodic-v bands need a two-rim fragment contract and rim pairing in the assembler, so offset/tilted torus plane booleans are deferred to M3c-3c-2b (ADR-0032). Cone apex and open cut chains stay out of scope.
 
 ## Architecture
 
@@ -31,7 +31,7 @@ C++20; CMake 4.4.4 + VS2022 MSVC 19.44 (`/W4 /WX /utf-8`); doctest 2.4.11; exist
 ## Scope and Deviations (need approval)
 
 1. **Closed cuts only.** Open chains (seam→pole, base rim→apex) and the cone apex are M3c-3c-2b. This milestone rejects an open chain with the existing message `"split_face_curved: open cuts on a seam-only face"` unless a task says otherwise.
-2. **Torus operands remain plane-cut only.** Torus/torus and torus/other-curved operands stay rejected with the M3c-2 message. The old "perpendicular to or containing the axis" guard is removed, but a plane whose intersection loop crosses the v seam at two different u values (a *twisted* seam crossing, e.g. a vertical plane x=0) returns `unsupported "split_face_curved: closed cut crosses the seam at different transverse coordinates; twisted seam crossings are deferred to M3c-3c-4"`. Horizontal offset planes (loop wraps u at constant v) and any non-twisted loop are supported. Twisted crossings need chart re-origining, which is out of scope here.
+2. **Torus operands keep their current plane-cut contract.** Torus/torus and torus/other-curved operands stay rejected with the M3c-2 message, and the "perpendicular to or containing the axis" guard stays. Offset/tilted torus plane booleans are deferred to M3c-3c-2b: their bands wrap the periodic-v seam and need a two-rim fragment contract plus rim pairing in the assembler. Both mechanisms tried here (shifting the v origin onto a cut; emitting full-width v-side rings) failed the offset acceptance and regressed five centered-plane torus booleans (ADR-0032).
 3. **Stored holes are refused, not silently dropped.** A synthetic-domain face carrying `loops_uv` inner rings stops with `unsupported "split_face_curved: stored holes are not supported yet"`. Preserving them needs every boundary cycle of an arrangement face, which is deferred to M3c-3c-4 together with the ear-clip cost.
 4. **Ear-clipping cost is not fixed here.** 4096-point rims still cost ~3.7 s per `triangulate_polygon2`; QA-18a asserts structure plus analytic/partial volumes rather than paying that cost inside the suite. The cost fix is a separate follow-up.
 
@@ -285,109 +285,48 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
 
 **Acceptance:** interior island → 2 fragments whose rings have opposite orientation and whose absolute areas sum to the chart area `2π²` (the smaller is the exact 33-gon area `0.12490582127787074`); torus two latitudes → 3 fragments with ring counts 1 / 2 / 1 (this test is structure-only: the old u-unwrap already accepted it, so it is not RED); a u-seam island with two different transverse crossings → the twisted-crossing `unsupported`; two overlapping islands → `numeric_failure "split_face_curved: fragments do not partition the chart"`; fragment order asserted explicitly; no empty vector; existing sphere slit and band tests unchanged.
 
-## Task 3 — One domain decision, torus gate
+## Task 3 — Explicit refusal of stored holes on synthetic charts
 
-**Files:** `include/geom/brep/trim_face.hpp` (dispatch), `include/geom/brep/boolean_solid_curved.hpp` (gate + include), `tests/unit/brep_trim_face_test.cpp`, `tests/unit/brep_boolean_curved_test.cpp`.
+**Files:** `include/geom/brep/trim_face.hpp`, `tests/unit/brep_trim_face_test.cpp`.
+
+**Context.** Routing every synthetic domain through `trim_face_split_domain` exposes periodic-v torus bands that today's assembler cannot pair. This milestone keeps the torus path and its plane guard unchanged, and removes the remaining silent hole loss.
 
 **Changes:**
 
-- `split_face_curved` first calls `trim_face_domain`; if it returns a domain, route through `trim_face_split_domain` regardless of `loops.front()` area. Ordinary planar/cylinder faces keep the current path. This removes the torus "loop area 4π² so never synthetic" bug.
-- A synthetic-domain face with stored inner loops is refused by `trim_face_split_domain` with `unsupported "split_face_curved: stored holes are not supported yet"`; `split_face_curved` forwards the stored loops only after that explicit stop.
-- `boolean_solid_curved`: remove the torus "cut plane must be perpendicular to or contain the axis" guard (and its helper); keep torus/torus and torus/curved rejection unchanged. Torus plane cuts now flow through the general splitter.
-- Replace the torus diagnostic tests that asserted `"torus cut plane must be..."` with acceptance tests for horizontal offset planes and an explicit rejection test for a tilted plane (its loop crosses the v seam at different transverse coordinates, so the splitter returns the twisted-crossing `unsupported`).
+- In the seam-only branch of `split_face_curved`, when the face is a sphere slit and `loops.size() > 1`, return `unsupported "split_face_curved: stored holes are not supported yet"` before the splitter runs.
+- Pin the public tangent-loop rejection so a later dispatch cannot hand it to the general splitter.
+- Do not change `boolean_solid_curved`.
 
 **Steps:**
 
-1. Failing tests:
+1. Failing test: one-face sphere band, outer ring at v=0.3, stored inner ring at v=0.6 (SolidEditor, 64 `LineCurve3` segments per ring), `split_face_curved(band, face, {}, 1e-9)` must return exactly the message above. Today it succeeds and silently drops the inner ring.
+2. Pin: tangent closed cut (centre (0.1,0.5), r=0.1, vertex (0,0.5)) through `split_face_curved` stays `unsupported "split_face_curved: closed cut crosses the seam twice"`.
+3. Implement the refusal; run `trim*` and `curved boolean:*`; then Debug and Release full suites.
+4. Commit `fix(m3c3c2a): refuse stored holes on synthetic charts`.
 
-```cpp
-TEST_CASE("curved boolean: an offset torus plane splits both ways") {
-  const geom::Brep torus = geom::make_torus(
-      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
-      1e-9).value();
-  const geom::Brep upper = geom::make_box(
-      geom::Point3d{-2.0, -2.0, 0.25}, geom::Point3d{2.0, 2.0, 2.0},
-      1e-9).value();
-  // intersect torus with the half-space box -> the upper band
-  const auto result = geom::boolean_solid_curved(
-      torus, torus.solid_ids().front(), upper, upper.solid_ids().front(),
-      geom::SolidBooleanOp::intersection);
-  REQUIRE(result.has_value());
-  CHECK(geom::validate_topology(result->brep).ok());
-  const auto shells = result->brep.solid_shells(result->brep.solid_ids().front());
-  CHECK(shells.size() == 1u);
-}
+**Acceptance:** exact stored-hole message; tangent message unchanged; no other test edits; +1 case / +2 assertions.
 
-TEST_CASE("curved boolean: torus difference stays deferred") {
-  const geom::Brep torus = geom::make_torus(
-      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
-      1e-9).value();
-  const geom::Brep upper = geom::make_box(
-      geom::Point3d{-2.0, -2.0, 0.25}, geom::Point3d{2.0, 2.0, 2.0},
-      1e-9).value();
-  const auto result = geom::boolean_solid_curved(
-      torus, torus.solid_ids().front(), upper, upper.solid_ids().front(),
-      geom::SolidBooleanOp::difference);
-  // The B-side cap of a torus would need a flipped torus fragment, which the
-  // curved path still rejects; the failure must stay explicit.
-  REQUIRE_FALSE(result.has_value());
-  CHECK(result.error().code == geom::Errc::unsupported);
-}
+## Task 4 — QA-18a, ADR-0032 and status
 
-TEST_CASE("trim_face: a stored hole is refused") {
-  const geom::Brep sphere =
-      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
-  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
-  const geom::detail::FaceUvProjection sp =
-      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
-  const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
-  REQUIRE(domain.has_value());
-  std::vector<geom::Point2d> hole;
-  for (int i = 0; i < 33; ++i) {
-    const double a = 2.0 * kPi * i / 33.0;
-    hole.push_back(geom::Point2d{1.0 + 0.2 * std::cos(a),
-                                 0.3 + 0.2 * std::sin(a)});
-  }
-  hole.push_back(hole.front());
-  const std::vector<std::vector<geom::Point2d>> holes = {hole};
-  const auto fragments = geom::detail::trim_face_split_domain(
-      sf, sp, std::span<const geom::FaceCut>{}, domain.value(), holes, 1e-12);
-  REQUIRE_FALSE(fragments.has_value());
-  CHECK(fragments.error().code == geom::Errc::unsupported);
-  CHECK(std::string(fragments.error().message).find("stored holes") !=
-        std::string::npos);
-}
+**Files:** `tests/unit/curved_boolean_qa18_test.cpp` (new), `docs/adr/0032-general-domain-splitter.md`, `docs/benchmarks/m3c3c2a.md`, architecture §16.3, this plan.
 
-The hole test calls the splitter-level API directly, so it needs no `SolidEditor` fixture. Task 3 keeps the refusal: `split_face_curved` ignores stored inner loops only after this explicit stop.
+**Changes:**
 
-2. Run; expect the torus case to fail at the old guard message and the hole case to fail with the refusal message (wrong before the change).
-3. Implement dispatch and gate removal; do not implement hole preservation. Update the torus diagnostic tests (currently expecting `"torus cut plane must be perpendicular..."` and `"torus/torus..."`); keep torus/torus rejection tests.
-4. Run `curved boolean:*`, `trim_face:*`, `*torus*`, `curved volume:*`; Debug/Release.
-5. Commit: `feat(m3c3c2a): route torus planes through the general splitter`.
+- QA-18a (no new algorithm path, so no timing gate):
+  1. a whole sphere with two latitude cuts through the public splitter → 3 fragments, loop counts 1/2/1;
+  2. the sphere band with a stored inner loop → exact `unsupported` message;
+  3. a twisted island and nested islands through the direct API → their exact messages;
+  4. the sphere row twice → identical fragment and loop counts.
+- `docs/benchmarks/m3c3c2a.md` records that no new benchmark was added; the milestone is infrastructure plus refusals, and existing trimmed/caps timings are unchanged.
+- ADR-0032 records the splitter contract, the explicit refusals, and why torus offset/tilted planes are deferred (two-rim bands + assembler pairing; both attempted mechanisms failed and regressed five centered torus booleans). It lists the 3c-2b follow-ups: two-rim contract, rim pairing, offset/tilted planes, twisted crossings, multi-cycle holes.
+- Architecture §16.3 gets one paragraph; plan checkboxes are updated.
 
-**Acceptance:** horizontal offset plane z=0.25 yields one valid shell for intersection and union; a tilted plane is explicitly `unsupported` with the twisted-crossing message; torus difference stays explicitly `unsupported` until flipped torus fragments exist (M3c-3c-2b); stored holes stay explicitly `unsupported`; torus/torus still rejected with the M3c-2 message.
-
-## Task 4 — QA-18a, ADR, benchmark, status
-
-**Files:** `tests/unit/curved_boolean_qa18_test.cpp` (new), `docs/adr/0032-general-domain-splitter.md` (new), `docs/benchmarks/m3c3c2a.md` (new), `docs/architecture/geometry-library-architecture.md` (§16.3), `cmake`/CI bench target if a new bench is added.
-
-**QA-18a cases** (each: `validate_topology().ok()`, exactly one shell, closed by uses, V−E+F per shell, deterministic repeat; relative `1e-6`):
-
-1. Torus `R=1, r=0.5` intersected with box `z >= 0` → half torus, volume `2.467401100272339`, surface area `9.869604401089358`;
-2. Torus intersected with the box `z >= 0.25` → upper band; assert one shell, `V-E+F = 2`, closed by uses, and volume in `(0, 2.467401100272339)` (no analytic value for an offset plane);
-3. Torus intersected with the box `z <= -0.25` → lower band; assert one shell, `V-E+F = 2`, and volume equal to case 2 within `1e-9` relative (the torus is symmetric about z=0);
-4. Regression: sphere lens QA-17 row (37°) still exact.
-
-Assertion counts are pinned after the first green run; the plan's expected totals are updated then.
-
-**Steps:** write the RED tests (they fail on the current guard/messages), implement only the fixture wiring, run Debug and Release, record wall times, write ADR-0032 (decisions: descriptor, seam windowing, orientation preservation, stored-hole refusal, torus gate scope, deferred open chains/cone), benchmark page, §16.3 entry, then commit `docs(m3c3c2a): record QA-18a and the general splitter limits`.
-
-**Acceptance:** QA-18a green; ADR states the closed-cut-only and plane-only limits; benchmark records medians; §16.3 says M3c-3c-2a complete, 3c-2b/3/4 open.
+**Acceptance:** four rows pass in both configurations; no claim that torus offset planes work; +1 case / about 12 assertions.
 
 ## Exit Criteria
 
 - `split_face_curved` handles sphere and torus closed cuts through one domain decision; no silent empty vector.
-- Horizontal offset torus plane booleans produce valid single-shell results; tilted planes are explicitly rejected; torus/torus still explicitly rejected.
+- Torus plane booleans keep their pre-milestone behavior and messages (offset/tilted planes deferred to M3c-3c-2b); torus/torus and torus/curved stay explicitly rejected.
 - Stored holes are refused with a documented diagnostic, not silently dropped.
 - Debug and Release suites pass, zero warnings; M3c-3c-1/2/3a/3b QA rows unchanged.
 - ADR-0032, `docs/benchmarks/m3c3c2a.md`, §16.3 updated.
