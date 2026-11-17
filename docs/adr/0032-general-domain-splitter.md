@@ -57,10 +57,17 @@ The working tree with those experiments is preserved only as
 
 ## Consequences
 
-- No reachable public input silently loses geometry: holes, twisted/nested/mixed
-  cuts and overlapping islands are explicit errors.
-- Sphere closed-cut splitting is unchanged in behavior (same `1/2/1` band structure)
-  and now refuses stored holes explicitly.
+- No public input reachable through the narrowed scope silently loses geometry:
+  stored holes on synthetic sphere charts, twisted/nested/mixed cuts and overlapping
+  islands are explicit errors. Two pre-existing gaps are documented rather than
+  fixed here: a non-synthetic face with stored holes still ignores them, and the
+  public torus direct API returns a degenerate two-fragment answer (one full-chart
+  ring plus a zero-area ring) instead of refusing; torus operands stay behind the
+  M3c-2 plane-cut guard.
+- Sphere closed-cut splitting is unchanged in behavior: a pole-free band is joined
+  through the seam columns, so the two-latitude QA-18a chart yields three fragments
+  with one uv loop each (1/1/1; the `1/2/1` shape is the torus latitude test). It now
+  refuses stored holes explicitly.
 - M3c-3c-2b must define a two-rim band contract for periodic-v charts, pair rims in
   the assembler, and then enable offset/tilted torus planes and twisted crossings.
 - Multi-cycle holes and the ear-clipping cost remain deferred (M3c-3c-4).

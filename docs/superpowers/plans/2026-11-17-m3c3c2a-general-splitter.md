@@ -33,11 +33,11 @@ C++20; CMake 4.4.4 + VS2022 MSVC 19.44 (`/W4 /WX /utf-8`); doctest 2.4.11; exist
 1. **Closed cuts only.** Open chains (seam→pole, base rim→apex) and the cone apex are M3c-3c-2b. This milestone rejects an open chain with the existing message `"split_face_curved: open cuts on a seam-only face"` unless a task says otherwise.
 2. **Torus operands keep their current plane-cut contract.** Torus/torus and torus/other-curved operands stay rejected with the M3c-2 message, and the "perpendicular to or containing the axis" guard stays. Offset/tilted torus plane booleans are deferred to M3c-3c-2b: their bands wrap the periodic-v seam and need a two-rim fragment contract plus rim pairing in the assembler. Both mechanisms tried here (shifting the v origin onto a cut; emitting full-width v-side rings) failed the offset acceptance and regressed five centered-plane torus booleans (ADR-0032).
 3. **Stored holes are refused, not silently dropped.** A synthetic-domain face carrying `loops_uv` inner rings stops with `unsupported "split_face_curved: stored holes are not supported yet"`. Preserving them needs every boundary cycle of an arrangement face, which is deferred to M3c-3c-4 together with the ear-clip cost.
-4. **Ear-clipping cost is not fixed here.** 4096-point rims still cost ~3.7 s per `triangulate_polygon2`; QA-18a asserts structure plus analytic/partial volumes rather than paying that cost inside the suite. The cost fix is a separate follow-up.
+4. **Ear-clipping cost is not fixed here.** 4096-point rims still cost ~3.7 s per `triangulate_polygon2`; QA-18a asserts fragment and loop structure rather than paying that cost inside the suite. The cost fix is a separate follow-up.
 
 ## Review Focus
 
-1. **Silent empty success.** `split_face_curved` on a torus with cuts `v=0.6` and `v=2.5` currently returns 0 fragments and no error through the public entry; the fix must return 3 fragments, and a genuinely consumed-everything input must return a documented error. Probe both.
+1. **Silent loss on synthetic charts.** A synthetic sphere chart that carries a stored inner ring used to drop the hole; the public `split_face_curved` must now return the exact `unsupported` message. The torus public path keeps its M3c-2 plane-cut contract in this milestone; the direct-API fragment oddity is documented, not fixed. Probe both the refusal and the unchanged torus guard.
 2. **Seam identity.** For every seam ring, the repeated first point and the point before it must be the two parameter copies of one physical point within the relative bound.
 3. **Orientation.** Ring direction is preserved from the arrangement traversal. The two sides of an interior island must come out with opposite traversal; normalizing both to CCW would make two faces claim the same material side. Check coedge direction after assembly.
 4. **Area partition.** `sum(fragment_area) == whole-face area` within tolerance; UV and 3D areas for sphere caps; torus area `4π²Rr` for halves.
@@ -52,7 +52,7 @@ C++20; CMake 4.4.4 + VS2022 MSVC 19.44 (`/W4 /WX /utf-8`); doctest 2.4.11; exist
 | `include/geom/brep/boolean_solid_curved.hpp` | include `trim_domain.hpp`, delete duplicated static helpers, torus gate relaxation |
 | `tests/unit/brep_trim_face_test.cpp` | domain/windowing/splitter tests (hole refusal, not preservation) |
 | `tests/unit/brep_boolean_curved_test.cpp` | torus offset/tilted plane e2e and gate-message updates |
-| `tests/unit/curved_boolean_qa18_test.cpp` (new) | QA-18a torus corpus |
+| `tests/unit/curved_boolean_qa18_test.cpp` (new) | QA-18a sphere latitude-split corpus |
 | `docs/adr/0032-general-domain-splitter.md`, `docs/benchmarks/m3c3c2a.md`, architecture §16.3 | decisions and measurements |
 
 ## Task 1 — Domain descriptor and cut-chain windowing
@@ -313,7 +313,7 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
 **Changes:**
 
 - QA-18a (no new algorithm path, so no timing gate):
-  1. a whole sphere with two latitude cuts through the public splitter → 3 fragments, loop counts 1/2/1;
+  1. a whole sphere with two latitude cuts through the public splitter → 3 fragments, each with exactly one uv loop (1/1/1);
   2. the sphere band with a stored inner loop → exact `unsupported` message;
   3. a twisted island and nested islands through the direct API → their exact messages;
   4. the sphere row twice → identical fragment and loop counts.

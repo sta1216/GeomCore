@@ -2656,4 +2656,6 @@ TEST_CASE("trim face: a stored inner loop is refused publicly") {
   CHECK(result.error().code == Errc::unsupported);
   CHECK(std::string_view(result.error().message) ==
         "split_face_curved: stored holes are not supported yet");
+  CHECK(result.error().context_a == face.index());
+  CHECK(result.error().context_b == 1u);
 }
