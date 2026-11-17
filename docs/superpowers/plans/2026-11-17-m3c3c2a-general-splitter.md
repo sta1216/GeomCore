@@ -230,14 +230,14 @@ TEST_CASE("trim_face: a closed island splits into two fragments") {
   REQUIRE(domain.has_value());
   const std::vector<geom::FaceCut> cuts = {geom::FaceCut{ring}};
   const auto fragments = geom::detail::trim_face_split_domain(
-      sf, sp, cuts, *domain, std::span<const std::vector<geom::Point2d>>{},
+      sf, sp, cuts, domain.value(), std::span<const std::vector<geom::Point2d>>{},
       1e-12);
   REQUIRE(fragments.has_value());
-  REQUIRE(fragments->size() == 2u);
-  CHECK(fragments->at(0).loops_uv.size() == 1u);
-  CHECK(fragments->at(1).loops_uv.size() == 1u);
-  const double a0 = geom::signed_area2(fragments->at(0).loops_uv[0]);
-  const double a1 = geom::signed_area2(fragments->at(1).loops_uv[0]);
+  REQUIRE(fragments.value().size() == 2u);
+  CHECK(fragments.value().at(0).loops_uv.size() == 1u);
+  CHECK(fragments.value().at(1).loops_uv.size() == 1u);
+  const double a0 = geom::signed_area2(fragments.value().at(0).loops_uv[0]);
+  const double a1 = geom::signed_area2(fragments.value().at(1).loops_uv[0]);
   // The island is material on one side and the rest of the sphere on the
   // other: the two rings keep opposite traversal and partition the chart.
   CHECK(a0 * a1 < 0.0);
@@ -268,13 +268,13 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
   const std::vector<geom::FaceCut> cuts = {geom::FaceCut{low},
                                            geom::FaceCut{high}};
   const auto fragments = geom::detail::trim_face_split_domain(
-      tf, tp, cuts, *domain, std::span<const std::vector<geom::Point2d>>{},
+      tf, tp, cuts, domain.value(), std::span<const std::vector<geom::Point2d>>{},
       1e-12);
   REQUIRE(fragments.has_value());
-  REQUIRE(fragments->size() == 3u);
-  CHECK(fragments->at(0).loops_uv.size() == 1u);
-  CHECK(fragments->at(1).loops_uv.size() == 2u);
-  CHECK(fragments->at(2).loops_uv.size() == 1u);
+  REQUIRE(fragments.value().size() == 3u);
+  CHECK(fragments.value().at(0).loops_uv.size() == 1u);
+  CHECK(fragments.value().at(1).loops_uv.size() == 2u);
+  CHECK(fragments.value().at(2).loops_uv.size() == 1u);
 }
 ```
 
@@ -351,7 +351,7 @@ TEST_CASE("trim_face: a stored hole is refused") {
   hole.push_back(hole.front());
   const std::vector<std::vector<geom::Point2d>> holes = {hole};
   const auto fragments = geom::detail::trim_face_split_domain(
-      sf, sp, std::span<const geom::FaceCut>{}, *domain, holes, 1e-12);
+      sf, sp, std::span<const geom::FaceCut>{}, domain.value(), holes, 1e-12);
   REQUIRE_FALSE(fragments.has_value());
   CHECK(fragments.error().code == geom::Errc::unsupported);
   CHECK(std::string(fragments.error().message).find("stored holes") !=
