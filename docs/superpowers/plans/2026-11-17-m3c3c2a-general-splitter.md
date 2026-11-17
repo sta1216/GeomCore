@@ -98,15 +98,15 @@ Domain values: Sphere3 `{0, 2π, -π/2, π/2}`, `periodic_u = true`, sides `{kSe
 TEST_CASE("trim_face: sphere and torus synthetic domains") {
   const geom::Brep sphere =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
-  const geom::FaceId sf = geom::face_with_surface<geom::Sphere3>(sphere);
-  const geom::FaceUvProjection sp =
-      geom::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
   const auto sd = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
   REQUIRE(sd.has_value());
   CHECK(sd->bounds[0] == 0.0);
-  CHECK(sd->bounds[1] == doctest::Approx(2.0 * geom::kPi));
-  CHECK(sd->bounds[2] == doctest::Approx(-geom::kPi / 2.0));
-  CHECK(sd->bounds[3] == doctest::Approx(geom::kPi / 2.0));
+  CHECK(sd->bounds[1] == doctest::Approx(2.0 * kPi));
+  CHECK(sd->bounds[2] == doctest::Approx(-kPi / 2.0));
+  CHECK(sd->bounds[3] == doctest::Approx(kPi / 2.0));
   CHECK(sd->periodic_u);
   CHECK_FALSE(sd->periodic_v);
   CHECK(sd->sides[0] == geom::detail::TrimSideKind::kSeamCopy);
@@ -116,9 +116,9 @@ TEST_CASE("trim_face: sphere and torus synthetic domains") {
   const geom::Brep torus = geom::make_torus(
       geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
       1e-12).value();
-  const geom::FaceId tf = geom::face_with_surface<geom::Torus3>(torus);
-  const geom::FaceUvProjection tp =
-      geom::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const geom::detail::FaceUvProjection tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
   const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
   REQUIRE(td.has_value());
   CHECK(td->periodic_u);
@@ -131,9 +131,9 @@ TEST_CASE("trim_face: sphere and torus synthetic domains") {
 TEST_CASE("trim_face: windowing splits a chain at the periodic seam") {
   const geom::Brep sphere =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
-  const geom::FaceId sf = geom::face_with_surface<geom::Sphere3>(sphere);
-  const geom::FaceUvProjection sp =
-      geom::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
   const auto sd = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
   REQUIRE(sd.has_value());
   const std::vector<geom::FaceCut> cuts = {
@@ -143,7 +143,7 @@ TEST_CASE("trim_face: windowing splits a chain at the periodic seam") {
       geom::detail::trim_face_window_chains(cuts, *sd, 1e-12);
   REQUIRE(chains.has_value());
   REQUIRE(chains->size() == 2u);
-  CHECK((*chains)[0].back()[0] == doctest::Approx(2.0 * geom::kPi));
+  CHECK((*chains)[0].back()[0] == doctest::Approx(2.0 * kPi));
   CHECK((*chains)[1].front()[0] == 0.0);
   CHECK((*chains)[0].size() + (*chains)[1].size() >= 5u);
 }
@@ -152,9 +152,9 @@ TEST_CASE("trim_face: an interior dangling cut endpoint is rejected") {
   const geom::Brep torus = geom::make_torus(
       geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
       1e-12).value();
-  const geom::FaceId tf = geom::face_with_surface<geom::Torus3>(torus);
-  const geom::FaceUvProjection tp =
-      geom::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const geom::detail::FaceUvProjection tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
   const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
   REQUIRE(td.has_value());
   const std::vector<geom::FaceCut> cuts = {
@@ -174,7 +174,7 @@ TEST_CASE("trim_face: an interior dangling cut endpoint is rejected") {
 4. Rebuild Debug/Release and run the three cases plus `curved boolean:*`.
 5. Commit: `feat(m3c3c2a): describe synthetic domains and window cut chains`.
 
-**Acceptance:** all three cases pass; no existing test changes; counts increase by 3 cases / 12–16 assertions.
+**Acceptance:** all three cases pass; no existing test changes; counts increase by 3 cases / 27 assertions.
 
 ## Task 2 — Arrangement splitter for closed cuts on a synthetic domain
 
@@ -215,16 +215,16 @@ Result<std::vector<CurvedFragment>> trim_face_split_domain(
 TEST_CASE("trim_face: a closed island splits into two fragments") {
   const geom::Brep sphere =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
-  const geom::FaceId sf = geom::face_with_surface<geom::Sphere3>(sphere);
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
   std::vector<geom::Point2d> ring;
   for (int i = 0; i < 33; ++i) {
-    const double a = 2.0 * geom::kPi * i / 33.0;
+    const double a = 2.0 * kPi * i / 33.0;
     ring.push_back(geom::Point2d{1.0 + 0.2 * std::cos(a),
                                  0.3 + 0.2 * std::sin(a)});
   }
   ring.push_back(ring.front());
-  const geom::FaceUvProjection sp =
-      geom::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
   const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
   REQUIRE(domain.has_value());
   const std::vector<geom::FaceCut> cuts = {geom::FaceCut{ring}};
@@ -241,27 +241,27 @@ TEST_CASE("trim_face: a closed island splits into two fragments") {
   // other: the two rings keep opposite traversal and partition the chart.
   CHECK(a0 * a1 < 0.0);
   CHECK(std::fabs(a0) + std::fabs(a1) ==
-        doctest::Approx(2.0 * geom::kPi * geom::kPi).epsilon(1e-12));
+        doctest::Approx(2.0 * kPi * kPi).epsilon(1e-12));
   CHECK(std::min(std::fabs(a0), std::fabs(a1)) ==
-        doctest::Approx(geom::kPi * 0.04).epsilon(1e-9));
+        doctest::Approx(kPi * 0.04).epsilon(1e-9));
 }
 
 TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
   const geom::Brep torus = geom::make_torus(
       geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
       1e-12).value();
-  const geom::FaceId tf = geom::face_with_surface<geom::Torus3>(torus);
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
   std::vector<geom::Point2d> low;
   std::vector<geom::Point2d> high;
   for (int i = 0; i < 64; ++i) {
-    const double u = 2.0 * geom::kPi * i / 64.0;
+    const double u = 2.0 * kPi * i / 64.0;
     low.push_back(geom::Point2d{u, 0.6});
     high.push_back(geom::Point2d{u, 2.5});
   }
   low.push_back(low.front());
   high.push_back(high.front());
-  const geom::FaceUvProjection tp =
-      geom::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const geom::detail::FaceUvProjection tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
   const auto domain = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
   REQUIRE(domain.has_value());
   const std::vector<geom::FaceCut> cuts = {geom::FaceCut{low},
@@ -336,15 +336,15 @@ TEST_CASE("curved boolean: torus difference stays deferred") {
 TEST_CASE("trim_face: a stored hole is not dropped") {
   const geom::Brep sphere =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
-  const geom::FaceId sf = geom::face_with_surface<geom::Sphere3>(sphere);
-  const geom::FaceUvProjection sp =
-      geom::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
   const auto domain =
       geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
   REQUIRE(domain.has_value());
   std::vector<geom::Point2d> hole;
   for (int i = 0; i < 33; ++i) {
-    const double a = 2.0 * geom::kPi * i / 33.0;
+    const double a = 2.0 * kPi * i / 33.0;
     hole.push_back(geom::Point2d{1.0 + 0.2 * std::cos(a),
                                  0.3 + 0.2 * std::sin(a)});
   }
@@ -358,7 +358,7 @@ TEST_CASE("trim_face: a stored hole is not dropped") {
   // The material is the sphere minus the disk, so the only ring is the hole
   // boundary; it is traversed clockwise in uv (material outside, hole inner).
   const double area = geom::signed_area2(fragments->at(0).loops_uv[0]);
-  CHECK(area == doctest::Approx(-geom::kPi * 0.04).epsilon(1e-9));
+  CHECK(area == doctest::Approx(-kPi * 0.04).epsilon(1e-9));
 }
 ```
 
@@ -401,7 +401,7 @@ Assertion counts are pinned after the first green run; the plan's expected total
 - [ ] Every task has Files, Interfaces, RED test, and a commit boundary.
 - [ ] The deviations (closed cuts only, plane-only torus, hole-by-winding, ear-clip deferred) are called out and will be confirmed with the user before execution.
 - [ ] No placeholder or self-correction text.
-- [ ] Tests use existing helpers (`face_with_surface`, `make_sphere`, `make_torus`, `make_box`, `validate_topology`, `signed_area2`).
+- [ ] Tests use the existing test-local helpers (`face_with_surface`, `kPi`), `geom::detail::face_uv_projection`, `make_sphere`, `make_torus`, `make_box`, `validate_topology`, `signed_area2`.
 - [ ] The plan does not claim cone/apex/open-chain support.
 
 ## Execution
