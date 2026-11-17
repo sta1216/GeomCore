@@ -2082,6 +2082,125 @@ TEST_CASE("trim_face: overlapping islands do not partition the chart") {
         "split_face_curved: fragments do not partition the chart");
 }
 
+TEST_CASE("trim_face: a ring closing on the seam copies is a twisted crossing") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  // The ring starts on u = 0 and ends on u = 2*pi (the two copies of one seam
+  // point), and it also passes through the seam between them at another v. The
+  // closing segment lies on the seam itself, so the seam contributes a crossing
+  // at the tail's v; that crossing does not match the one in the middle.
+  const std::vector<geom::Point2d> ring = {
+      {0.0, 0.3}, {1.0, 0.5}, {3.0, 0.6},  {5.0, 0.4}, {6.1, 0.5},
+      {0.2, 0.1}, {1.0, 0.1}, {3.0, 0.2},  {5.0, 0.1}, {2.0 * kPi, 0.3}};
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(domain.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{ring}};
+  const auto fragments = geom::detail::trim_face_split_domain(
+      sf, sp, cuts, domain.value(), std::span<const std::vector<geom::Point2d>>{},
+      1e-12);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: closed cut crosses the seam at different "
+        "transverse coordinates; twisted seam crossings are deferred to "
+        "M3c-3c-4");
+}
+
+TEST_CASE("trim_face: stored holes are refused") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  std::vector<geom::Point2d> hole;
+  for (int i = 0; i < 33; ++i) {
+    const double a = 2.0 * kPi * i / 33.0;
+    hole.push_back(
+        geom::Point2d{1.0 + 0.2 * std::cos(a), 0.3 + 0.2 * std::sin(a)});
+  }
+  hole.push_back(hole.front());
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(domain.has_value());
+  // Stored holes need the same multi-cycle walking as nested cuts, so this
+  // entry point refuses them instead of silently ignoring them.
+  const std::vector<std::vector<geom::Point2d>> holes = {hole};
+  const auto fragments = geom::detail::trim_face_split_domain(
+      sf, sp, std::span<const geom::FaceCut>{}, domain.value(), holes, 1e-12);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: stored holes are not supported yet");
+}
+
+TEST_CASE("trim_face: nested islands are refused") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  std::vector<geom::Point2d> outer;
+  std::vector<geom::Point2d> inner;
+  for (int i = 0; i < 33; ++i) {
+    const double a = 2.0 * kPi * i / 33.0;
+    outer.push_back(
+        geom::Point2d{1.0 + 0.3 * std::cos(a), 0.3 + 0.3 * std::sin(a)});
+    inner.push_back(
+        geom::Point2d{1.0 + 0.1 * std::cos(a), 0.3 + 0.1 * std::sin(a)});
+  }
+  outer.push_back(outer.front());
+  inner.push_back(inner.front());
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(domain.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{outer},
+                                           geom::FaceCut{inner}};
+  // The inner ring is a hole of the region between the rings; one cycle per
+  // face cannot carry it, so the splitter refuses before returning fragments.
+  const auto fragments = geom::detail::trim_face_split_domain(
+      sf, sp, cuts, domain.value(), std::span<const std::vector<geom::Point2d>>{},
+      1e-12);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == geom::Errc::numeric_failure);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: nested closed cuts are not supported");
+}
+
+TEST_CASE("trim_face: an island inside a latitude cut is refused") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  // The latitude at v = 0.3 splits the chart; the island sits in the cap above
+  // it. The cap fragment would need the island ring as a hole.
+  std::vector<geom::Point2d> latitude;
+  for (int i = 0; i < 64; ++i) {
+    latitude.push_back(
+        geom::Point2d{2.0 * kPi * i / 64.0, 0.3});
+  }
+  latitude.push_back(latitude.front());
+  std::vector<geom::Point2d> island;
+  for (int i = 0; i < 33; ++i) {
+    const double a = 2.0 * kPi * i / 33.0;
+    island.push_back(
+        geom::Point2d{1.0 + 0.15 * std::cos(a), 1.0 + 0.15 * std::sin(a)});
+  }
+  island.push_back(island.front());
+  const geom::detail::FaceUvProjection sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(domain.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{latitude},
+                                           geom::FaceCut{island}};
+  const auto fragments = geom::detail::trim_face_split_domain(
+      sf, sp, cuts, domain.value(), std::span<const std::vector<geom::Point2d>>{},
+      1e-12);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == geom::Errc::numeric_failure);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: nested closed cuts are not supported");
+}
+
 TEST_CASE("trim face: seam run extraction wraps the cut tail") {
   // 1 marks a synthetic edge, 0 a cut edge. Edge 0 is the tail of the run that
   // wraps around the end of the cycle, so a non-wrapping walk would lose it.

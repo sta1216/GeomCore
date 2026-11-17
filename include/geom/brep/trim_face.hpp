@@ -1131,6 +1131,54 @@ inline int trim_face_domain_edge_side(const Point2d& a, const Point2d& b,
   return -1;
 }
 
+// True when the point lies strictly inside the closed planar ring, using the
+// even-odd rule on the exact orientation predicate. Boundary points are not
+// inside: a ring does not contain the vertices it shares with its complement
+// fragment, and the island keyhole reuses the island vertices exactly.
+inline bool trim_face_point_strictly_inside_ring(
+    const Point2d& point, const std::vector<Point2d>& ring) noexcept {
+  const std::size_t n = ring.size();
+  if (n < 3) return false;
+  bool inside = false;
+  for (std::size_t i = 0; i < n; ++i) {
+    const Point2d& a = ring[(i + n - 1) % n];
+    const Point2d& b = ring[i];
+    if (a[0] == b[0] && a[1] == b[1]) continue;
+    if ((a[1] > point[1]) == (b[1] > point[1])) continue;
+    const int side = sign_orient2d(a[0], a[1], b[0], b[1], point[0], point[1]);
+    if (side == 0) return false;
+    if ((side > 0) == (b[1] > a[1])) inside = !inside;
+  }
+  return inside;
+}
+
+// True when the two closed rings cross each other properly. Two rings that do
+// not cross are either disjoint or nested; crossing rings are the overlapping
+// islands case, which the area partition guard owns.
+inline bool trim_face_rings_cross(const std::vector<Point2d>& first,
+                                  const std::vector<Point2d>& second) noexcept {
+  const std::size_t n = first.size();
+  const std::size_t m = second.size();
+  for (std::size_t i = 1; i < n; ++i) {
+    for (std::size_t j = 1; j < m; ++j) {
+      const Point2d& a = first[i - 1];
+      const Point2d& b = first[i];
+      const Point2d& c = second[j - 1];
+      const Point2d& d = second[j];
+      if ((a[0] == b[0] && a[1] == b[1]) ||
+          (c[0] == d[0] && c[1] == d[1])) {
+        continue;
+      }
+      const int o1 = sign_orient2d(a[0], a[1], b[0], b[1], c[0], c[1]);
+      const int o2 = sign_orient2d(a[0], a[1], b[0], b[1], d[0], d[1]);
+      const int o3 = sign_orient2d(c[0], c[1], d[0], d[1], a[0], a[1]);
+      const int o4 = sign_orient2d(c[0], c[1], d[0], d[1], b[0], b[1]);
+      if (o1 * o2 < 0 && o3 * o4 < 0) return true;
+    }
+  }
+  return false;
+}
+
 // The transverse coordinates where a closed cut passes through one periodic
 // seam: the interpolated value at each u/v wrap, plus the value at any interior
 // vertex that lies exactly on the seam. A chain whose two ends are the seam
@@ -1189,8 +1237,24 @@ inline bool trim_face_closed_cut_twisted(const std::vector<Point2d>& points,
   for (int axis = 0; axis < 2; ++axis) {
     const bool periodic = axis == 0 ? domain.periodic_u : domain.periodic_v;
     if (!periodic) continue;
+    const int transverse = axis == 0 ? 1 : 0;
+    const double lo = domain.bounds[2 * axis];
+    const double hi = domain.bounds[2 * axis + 1];
     std::vector<double> crossings =
         trim_face_seam_crossings(points, domain, axis);
+    // A chain whose two ends are the two copies of this seam is closed by the
+    // seam itself: the closing segment runs along the seam, so it crosses at
+    // the tail's transverse coordinate even though no edge does. Without this
+    // crossing a ring that enters and leaves through the seam at different
+    // transverse coordinates would see fewer than two crossings and slip
+    // through to the arrangement, which then fails with an open-chain error.
+    if (trim_face_seam_only_seam_pair(points.front(), points.back(),
+                                      domain.bounds, domain.periodic_u,
+                                      domain.periodic_v) &&
+        (trim_face_seam_only_near_side(points.back()[axis], lo) ||
+         trim_face_seam_only_near_side(points.back()[axis], hi))) {
+      crossings.push_back(points.back()[transverse]);
+    }
     if (crossings.size() < 2) continue;
     if (crossings.size() % 2 != 0) return true;
     std::sort(crossings.begin(), crossings.end());
@@ -1215,7 +1279,11 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
     FaceId face, const FaceUvProjection& projection,
     std::span<const FaceCut> cuts, const TrimFaceDomain& domain,
     std::span<const std::vector<Point2d>> holes, double tolerance) {
-  (void)holes;
+  if (!holes.empty()) {
+    return Error{Errc::unsupported,
+                 "split_face_curved: stored holes are not supported yet",
+                 face.index(), 0u};
+  }
   const double u_lo = domain.bounds[0];
   const double u_hi = domain.bounds[1];
   const double v_lo = domain.bounds[2];
@@ -1402,6 +1470,25 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
       return Error{Errc::degenerate,
                    "split_face_curved: cut collapses to a point", face.index(),
                    static_cast<std::uint32_t>(c)};
+    }
+  }
+
+  // Nested closed islands are deferred: the arrangement keeps one cycle per
+  // face, so a fragment cannot carry the inner island as a hole and would
+  // instead claim its area. Nested rings do not cross, while overlapping
+  // islands (the case the partition guard below covers) do, so containment
+  // without a crossing is unambiguous nesting.
+  for (std::size_t a = 0; a < chains.size(); ++a) {
+    if (!chains[a].island) continue;
+    for (std::size_t b = 0; b < chains.size(); ++b) {
+      if (a == b || !chains[b].island) continue;
+      if (trim_face_rings_cross(chains[a].points, chains[b].points)) continue;
+      if (trim_face_point_strictly_inside_ring(chains[a].points.front(),
+                                               chains[b].points)) {
+        return Error{Errc::numeric_failure,
+                     "split_face_curved: nested closed cuts are not supported",
+                     face.index(), 0u};
+      }
     }
   }
 
@@ -1706,6 +1793,23 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
     if (std::fabs(covered - chart_area) > 1e-9 * chart_area) {
       return Error{Errc::numeric_failure,
                    "split_face_curved: fragments do not partition the chart",
+                   face.index(), 0u};
+    }
+  }
+
+  // An island next to another closed cut is a region with a hole: the fragment
+  // that owns the island would need the island ring as a second cycle, which the
+  // one-cycle-per-face extraction cannot produce. A planar containment test on
+  // the emitted rings cannot see this: a pole chart closes its ring with a chord
+  // from the last pole point back to the first rim point, so the ring polygon is
+  // not the chart region and the island's representative is not inside it.
+  // Refusing every mixed configuration is deterministic and covers exactly the
+  // cases that need the second cycle, nested or not.
+  if (!all_islands) {
+    for (const DomainChain& chain : chains) {
+      if (!chain.island) continue;
+      return Error{Errc::numeric_failure,
+                   "split_face_curved: nested closed cuts are not supported",
                    face.index(), 0u};
     }
   }
