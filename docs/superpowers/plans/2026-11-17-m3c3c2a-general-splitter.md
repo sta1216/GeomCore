@@ -204,7 +204,7 @@ Result<std::vector<CurvedFragment>> trim_face_split_domain(
   - `kCollapsed` run: replace the run by the single collapse point (pole) at the side's v.
   - `kRealBoundary` run: keep the run as ring geometry.
 - Preserve traversal direction; do not normalize a ring to CCW. The two faces of an interior island are visited separately and come out with opposite orientation.
-- If a face has no cut edge, skip it. If no fragment is produced, return `Errc::numeric_failure "split_face_curved: no fragments"` (never empty).
+- If a face has no cut edge and `holes` is empty, skip it. With holes and no cuts, emit one fragment whose ring is the hole boundary (traversed clockwise) — the seam sides are dropped. If no fragment is produced, return `Errc::numeric_failure "split_face_curved: no fragments"` (never empty).
 - Ring order and fragment order follow the existing `ring_key` rules.
 
 **Steps:**
@@ -223,16 +223,27 @@ TEST_CASE("trim_face: a closed island splits into two fragments") {
                                  0.3 + 0.2 * std::sin(a)});
   }
   ring.push_back(ring.front());
+  const geom::FaceUvProjection sp =
+      geom::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(domain.has_value());
   const std::vector<geom::FaceCut> cuts = {geom::FaceCut{ring}};
-  const auto fragments =
-      geom::detail::split_face_curved(sphere, sf, cuts, 1e-12);
+  const auto fragments = geom::detail::trim_face_split_domain(
+      sf, sp, cuts, *domain, std::span<const std::vector<geom::Point2d>>{},
+      1e-12);
   REQUIRE(fragments.has_value());
   REQUIRE(fragments->size() == 2u);
   CHECK(fragments->at(0).loops_uv.size() == 1u);
   CHECK(fragments->at(1).loops_uv.size() == 1u);
-  const double a0 = std::fabs(geom::signed_area2(fragments->at(0).loops_uv[0]));
-  const double a1 = std::fabs(geom::signed_area2(fragments->at(1).loops_uv[0]));
-  CHECK(a0 == doctest::Approx(a1).epsilon(1e-12));
+  const double a0 = geom::signed_area2(fragments->at(0).loops_uv[0]);
+  const double a1 = geom::signed_area2(fragments->at(1).loops_uv[0]);
+  // The island is material on one side and the rest of the sphere on the
+  // other: the two rings keep opposite traversal and partition the chart.
+  CHECK(a0 * a1 < 0.0);
+  CHECK(std::fabs(a0) + std::fabs(a1) ==
+        doctest::Approx(2.0 * geom::kPi * geom::kPi).epsilon(1e-12));
+  CHECK(std::min(std::fabs(a0), std::fabs(a1)) ==
+        doctest::Approx(geom::kPi * 0.04).epsilon(1e-9));
 }
 
 TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
@@ -249,10 +260,15 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
   }
   low.push_back(low.front());
   high.push_back(high.front());
+  const geom::FaceUvProjection tp =
+      geom::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(domain.has_value());
   const std::vector<geom::FaceCut> cuts = {geom::FaceCut{low},
                                            geom::FaceCut{high}};
-  const auto fragments =
-      geom::detail::split_face_curved(torus, tf, cuts, 1e-12);
+  const auto fragments = geom::detail::trim_face_split_domain(
+      tf, tp, cuts, *domain, std::span<const std::vector<geom::Point2d>>{},
+      1e-12);
   REQUIRE(fragments.has_value());
   REQUIRE(fragments->size() == 3u);
   CHECK(fragments->at(0).loops_uv.size() == 1u);
@@ -266,7 +282,7 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
 4. Rebuild and run `trim_face:*`, `curved boolean:*`, `tessellate: trimmed*`.
 5. Commit: `feat(m3c3c2a): split synthetic domains with closed cuts`.
 
-**Acceptance:** island → 2 fragments with equal areas and opposite orientation; torus → 3 fragments with ring sizes 66 / 66+66 / 66; no empty vector; existing sphere slit and band tests unchanged.
+**Acceptance:** island → 2 fragments whose rings have opposite orientation and whose absolute areas sum to the chart area `2π²` (the smaller is `0.04π`); torus → 3 fragments with ring counts 1 / 2 / 1; no empty vector; existing sphere slit and band tests unchanged.
 
 ## Task 3 — One domain decision, torus gate, stored holes
 
@@ -299,6 +315,22 @@ TEST_CASE("curved boolean: an offset torus plane splits both ways") {
   CHECK(geom::validate_topology(result->brep).ok());
   const auto shells = result->brep.solid_shells(result->brep.solid_ids().front());
   CHECK(shells.size() == 1u);
+}
+
+TEST_CASE("curved boolean: torus difference stays deferred") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-9).value();
+  const geom::Brep upper = geom::make_box(
+      geom::Point3d{-2.0, -2.0, 0.25}, geom::Point3d{2.0, 2.0, 2.0},
+      1e-9).value();
+  const auto result = geom::boolean_solid_curved(
+      torus, torus.solid_ids().front(), upper, upper.solid_ids().front(),
+      geom::SolidBooleanOp::difference);
+  // The B-side cap of a torus would need a flipped torus fragment, which the
+  // curved path still rejects; the failure must stay explicit.
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
 }
 
 TEST_CASE("trim_face: a stored hole is not dropped") {
@@ -337,7 +369,7 @@ The hole test calls the splitter-level API directly, so it needs no `SolidEditor
 4. Run `curved boolean:*`, `trim_face:*`, `*torus*`, `curved volume:*`; Debug/Release.
 5. Commit: `feat(m3c3c2a): route torus planes through the general splitter`.
 
-**Acceptance:** offset plane z=0.25 yields one valid shell (upper band) and its complement difference is valid; tilted 30° through the centre yields two half-tori of volume `2.467401100272339` each in the splitter-level test; holes are preserved; torus/torus still rejected with the M3c-2 message.
+**Acceptance:** offset plane z=0.25 yields one valid shell for intersection and union; torus difference stays explicitly `unsupported` until flipped torus fragments exist (M3c-3c-2b); holes are preserved; torus/torus still rejected with the M3c-2 message.
 
 ## Task 4 — QA-18a, ADR, benchmark, status
 
@@ -346,7 +378,7 @@ The hole test calls the splitter-level API directly, so it needs no `SolidEditor
 **QA-18a cases** (each: `validate_topology().ok()`, exactly one shell, closed by uses, V−E+F per shell, deterministic repeat; relative `1e-6`):
 
 1. Torus `R=1, r=0.5` intersected with box `z >= 0` → half torus, volume `2.467401100272339`, surface area `9.869604401089358`;
-2. Torus intersected with box whose plane is tilted 30° about x through the centre → half torus by central symmetry, same volume;
+2. Torus rotated 30° about x, intersected with the box `z >= 0` (a plane through the centre at 30° to the torus axis) → two fragments whose volumes are both in `(0, 4.934802200544679)` and sum to `4.934802200544679`; the halves are not asserted equal (a tilted plane is not a symmetry plane);
 3. Torus intersected with box `z >= 0.25` → upper band; assert volume in `(0, 4.934802200544679)`, plus `V-E+F = 2`, not an analytic half;
 4. Regression: sphere lens QA-17 row (37°) still exact.
 
