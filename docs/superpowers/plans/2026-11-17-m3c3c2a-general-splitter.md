@@ -292,9 +292,9 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
 **Changes:**
 
 - `split_face_curved` first calls `trim_face_domain`; if it returns a domain, route through `trim_face_split_domain` regardless of `loops.front()` area. Ordinary planar/cylinder faces keep the current path. This removes the torus "loop area 4π² so never synthetic" bug.
-- A synthetic-domain face with stored inner loops: each stored loop with `|signed_area2| > tolerance²` becomes an additional closed cut source with negative winding; fragments whose representative lies inside such a loop are dropped. Outer stored loops stay the face boundary.
+- A synthetic-domain face with stored inner loops is refused by `trim_face_split_domain` with `unsupported "split_face_curved: stored holes are not supported yet"`; `split_face_curved` forwards the stored loops only after that explicit stop.
 - `boolean_solid_curved`: remove the torus "cut plane must be perpendicular to or contain the axis" guard (and its helper); keep torus/torus and torus/curved rejection unchanged. Torus plane cuts now flow through the general splitter.
-- Replace the torus diagnostic tests that asserted `"torus cut plane must be..."` with acceptance tests for offset/tilted planes.
+- Replace the torus diagnostic tests that asserted `"torus cut plane must be..."` with acceptance tests for horizontal offset planes and an explicit rejection test for a tilted plane (its loop crosses the v seam at different transverse coordinates, so the splitter returns the twisted-crossing `unsupported`).
 
 **Steps:**
 
@@ -365,7 +365,7 @@ The hole test calls the splitter-level API directly, so it needs no `SolidEditor
 4. Run `curved boolean:*`, `trim_face:*`, `*torus*`, `curved volume:*`; Debug/Release.
 5. Commit: `feat(m3c3c2a): route torus planes through the general splitter`.
 
-**Acceptance:** offset plane z=0.25 yields one valid shell for intersection and union; torus difference stays explicitly `unsupported` until flipped torus fragments exist (M3c-3c-2b); stored holes stay explicitly `unsupported`; torus/torus still rejected with the M3c-2 message.
+**Acceptance:** horizontal offset plane z=0.25 yields one valid shell for intersection and union; a tilted plane is explicitly `unsupported` with the twisted-crossing message; torus difference stays explicitly `unsupported` until flipped torus fragments exist (M3c-3c-2b); stored holes stay explicitly `unsupported`; torus/torus still rejected with the M3c-2 message.
 
 ## Task 4 — QA-18a, ADR, benchmark, status
 
@@ -374,8 +374,8 @@ The hole test calls the splitter-level API directly, so it needs no `SolidEditor
 **QA-18a cases** (each: `validate_topology().ok()`, exactly one shell, closed by uses, V−E+F per shell, deterministic repeat; relative `1e-6`):
 
 1. Torus `R=1, r=0.5` intersected with box `z >= 0` → half torus, volume `2.467401100272339`, surface area `9.869604401089358`;
-2. Torus rotated 30° about x, intersected with the box `z >= 0` (a plane through the centre at 30° to the torus axis) → two fragments whose volumes are both in `(0, 4.934802200544679)` and sum to `4.934802200544679`; the halves are not asserted equal (a tilted plane is not a symmetry plane);
-3. Torus intersected with box `z >= 0.25` → upper band; assert volume in `(0, 4.934802200544679)`, plus `V-E+F = 2`, not an analytic half;
+2. Torus intersected with the box `z >= 0.25` → upper band; assert one shell, `V-E+F = 2`, closed by uses, and volume in `(0, 2.467401100272339)` (no analytic value for an offset plane);
+3. Torus intersected with the box `z <= -0.25` → lower band; assert one shell, `V-E+F = 2`, and volume equal to case 2 within `1e-9` relative (the torus is symmetric about z=0);
 4. Regression: sphere lens QA-17 row (37°) still exact.
 
 Assertion counts are pinned after the first green run; the plan's expected totals are updated then.
@@ -387,7 +387,7 @@ Assertion counts are pinned after the first green run; the plan's expected total
 ## Exit Criteria
 
 - `split_face_curved` handles sphere and torus closed cuts through one domain decision; no silent empty vector.
-- Torus plane booleans (offset and tilted) produce valid single-shell results; torus/torus still explicitly rejected.
+- Horizontal offset torus plane booleans produce valid single-shell results; tilted planes are explicitly rejected; torus/torus still explicitly rejected.
 - Stored holes are refused with a documented diagnostic, not silently dropped.
 - Debug and Release suites pass, zero warnings; M3c-3c-1/2/3a/3b QA rows unchanged.
 - ADR-0032, `docs/benchmarks/m3c3c2a.md`, §16.3 updated.
@@ -395,7 +395,7 @@ Assertion counts are pinned after the first green run; the plan's expected total
 ## Self-Check
 
 - [ ] Every task has Files, Interfaces, RED test, and a commit boundary.
-- [ ] The deviations (closed cuts only, plane-only torus, stored holes refused, nested/mixed closed cuts refused, ear-clip deferred) are called out and will be confirmed with the user before execution.
+- [ ] The deviations (closed cuts only, horizontal-plane torus, tilted/twisted crossings refused, stored holes refused, nested/mixed closed cuts refused, ear-clip deferred) are called out and will be confirmed with the user before execution.
 - [ ] No placeholder or self-correction text.
 - [ ] Tests use the existing test-local helpers (`face_with_surface`, `kPi`), `geom::detail::face_uv_projection`, `make_sphere`, `make_torus`, `make_box`, `validate_topology`, `signed_area2`.
 - [ ] The plan does not claim cone/apex/open-chain support.
