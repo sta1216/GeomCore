@@ -52,12 +52,12 @@ M3b-2 的 `boolean_solid_curved` 只接受 `Plane3`/`Cylinder3` 面：圆柱面�
   几何。偏移平行平面与倾斜平面留给 M3c-3。
 - **合成参数边界。** seam-only 面在切分前合成解析参数矩形（环为 `[0, 2π]²`，
   球为 `[0, 2π] × [-π/2, π/2]`），在合成域上走既有 arrangement；随后剥掉
-  落在合成矩形边上的链（`curved_boolean_chain_on_domain_side`，容差
+  落在合成矩形边上的链（`trim_face_chain_on_domain_side`，容差
   `max(64·tol, 1e-6·2π)`），闭合切链按 3D 端点恒等闭合。合成边不进入任何
   `CurvedFragment::loops`，装配只看到真实切线。
 - **v 图卡包装。** 环的 `face_uv_project_torus` 返回 `(−π, π]`，而域是
   `[0, 2π]`；切链先在每个周期轴上展开，再包装进 `[base, base + 2π)` 并在该轴
-  的缝合线处切分（`curved_boolean_window_chains`）。跨 `v = 0/2π` 的闭链因此
+  的缝合线处切分（`trim_face_window_chains`）。跨 `v = 0/2π` 的闭链因此
   不会留下 `2π` 跳变或开放端点。
 - **只支持缝合线锚定的闭合切链。** 开放切链返回
   `unsupported "split_face_curved: open cuts on a seam-only face"`；不接触缝合线

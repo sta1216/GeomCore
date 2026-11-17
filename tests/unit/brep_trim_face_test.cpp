@@ -2144,3 +2144,158 @@ TEST_CASE("trim_face: an interior dangling cut endpoint is rejected") {
         std::string_view("trim_face: cut chain ends inside the parameter "
                          "domain"));
 }
+
+TEST_CASE("trim_face: a closed chain without a seam crossing stays closed") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const auto tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(td.has_value());
+  std::vector<geom::Point2d> loop;
+  for (int i = 0; i <= 64; ++i) {
+    const double a = 2.0 * kPi * static_cast<double>(i) / 64.0;
+    loop.push_back(geom::Point2d{1.0 + 0.2 * std::cos(a),
+                                 1.0 + 0.2 * std::sin(a)});
+  }
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{loop}};
+  const auto chains =
+      geom::detail::trim_face_window_chains(cuts, td.value(), 1e-12);
+  REQUIRE(chains.has_value());
+  REQUIRE(chains.value().size() == 1u);
+  CHECK(geom::detail::trim_face_same_xy_rel(chains.value()[0].front(),
+                                            chains.value()[0].back()));
+}
+
+TEST_CASE("trim_face: a closed chain crossing the seam backwards is split") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const auto tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(td.has_value());
+  std::vector<geom::Point2d> loop;
+  for (int i = 0; i <= 64; ++i) {
+    const double u = 1.0 - 2.0 * kPi * static_cast<double>(i) / 64.0;
+    loop.push_back(geom::Point2d{u, 1.0});
+  }
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{loop}};
+  const auto chains =
+      geom::detail::trim_face_window_chains(cuts, td.value(), 1e-12);
+  REQUIRE(chains.has_value());
+  REQUIRE(chains.value().size() == 2u);
+  CHECK(chains.value()[0].back()[0] == doctest::Approx(0.0).epsilon(1e-12));
+  CHECK(chains.value()[1].front()[0] == doctest::Approx(2.0 * kPi).epsilon(1e-12));
+  CHECK(chains.value()[0].size() + chains.value()[1].size() >= 65u);
+}
+
+TEST_CASE("trim_face: windowing splits a chain at the periodic v seam") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const auto tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(td.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{
+      {geom::Point2d{1.0, 0.1}, geom::Point2d{1.0, 0.08},
+       geom::Point2d{1.0, 6.2}}}};
+  const auto chains =
+      geom::detail::trim_face_window_chains(cuts, td.value(), 1e-12);
+  REQUIRE(chains.has_value());
+  REQUIRE(chains.value().size() == 2u);
+  CHECK(chains.value()[0].back()[1] == doctest::Approx(0.0).epsilon(1e-12));
+  CHECK(chains.value()[1].front()[1] == doctest::Approx(2.0 * kPi).epsilon(1e-12));
+}
+
+TEST_CASE("trim_face: a chain along a domain side is accepted") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const auto tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(td.has_value());
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{
+      {geom::Point2d{0.0, 0.3}, geom::Point2d{0.0, 0.6}}}};
+  const auto chains =
+      geom::detail::trim_face_window_chains(cuts, td.value(), 1e-12);
+  REQUIRE(chains.has_value());
+  REQUIRE(chains.value().size() == 1u);
+  CHECK(chains.value()[0].size() == 2u);
+}
+
+TEST_CASE("trim_face: only sphere and torus have synthetic domains") {
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{0.0, 0.0, 0.0},
+                     geom::Point3d{1.0, 1.0, 1.0}, 1e-12).value();
+  const geom::FaceId pf = face_with_surface<geom::Plane3>(box);
+  const auto pp =
+      geom::detail::face_uv_projection(box, box.face(pf), 1e-12).value();
+  const auto domain = geom::detail::trim_face_domain(box, pf, pp, 1e-12);
+  REQUIRE_FALSE(domain.has_value());
+  CHECK(domain.error().code == geom::Errc::unsupported);
+  CHECK(domain.error().message ==
+        std::string_view("trim_face: no synthetic domain for this surface"));
+}
+
+TEST_CASE("trim_face: the sphere marks the second seam copy and the poles") {
+  const geom::Brep sphere =
+      geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
+  const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
+  const auto sp =
+      geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
+  const auto sd = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  REQUIRE(sd.has_value());
+  CHECK(sd.value().sides[1] == geom::detail::TrimSideKind::kSeamCopy);
+  CHECK(sd.value().collapsed_v());
+
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const auto tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(td.has_value());
+  CHECK(td.value().bounds[2] == 0.0);
+  CHECK(td.value().bounds[3] == doctest::Approx(2.0 * kPi));
+  CHECK_FALSE(td.value().collapsed_v());
+}
+
+TEST_CASE("trim_face: the windowing tolerance widens ring closure") {
+  const geom::Brep torus = geom::make_torus(
+      geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+      1e-12).value();
+  const geom::FaceId tf = face_with_surface<geom::Torus3>(torus);
+  const auto tp =
+      geom::detail::face_uv_projection(torus, torus.face(tf), 1e-12).value();
+  const auto td = geom::detail::trim_face_domain(torus, tf, tp, 1e-12);
+  REQUIRE(td.has_value());
+  std::vector<geom::Point2d> loop;
+  for (int i = 0; i <= 32; ++i) {
+    const double a = 2.0 * kPi * static_cast<double>(i) / 32.0;
+    loop.push_back(geom::Point2d{1.0 + 0.2 * std::cos(a),
+                                 1.0 + 0.2 * std::sin(a)});
+  }
+  loop.back() = geom::Point2d{loop.front()[0] + 5e-10,
+                              loop.front()[1] - 5e-10};
+  const std::vector<geom::FaceCut> cuts = {geom::FaceCut{loop}};
+  const auto wide =
+      geom::detail::trim_face_window_chains(cuts, td.value(), 1e-9);
+  REQUIRE(wide.has_value());
+  REQUIRE(wide.value().size() == 1u);
+  CHECK(geom::detail::trim_face_same_xy_rel(wide.value()[0].front(),
+                                            wide.value()[0].back(), 1e-9));
+
+  const auto narrow =
+      geom::detail::trim_face_window_chains(cuts, td.value(), 1e-12);
+  REQUIRE_FALSE(narrow.has_value());
+  CHECK(narrow.error().code == geom::Errc::unsupported);
+}

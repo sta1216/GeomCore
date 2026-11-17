@@ -54,6 +54,13 @@ struct TrimFaceDomain {
 // Only the synthetic-domain surfaces of this milestone are described: a sphere
 // is periodic in u and collapses at both poles, a torus is periodic on both
 // axes. Every other surface is not a synthetic domain yet.
+//
+// Precondition: the caller has already established that the face is a
+// synthetic-domain face (its stored loop is the seam copy or the full
+// rectangle). This function only inspects the surface: it does not look at the
+// face loops, so a genuinely trimmed sphere would receive the full rectangle
+// as well. The projection and tolerance parameters are reserved for that
+// loop-level validation in the caller.
 inline Result<TrimFaceDomain> trim_face_domain(const Brep& brep, FaceId face,
                                                const FaceUvProjection& projection,
                                                double tolerance) {
@@ -122,27 +129,35 @@ inline double trim_face_wrap_periodic(double value, double base,
 
 // True when the value lies within the standard relative parameter bound of one
 // domain side value.
-inline bool trim_face_near_side(double value, double side) noexcept {
+inline bool trim_face_near_side(double value, double side,
+                                double tolerance = 1e-12) noexcept {
   return std::fabs(value - side) <=
-         1e-12 * std::max({1.0, std::fabs(value), std::fabs(side)});
+         std::max(tolerance, 1e-12 * std::max({1.0, std::fabs(value),
+                                               std::fabs(side)}));
 }
 
 // True when either endpoint of the two parameter copies names the same physical
 // point within the relative bound.
-inline bool trim_face_same_xy_rel(const Point2d& a, const Point2d& b) noexcept {
-  return std::fabs(a[0] - b[0]) <=
-             1e-12 * std::max({1.0, std::fabs(a[0]), std::fabs(b[0])}) &&
-         std::fabs(a[1] - b[1]) <=
-             1e-12 * std::max({1.0, std::fabs(a[1]), std::fabs(b[1])});
+inline bool trim_face_same_xy_rel(const Point2d& a, const Point2d& b,
+                                  double tolerance = 1e-12) noexcept {
+  const double bound_x =
+      std::max(tolerance, 1e-12 * std::max({1.0, std::fabs(a[0]),
+                                            std::fabs(b[0])}));
+  const double bound_y =
+      std::max(tolerance, 1e-12 * std::max({1.0, std::fabs(a[1]),
+                                            std::fabs(b[1])}));
+  return std::fabs(a[0] - b[0]) <= bound_x &&
+         std::fabs(a[1] - b[1]) <= bound_y;
 }
 
 // True when the point sits on any of the four domain sides.
 inline bool trim_face_point_on_domain_side(const Point2d& point,
-                                           const TrimFaceDomain& domain) noexcept {
-  return trim_face_near_side(point[0], domain.bounds[0]) ||
-         trim_face_near_side(point[0], domain.bounds[1]) ||
-         trim_face_near_side(point[1], domain.bounds[2]) ||
-         trim_face_near_side(point[1], domain.bounds[3]);
+                                           const TrimFaceDomain& domain,
+                                           double tolerance = 1e-12) noexcept {
+  return trim_face_near_side(point[0], domain.bounds[0], tolerance) ||
+         trim_face_near_side(point[0], domain.bounds[1], tolerance) ||
+         trim_face_near_side(point[1], domain.bounds[2], tolerance) ||
+         trim_face_near_side(point[1], domain.bounds[3], tolerance);
 }
 
 // Drops the points that only duplicate their predecessor: a segment shorter
@@ -184,6 +199,28 @@ inline void trim_face_unwrap_axis(std::vector<Point2d>& points, int axis,
   }
 }
 
+// The traversal direction of a chain along one axis, judged from its short
+// steps: +1 when the chain mostly increases, -1 when it mostly decreases. Steps
+// longer than half a period are the seam crossings themselves and are ignored,
+// so a chain dominated by one direction is not mistaken for a wrap. When every
+// step is long (a two-point chain), assume a forward traversal; the caller can
+// still disambiguate by ordering the points.
+inline int trim_face_dominant_step_sign(const std::vector<Point2d>& points,
+                                        int axis, double half) noexcept {
+  std::size_t forward = 0;
+  std::size_t backward = 0;
+  for (std::size_t i = 1; i < points.size(); ++i) {
+    const double delta = points[i][axis] - points[i - 1][axis];
+    if (std::fabs(delta) > half) continue;
+    if (delta > 0.0) {
+      ++forward;
+    } else if (delta < 0.0) {
+      ++backward;
+    }
+  }
+  return backward > forward ? -1 : 1;
+}
+
 // Splits a chain whose values on `axis` are wrapped into [base, base + period)
 // where it steps across the periodic seam, inserting the seam point itself so
 // both new ends land exactly on the seam edge they cross. A step from the high
@@ -191,9 +228,12 @@ inline void trim_face_unwrap_axis(std::vector<Point2d>& points, int axis,
 // low to high is only split when `split_backward` is set: without it, the step
 // is treated as part of the polyline inside the window, which is what the
 // synthetic-domain splitter expects from a cut that is already windowed.
+// When `dominant_sign` is +1 or -1 the split is direction-aware: only steps
+// that wrap against the chain's dominant traversal direction are split, so a
+// long step that stays inside the window is not mistaken for a seam crossing.
 inline std::vector<std::vector<Point2d>> trim_face_split_at_seam(
     const std::vector<Point2d>& points, int axis, double base, double high,
-    double tolerance, bool split_backward) {
+    double tolerance, bool split_backward, int dominant_sign = 0) {
   const double period = high - base;
   const double half = 0.5 * period;
   const int other = 1 - axis;
@@ -235,7 +275,14 @@ inline std::vector<std::vector<Point2d>> trim_face_split_at_seam(
     // The step wraps across the seam: `rising` marks a jump from the high seam
     // edge down to the low one.
     const bool rising = delta < 0.0;
-    if (!rising && !split_backward) {
+    if (dominant_sign != 0) {
+      // A forward chain wraps high->low; a backward chain wraps low->high.
+      const bool crossing = dominant_sign > 0 ? rising : !rising;
+      if (!crossing) {
+        current.push_back(point);
+        continue;
+      }
+    } else if (!rising && !split_backward) {
       current.push_back(point);
       continue;
     }
@@ -261,7 +308,7 @@ inline std::vector<std::vector<Point2d>> trim_face_split_at_seam(
 // open ends exactly on a seam edge.
 inline std::vector<std::vector<Point2d>> trim_face_window_polyline(
     const std::vector<Point2d>& chain, const TrimFaceDomain& domain,
-    double tolerance, bool split_backward) {
+    double tolerance, bool split_backward, bool directional = false) {
   std::vector<std::vector<Point2d>> pieces{chain};
   for (int axis = 0; axis < 2; ++axis) {
     const bool periodic = axis == 0 ? domain.periodic_u : domain.periodic_v;
@@ -277,9 +324,13 @@ inline std::vector<std::vector<Point2d>> trim_face_window_polyline(
       for (Point2d& point : wrapped) {
         point[axis] = trim_face_wrap_periodic(point[axis], base, high - base);
       }
+      const int dominant = directional
+                               ? trim_face_dominant_step_sign(
+                                     wrapped, axis, 0.5 * (high - base))
+                               : 0;
       for (std::vector<Point2d>& run :
            trim_face_split_at_seam(wrapped, axis, base, high, tolerance,
-                                   split_backward)) {
+                                   split_backward, dominant)) {
         split.push_back(std::move(run));
       }
     }
@@ -339,12 +390,12 @@ inline Result<std::vector<std::vector<Point2d>>> trim_face_window_chains(
       return Error{Errc::invalid_topology,
                    "trim_face: a cut has fewer than two points"};
     }
-    for (std::vector<Point2d>& piece :
-         trim_face_window_polyline(points, domain, tolerance, false)) {
+    for (std::vector<Point2d>& piece : trim_face_window_polyline(
+             points, domain, tolerance, false, true)) {
       if (piece.size() < 2) continue;
-      if (!trim_face_same_xy_rel(piece.front(), piece.back()) &&
-          !trim_face_point_on_domain_side(piece.front(), domain) &&
-          !trim_face_point_on_domain_side(piece.back(), domain)) {
+      if (!trim_face_same_xy_rel(piece.front(), piece.back(), tolerance) &&
+          !trim_face_point_on_domain_side(piece.front(), domain, tolerance) &&
+          !trim_face_point_on_domain_side(piece.back(), domain, tolerance)) {
         return Error{Errc::unsupported,
                      "trim_face: cut chain ends inside the parameter domain"};
       }

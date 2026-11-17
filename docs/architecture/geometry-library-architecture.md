@@ -1274,12 +1274,12 @@ ADR-0028，实测见 `docs/benchmarks/m3c2.md`）。
 
 圆环面是单条缝合线环围成的闭曲面，uv 环面积为零；M3c-2 先对 seam-only 面合成
 解析参数矩形（环为 `[0, 2π]²`），在合成域上跑既有 arrangement，再剥掉落在合成
-矩形边上的链（`curved_boolean_chain_on_domain_side`，容差
+矩形边上的链（`trim_face_chain_on_domain_side`，容差
 `max(64·tol, 1e-6·2π)`）；闭链按 3D 端点恒等闭合，因此合成边不进入任何
 `CurvedFragment::loops`。切链只接受**经过缝合线的闭环**：开放链返回
 `"split_face_curved: open cuts on a seam-only face"`，不接触缝合线的内部闭环
 返回 `"closed cut crosses the seam twice"`。环的 `v` 图卡从 `(-π, π]` 包装进
-`[0, 2π]` 并在该轴缝合线处切分（`curved_boolean_window_chains`），跨
+`[0, 2π]` 并在该轴缝合线处切分（`trim_face_window_chains`），跨
 `v = 0/2π` 的切链不会留下 `2π` 跳变。
 
 环面切平面受限制：必须垂直于环轴（归一化后 `|n·axis|` 在 8 ulp 内为 1）或

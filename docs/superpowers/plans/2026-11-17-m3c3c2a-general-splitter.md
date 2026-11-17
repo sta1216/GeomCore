@@ -171,10 +171,11 @@ TEST_CASE("trim_face: an interior dangling cut endpoint is rejected") {
 
 2. Run: `.\build\tests\Debug\geom_tests.exe --test-case="trim_face:*"` — expect compile failure (missing header).
 3. Implement the descriptor and windowing by moving the seam helpers from `boolean_solid_curved.hpp`; keep the old helper names as `inline` aliases only if a caller outside this plan uses them (grep first). Windowing preserves point order and inserts the seam point exactly at `u_lo`/`u_hi`.
-4. Rebuild Debug/Release and run the three cases plus `curved boolean:*`.
+3b. Seam splitting must be direction-aware: a chain dominated by decreasing u still has to split when it wraps from the low side to the high side, while a long step that stays inside the window must not be split. `trim_face_dominant_step_sign` derives the traversal direction from the short steps, and `trim_face_split_at_seam(..., dominant_sign)` only splits wraps against it. Closure and side tests use `max(tolerance, 1e-12 * scale)` so a documented tolerance is honoured.
+4. Rebuild Debug/Release and run the cases below plus `curved boolean:*`.
 5. Commit: `feat(m3c3c2a): describe synthetic domains and window cut chains`.
 
-**Acceptance:** all three cases pass; no existing test changes; counts increase by 3 cases / 27 assertions.
+**Acceptance:** the descriptor, windowing, direction, tolerance and rejection cases pass; no existing test changes; counts increase by 7 cases / roughly 40 assertions. The committed cases pin: sphere/torus domain values, forward seam split, backward (decreasing) seam split, periodic-v split, closed chain preservation, side chain acceptance, unsupported surface, tolerance-widened closure, and the interior dangling-endpoint rejection.
 
 ## Task 2 — Arrangement splitter for closed cuts on a synthetic domain
 
