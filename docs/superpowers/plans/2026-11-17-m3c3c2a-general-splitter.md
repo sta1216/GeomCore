@@ -2,11 +2,11 @@
 
 ## Goal
 
-Replace the seam-only special case in `split_face_curved` with one synthetic-domain splitter that works whenever a curved face's uv chart is a parameter rectangle with seam copies and collapsed sides. This milestone covers **closed cuts** on sphere and torus charts, preserves stored holes, fixes the torus silent-empty-success bug, and makes offset/tilted **plane** cuts of a torus produce valid boolean results. Cone apex and open cut chains are deliberately left for M3c-3c-2b.
+Replace the seam-only special case in `split_face_curved` with one synthetic-domain splitter that works whenever a curved face's uv chart is a parameter rectangle with seam copies and collapsed sides. This milestone covers **closed cuts** on sphere and torus charts, refuses stored holes explicitly, fixes the torus silent-empty-success bug, and makes offset/tilted **plane** cuts of a torus produce valid boolean results. Cone apex and open cut chains are deliberately left for M3c-3c-2b.
 
 ## Architecture
 
-The splitter stops deciding "is this a seam-only face?" from the area of `loops.front()`. Instead a domain decision function classifies each of the four uv rectangle sides as `kSeamCopy`, `kCollapsed`, or `kRealBoundary`, and the same decision is shared by `split_face_curved` and `boolean_solid_curved`. Cut chains are windowed onto the periodic domain once, then fed to the existing `split_segments` + `Arrangement2` machinery. Material faces are extracted from the arrangement; runs along seam copies are dropped, runs along collapsed sides collapse to the single physical point, runs along real boundaries stay as geometry. Stored inner loops are additional winding sources so a face that already has a hole keeps it.
+The splitter stops deciding "is this a seam-only face?" from the area of `loops.front()`. Instead a domain decision function classifies each of the four uv rectangle sides as `kSeamCopy`, `kCollapsed`, or `kRealBoundary`, and the same decision is shared by `split_face_curved` and `boolean_solid_curved`. Cut chains are windowed onto the periodic domain once, then fed to the existing `split_segments` + `Arrangement2` machinery. Material faces are extracted from the arrangement; runs along seam copies are dropped, runs along collapsed sides collapse to the single physical point, runs along real boundaries stay as geometry. A face that already carries stored inner loops is refused with a documented diagnostic: the arrangement exposes one cycle per face, so hole preservation needs multi-cycle walking and is deferred to M3c-3c-4.
 
 ## Tech Stack
 
@@ -32,7 +32,7 @@ C++20; CMake 4.4.4 + VS2022 MSVC 19.44 (`/W4 /WX /utf-8`); doctest 2.4.11; exist
 
 1. **Closed cuts only.** Open chains (seam→pole, base rim→apex) and the cone apex are M3c-3c-2b. This milestone rejects an open chain with the existing message `"split_face_curved: open cuts on a seam-only face"` unless a task says otherwise.
 2. **Torus operands remain plane-cut only.** Torus/torus and torus/other-curved operands stay rejected with the M3c-2 message. The old "perpendicular to or containing the axis" guard is removed, but a plane whose intersection loop crosses the v seam at two different u values (a *twisted* seam crossing, e.g. a vertical plane x=0) returns `unsupported "split_face_curved: closed cut crosses the seam at different transverse coordinates; twisted seam crossings are deferred to M3c-3c-4"`. Horizontal offset planes (loop wraps u at constant v) and any non-twisted loop are supported. Twisted crossings need chart re-origining, which is out of scope here.
-3. **Holes are preserved through stored-loop winding**, not through a general multi-face trimming engine: a synthetic-domain face may carry `loops_uv` inner rings; the splitter adds them as winding sources and drops fragments inside a hole.
+3. **Stored holes are refused, not silently dropped.** A synthetic-domain face carrying `loops_uv` inner rings stops with `unsupported "split_face_curved: stored holes are not supported yet"`. Preserving them needs every boundary cycle of an arrangement face, which is deferred to M3c-3c-4 together with the ear-clip cost.
 4. **Ear-clipping cost is not fixed here.** 4096-point rims still cost ~3.7 s per `triangulate_polygon2`; QA-18a asserts structure plus analytic/partial volumes rather than paying that cost inside the suite. The cost fix is a separate follow-up.
 
 ## Review Focus
@@ -48,9 +48,9 @@ C++20; CMake 4.4.4 + VS2022 MSVC 19.44 (`/W4 /WX /utf-8`); doctest 2.4.11; exist
 | Path | Purpose |
 | --- | --- |
 | `include/geom/brep/trim_domain.hpp` (new) | `TrimSideKind`, `TrimFaceDomain`, `trim_face_domain`, `trim_face_window_chains`; seam windowing helpers moved out of `boolean_solid_curved.hpp` |
-| `include/geom/brep/trim_face.hpp` | `trim_face_split_domain`; `trim_face_split_seam_only` becomes a wrapper; dispatch by domain, hole winding |
+| `include/geom/brep/trim_face.hpp` | `trim_face_split_domain`; `trim_face_split_seam_only` becomes a wrapper; dispatch by domain; non-empty holes refused |
 | `include/geom/brep/boolean_solid_curved.hpp` | include `trim_domain.hpp`, delete duplicated static helpers, torus gate relaxation |
-| `tests/unit/brep_trim_face_test.cpp` | domain/windowing/splitter/hole tests |
+| `tests/unit/brep_trim_face_test.cpp` | domain/windowing/splitter tests (hole refusal, not preservation) |
 | `tests/unit/brep_boolean_curved_test.cpp` | torus offset/tilted plane e2e and gate-message updates |
 | `tests/unit/curved_boolean_qa18_test.cpp` (new) | QA-18a torus corpus |
 | `docs/adr/0032-general-domain-splitter.md`, `docs/benchmarks/m3c3c2a.md`, architecture §16.3 | decisions and measurements |
@@ -192,7 +192,7 @@ Result<std::vector<CurvedFragment>> trim_face_split_domain(
 }
 ```
 
-`holes` are stored inner uv rings (the face's material excludes their interiors); Task 2 passes an empty span, Task 3 fills it from `face_loops_uv`.
+`holes` are stored inner uv rings; a non-empty span is refused with `unsupported "split_face_curved: stored holes are not supported yet"` — preserving them is M3c-3c-4.
 
 `trim_face_split_seam_only` keeps its signature and delegates: build the sphere domain, window, split. Existing sphere-slit callers see the same fragments.
 
@@ -205,7 +205,7 @@ Result<std::vector<CurvedFragment>> trim_face_split_domain(
   - `kCollapsed` run: replace the run by the single collapse point (pole) at the side's v.
   - `kRealBoundary` run: keep the run as ring geometry.
 - Preserve traversal direction; do not normalize a ring to CCW. The two faces of an interior island are visited separately and come out with opposite orientation.
-- If a face has no cut edge and `holes` is empty, skip it. With holes and no cuts, emit one fragment whose ring is the hole boundary (traversed clockwise) — the seam sides are dropped. If no fragment is produced, return `Errc::numeric_failure "split_face_curved: no fragments"` (never empty).
+- A non-empty `holes` span is refused before any arrangement work. Otherwise, if no fragment is produced, return `Errc::numeric_failure "split_face_curved: no fragments"` (never empty).
 - Ring order and fragment order follow the existing `ring_key` rules.
 
 **Steps:**
@@ -285,7 +285,7 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
 
 **Acceptance:** interior island → 2 fragments whose rings have opposite orientation and whose absolute areas sum to the chart area `2π²` (the smaller is the exact 33-gon area `0.12490582127787074`); torus two latitudes → 3 fragments with ring counts 1 / 2 / 1 (this test is structure-only: the old u-unwrap already accepted it, so it is not RED); a u-seam island with two different transverse crossings → the twisted-crossing `unsupported`; two overlapping islands → `numeric_failure "split_face_curved: fragments do not partition the chart"`; fragment order asserted explicitly; no empty vector; existing sphere slit and band tests unchanged.
 
-## Task 3 — One domain decision, torus gate, stored holes
+## Task 3 — One domain decision, torus gate
 
 **Files:** `include/geom/brep/trim_face.hpp` (dispatch), `include/geom/brep/boolean_solid_curved.hpp` (gate + include), `tests/unit/brep_trim_face_test.cpp`, `tests/unit/brep_boolean_curved_test.cpp`.
 
@@ -334,14 +334,13 @@ TEST_CASE("curved boolean: torus difference stays deferred") {
   CHECK(result.error().code == geom::Errc::unsupported);
 }
 
-TEST_CASE("trim_face: a stored hole is not dropped") {
+TEST_CASE("trim_face: a stored hole is refused") {
   const geom::Brep sphere =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
   const geom::FaceId sf = face_with_surface<geom::Sphere3>(sphere);
   const geom::detail::FaceUvProjection sp =
       geom::detail::face_uv_projection(sphere, sphere.face(sf), 1e-12).value();
-  const auto domain =
-      geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
+  const auto domain = geom::detail::trim_face_domain(sphere, sf, sp, 1e-12);
   REQUIRE(domain.has_value());
   std::vector<geom::Point2d> hole;
   for (int i = 0; i < 33; ++i) {
@@ -353,24 +352,20 @@ TEST_CASE("trim_face: a stored hole is not dropped") {
   const std::vector<std::vector<geom::Point2d>> holes = {hole};
   const auto fragments = geom::detail::trim_face_split_domain(
       sf, sp, std::span<const geom::FaceCut>{}, *domain, holes, 1e-12);
-  REQUIRE(fragments.has_value());
-  REQUIRE(fragments->size() == 1u);
-  CHECK(fragments->at(0).loops_uv.size() == 1u);
-  // The material is the sphere minus the disk, so the only ring is the hole
-  // boundary; it is traversed clockwise in uv (material outside, hole inner).
-  const double area = geom::signed_area2(fragments->at(0).loops_uv[0]);
-  CHECK(area == doctest::Approx(-kPi * 0.04).epsilon(1e-9));
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == geom::Errc::unsupported);
+  CHECK(std::string(fragments.error().message).find("stored holes") !=
+        std::string::npos);
 }
-```
 
-The hole test calls the splitter-level API directly, so it needs no `SolidEditor` fixture. The production path feeds `holes` from `face_loops_uv` inner rings (Task 3).
+The hole test calls the splitter-level API directly, so it needs no `SolidEditor` fixture. Task 3 keeps the refusal: `split_face_curved` ignores stored inner loops only after this explicit stop.
 
-2. Run; expect the torus case to fail at the old guard message and the hole case to keep the island (wrong).
-3. Implement dispatch, hole sources, gate removal. Update the torus diagnostic tests (currently expecting `"torus cut plane must be perpendicular..."` and `"torus/torus..."`); keep torus/torus rejection tests.
+2. Run; expect the torus case to fail at the old guard message and the hole case to fail with the refusal message (wrong before the change).
+3. Implement dispatch and gate removal; do not implement hole preservation. Update the torus diagnostic tests (currently expecting `"torus cut plane must be perpendicular..."` and `"torus/torus..."`); keep torus/torus rejection tests.
 4. Run `curved boolean:*`, `trim_face:*`, `*torus*`, `curved volume:*`; Debug/Release.
 5. Commit: `feat(m3c3c2a): route torus planes through the general splitter`.
 
-**Acceptance:** offset plane z=0.25 yields one valid shell for intersection and union; torus difference stays explicitly `unsupported` until flipped torus fragments exist (M3c-3c-2b); holes are preserved; torus/torus still rejected with the M3c-2 message.
+**Acceptance:** offset plane z=0.25 yields one valid shell for intersection and union; torus difference stays explicitly `unsupported` until flipped torus fragments exist (M3c-3c-2b); stored holes stay explicitly `unsupported`; torus/torus still rejected with the M3c-2 message.
 
 ## Task 4 — QA-18a, ADR, benchmark, status
 
@@ -385,7 +380,7 @@ The hole test calls the splitter-level API directly, so it needs no `SolidEditor
 
 Assertion counts are pinned after the first green run; the plan's expected totals are updated then.
 
-**Steps:** write the RED tests (they fail on the current guard/messages), implement only the fixture wiring, run Debug and Release, record wall times, write ADR-0032 (decisions: descriptor, seam windowing, orientation preservation, holes via winding, torus gate scope, deferred open chains/cone), benchmark page, §16.3 entry, then commit `docs(m3c3c2a): record QA-18a and the general splitter limits`.
+**Steps:** write the RED tests (they fail on the current guard/messages), implement only the fixture wiring, run Debug and Release, record wall times, write ADR-0032 (decisions: descriptor, seam windowing, orientation preservation, stored-hole refusal, torus gate scope, deferred open chains/cone), benchmark page, §16.3 entry, then commit `docs(m3c3c2a): record QA-18a and the general splitter limits`.
 
 **Acceptance:** QA-18a green; ADR states the closed-cut-only and plane-only limits; benchmark records medians; §16.3 says M3c-3c-2a complete, 3c-2b/3/4 open.
 
@@ -393,14 +388,14 @@ Assertion counts are pinned after the first green run; the plan's expected total
 
 - `split_face_curved` handles sphere and torus closed cuts through one domain decision; no silent empty vector.
 - Torus plane booleans (offset and tilted) produce valid single-shell results; torus/torus still explicitly rejected.
-- Stored holes survive a synthetic-domain split.
+- Stored holes are refused with a documented diagnostic, not silently dropped.
 - Debug and Release suites pass, zero warnings; M3c-3c-1/2/3a/3b QA rows unchanged.
 - ADR-0032, `docs/benchmarks/m3c3c2a.md`, §16.3 updated.
 
 ## Self-Check
 
 - [ ] Every task has Files, Interfaces, RED test, and a commit boundary.
-- [ ] The deviations (closed cuts only, plane-only torus, hole-by-winding, ear-clip deferred) are called out and will be confirmed with the user before execution.
+- [ ] The deviations (closed cuts only, plane-only torus, stored holes refused, nested/mixed closed cuts refused, ear-clip deferred) are called out and will be confirmed with the user before execution.
 - [ ] No placeholder or self-correction text.
 - [ ] Tests use the existing test-local helpers (`face_with_surface`, `kPi`), `geom::detail::face_uv_projection`, `make_sphere`, `make_torus`, `make_box`, `validate_topology`, `signed_area2`.
 - [ ] The plan does not claim cone/apex/open-chain support.
