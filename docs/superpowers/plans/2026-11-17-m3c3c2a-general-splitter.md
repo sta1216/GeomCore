@@ -31,7 +31,7 @@ C++20; CMake 4.4.4 + VS2022 MSVC 19.44 (`/W4 /WX /utf-8`); doctest 2.4.11; exist
 ## Scope and Deviations (need approval)
 
 1. **Closed cuts only.** Open chains (seam→pole, base rim→apex) and the cone apex are M3c-3c-2b. This milestone rejects an open chain with the existing message `"split_face_curved: open cuts on a seam-only face"` unless a task says otherwise.
-2. **Torus operands remain plane-cut only.** Torus/torus and torus/other-curved operands stay rejected with the M3c-2 message. Offset/tilted planes become supported; the old "perpendicular to or containing the axis" guard is removed.
+2. **Torus operands remain plane-cut only.** Torus/torus and torus/other-curved operands stay rejected with the M3c-2 message. The old "perpendicular to or containing the axis" guard is removed, but a plane whose intersection loop crosses the v seam at two different u values (a *twisted* seam crossing, e.g. a vertical plane x=0) returns `unsupported "split_face_curved: closed cut crosses the seam at different transverse coordinates; twisted seam crossings are deferred to M3c-3c-4"`. Horizontal offset planes (loop wraps u at constant v) and any non-twisted loop are supported. Twisted crossings need chart re-origining, which is out of scope here.
 3. **Holes are preserved through stored-loop winding**, not through a general multi-face trimming engine: a synthetic-domain face may carry `loops_uv` inner rings; the splitter adds them as winding sources and drops fragments inside a hole.
 4. **Ear-clipping cost is not fixed here.** 4096-point rims still cost ~3.7 s per `triangulate_polygon2`; QA-18a asserts structure plus analytic/partial volumes rather than paying that cost inside the suite. The cost fix is a separate follow-up.
 
@@ -199,7 +199,7 @@ Result<std::vector<CurvedFragment>> trim_face_split_domain(
 **Algorithm decisions:**
 
 - Build the four synthetic sides from the domain; each side carries a `TrimSideKind` index so a cycle edge can be classified without geometric tests.
-- Window every cut chain first (Task 1). Closed chains become one source each; a chain that crossed the seam was split into two open chains ending on the seam sides, and the two pieces are joined into one source through the seam column, preserving order.
+- Window every cut chain first (Task 1). Closed chains become one source each. A chain that crosses the seam is split into pieces ending on the seam sides; the pieces are joined only when every junction pairs the two seam copies at the **same** transverse coordinate (`v` for a `u` seam, `u` for a `v` seam), because that is the only case where translating the tail by one period leaves the shoelace area unchanged. A closed cut whose two seam crossings have different transverse coordinates is refused with `unsupported "split_face_curved: closed cut crosses the seam at different transverse coordinates; twisted seam crossings are deferred to M3c-3c-4"` instead of producing a chord or a wrong ring. After the fragments are emitted, verify that their absolute uv areas sum to the chart area within `1e-9 * chart_area`; otherwise return `numeric_failure "split_face_curved: fragments do not partition the chart"` (this is the overlapping-island guard).
 - Run `split_segments` + `Arrangement2` exactly as today. For each bounded face with `winding(f, 0) != 0` (source 0 = synthetic sides), split its cycle into runs:
   - `kSeamCopy` run: drop it; the ring is closed through the seam pair when the run's neighbours are cut runs on opposite sides.
   - `kCollapsed` run: replace the run by the single collapse point (pole) at the side's v.
@@ -283,7 +283,7 @@ TEST_CASE("trim_face: torus latitudes split without the loop-area gate") {
 4. Rebuild and run `trim_face:*`, `curved boolean:*`, `tessellate: trimmed*`.
 5. Commit: `feat(m3c3c2a): split synthetic domains with closed cuts`.
 
-**Acceptance:** island → 2 fragments whose rings have opposite orientation and whose absolute areas sum to the chart area `2π²` (the smaller is `0.04π`); torus → 3 fragments with ring counts 1 / 2 / 1; no empty vector; existing sphere slit and band tests unchanged.
+**Acceptance:** interior island → 2 fragments whose rings have opposite orientation and whose absolute areas sum to the chart area `2π²` (the smaller is the exact 33-gon area `0.12490582127787074`); torus two latitudes → 3 fragments with ring counts 1 / 2 / 1 (this test is structure-only: the old u-unwrap already accepted it, so it is not RED); a u-seam island with two different transverse crossings → the twisted-crossing `unsupported`; two overlapping islands → `numeric_failure "split_face_curved: fragments do not partition the chart"`; fragment order asserted explicitly; no empty vector; existing sphere slit and band tests unchanged.
 
 ## Task 3 — One domain decision, torus gate, stored holes
 
