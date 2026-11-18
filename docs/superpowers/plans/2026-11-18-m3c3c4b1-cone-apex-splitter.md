@@ -204,9 +204,16 @@ is not the full chart keeps the existing refusal.
    `v = 2`; and the absolute uv areas are `π` and `2π` (1e-12).
 2. Run; expect `"split_face_curved: open cuts on a seam-only face"` or
    `"no synthetic domain"`.
-3. Implement the cone chart and the dispatch branch before the seam-only
-   fallback: detect a cone synthetic face (single loop, `|area| == 0`), build
-   the domain, call `trim_face_split_domain` with empty holes.
+3. Implement: replace the temporary Task 1 guard in `split_face_curved` with
+   the cone dispatch. A canonical cone's stored slit loop has area
+   `π * v_apex` (half the chart), not zero, so the synthetic test is: one
+   stored loop, `| |signed_area2| - 0.5 * chart | <= 1e-9 * chart`, and the
+   loop's points lie only on `v_lo`/`v_hi` with exactly one point on the
+   collapsed apex row. Synthetic + cuts goes to `trim_face_split_domain` with
+   empty holes; synthetic + no cuts falls through unchanged; any other cone
+   returns `unsupported "split_face_curved: trimmed cone faces are not
+   supported yet"` with `(face.index(), 0)`. Do not route trimmed cones
+   through the generic clip path.
 4. Run focused and full suites (expect 988 cases / about 668,860 assertions).
 5. Commit `feat(trim_face): split closed cuts on a cone chart`.
 
