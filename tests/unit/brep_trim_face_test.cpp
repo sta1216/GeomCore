@@ -780,6 +780,253 @@ TEST_CASE("trim_face: a closed horizontal cut splits a cone cap from a band") {
         doctest::Approx(3.0 * kPi).epsilon(1e-12));
 }
 
+TEST_CASE("trim_face: a meridian open cut splits the cone chart in two") {
+  const Brep cone =
+      make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
+  const FaceId lateral = face_with_surface<Cone3>(cone);
+  REQUIRE_FALSE(lateral.is_null());
+
+  // A meridian from the base rim to the apex at u = 0.7, deliberately not one
+  // of the pi/32 synthetic side samples, so the arrangement has to split the
+  // side segment at the open end.
+  std::vector<Point2d> meridian;
+  meridian.push_back(Point2d{0.7, 0.0});
+  meridian.push_back(Point2d{0.7, 2.0});
+  const std::vector<FaceCut> cuts{FaceCut{meridian}};
+
+  const Result<std::vector<CurvedFragment>> split =
+      split_face_curved(cone, lateral, cuts, 1e-9);
+  REQUIRE(split.has_value());
+  REQUIRE(split.value().size() == 2u);
+  const detail::FaceUvProjection projection =
+      detail::face_uv_projection(cone, cone.face(lateral), kTol).value();
+  const Point3d apex{0.0, 0.0, 2.0};
+  std::vector<double> areas;
+  std::vector<std::size_t> apex_points;
+  for (const CurvedFragment& fragment : split.value()) {
+    REQUIRE(fragment.loops_uv.size() == 1u);
+    CHECK(fragment.loops.size() == fragment.loops_uv.size());
+    const std::vector<Point2d>& ring = fragment.loops_uv.front();
+    for (const Point2d& p : ring) {
+      CHECK(p[0] >= 0.0);
+      CHECK(p[0] <= 2.0 * kPi);
+      CHECK(p[1] >= 0.0);
+      CHECK(p[1] <= 2.0);
+      if (p[1] == 2.0) {
+        // Apex-row points are parameter copies of one 3D vertex: the cut's end
+        // and the back-seam copy must evaluate to the same apex within 1e-12.
+        const Point3d evaluated = detail::face_uv_eval(projection, p);
+        CHECK(std::fabs(evaluated[0] - apex[0]) <= 1e-12);
+        CHECK(std::fabs(evaluated[1] - apex[1]) <= 1e-12);
+        CHECK(std::fabs(evaluated[2] - apex[2]) <= 1e-12);
+      }
+    }
+    // The open ends are snapped to the side values exactly, and the arrangement
+    // has a vertex at the base rim where the cut meets it.
+    const auto has_point = [&ring](double u, double v) {
+      return std::count_if(ring.begin(), ring.end(),
+                           [u, v](const Point2d& p) {
+                             return p[0] == u && p[1] == v;
+                           }) == 1;
+    };
+    CHECK(has_point(0.7, 0.0));
+    CHECK(has_point(0.7, 2.0));
+    areas.push_back(std::fabs(signed_area2(ring)));
+    apex_points.push_back(static_cast<std::size_t>(std::count_if(
+        ring.begin(), ring.end(),
+        [](const Point2d& p) { return p[1] == 2.0; })));
+  }
+  // A single meridian at u = 0.7 leaves the chart in two pieces: the wedge
+  // between the seam and the cut (width 0.7) and the rest of the chart (width
+  // 2*pi - 0.7). It cannot halve the chart; equal areas would need u = pi. The
+  // wedge's area is half its chart area because the pole closure replaces the
+  // collapsed top edge with a chord, the same convention as the cap above.
+  // Fragments are pushed in arrangement-face order; on this fixture the
+  // seam-side wedge comes first, so the expected areas below are in that
+  // empirical order.
+  REQUIRE(areas.size() == 2u);
+  REQUIRE(apex_points.size() == 2u);
+  CHECK(areas[0] == doctest::Approx(0.7).epsilon(1e-9));
+  CHECK(areas[1] == doctest::Approx(2.0 * (2.0 * kPi - 0.7)).epsilon(1e-9));
+  // Both pieces carry the cut's apex end. The wide piece also carries the apex
+  // at the back seam copy, where its collapsed edge starts.
+  CHECK(apex_points[0] == 1u);
+  CHECK(apex_points[1] == 2u);
+
+  // The split is deterministic: a second run repeats every ring bitwise.
+  const Result<std::vector<CurvedFragment>> again =
+      split_face_curved(cone, lateral, cuts, 1e-9);
+  REQUIRE(again.has_value());
+  REQUIRE(again.value().size() == split.value().size());
+  for (std::size_t i = 0; i < split.value().size(); ++i) {
+    REQUIRE(again.value()[i].loops_uv.size() ==
+            split.value()[i].loops_uv.size());
+    REQUIRE(again.value()[i].loops.size() == split.value()[i].loops.size());
+    for (std::size_t l = 0; l < split.value()[i].loops_uv.size(); ++l) {
+      REQUIRE(again.value()[i].loops_uv[l].size() ==
+              split.value()[i].loops_uv[l].size());
+      for (std::size_t k = 0; k < split.value()[i].loops_uv[l].size(); ++k) {
+        CHECK(again.value()[i].loops_uv[l][k][0] ==
+              split.value()[i].loops_uv[l][k][0]);
+        CHECK(again.value()[i].loops_uv[l][k][1] ==
+              split.value()[i].loops_uv[l][k][1]);
+      }
+    }
+    for (std::size_t l = 0; l < split.value()[i].loops.size(); ++l) {
+      REQUIRE(again.value()[i].loops[l].size() ==
+              split.value()[i].loops[l].size());
+      for (std::size_t k = 0; k < split.value()[i].loops[l].size(); ++k) {
+        CHECK(again.value()[i].loops[l][k][0] ==
+              split.value()[i].loops[l][k][0]);
+        CHECK(again.value()[i].loops[l][k][1] ==
+              split.value()[i].loops[l][k][1]);
+        CHECK(again.value()[i].loops[l][k][2] ==
+              split.value()[i].loops[l][k][2]);
+      }
+    }
+  }
+}
+
+// The cylinder lateral face is the generic rectangle: the same u-periodic chart
+// as the cone, but with real rims on both v sides instead of a collapsed apex.
+detail::TrimFaceDomain cylinder_rectangle_domain() {
+  detail::TrimFaceDomain domain;
+  domain.bounds = {0.0, 2.0 * kPi, 0.0, 2.0};
+  domain.periodic_u = true;
+  domain.periodic_v = false;
+  domain.sides = {detail::TrimSideKind::kSeamCopy,
+                  detail::TrimSideKind::kSeamCopy,
+                  detail::TrimSideKind::kRealBoundary,
+                  detail::TrimSideKind::kRealBoundary};
+  return domain;
+}
+
+TEST_CASE("trim_face: an open cut on a generic rectangle splits in two") {
+  const Brep cylinder =
+      make_cylinder(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
+  const FaceId lateral = face_with_surface<Cylinder3>(cylinder);
+  REQUIRE_FALSE(lateral.is_null());
+  const detail::FaceUvProjection projection =
+      detail::face_uv_projection(cylinder, cylinder.face(lateral), 1e-12)
+          .value();
+
+  std::vector<Point2d> meridian;
+  meridian.push_back(Point2d{0.7, 0.0});
+  meridian.push_back(Point2d{0.7, 2.0});
+  const std::vector<FaceCut> cuts{FaceCut{meridian}};
+  const auto fragments = detail::trim_face_split_domain(
+      lateral, projection, cuts, cylinder_rectangle_domain(),
+      std::span<const std::vector<Point2d>>{}, 1e-9);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 2u);
+  // The generic rectangle has no pole, so the split is the exact chart
+  // partition: the wedge between the seam and the cut (width 0.7, area 1.4) and
+  // the rest (width 2*pi - 0.7, area (2*pi - 0.7)*2). Fragments are pushed in
+  // arrangement-face order; on this fixture the wedge (starting at u = 0) comes
+  // first, so the expected areas below are in that empirical order.
+  const double expected[2] = {1.4, 2.0 * (2.0 * kPi - 0.7)};
+  for (std::size_t i = 0; i < 2u; ++i) {
+    const CurvedFragment& fragment = fragments.value()[i];
+    REQUIRE(fragment.loops_uv.size() == 1u);
+    CHECK(fragment.loops.size() == fragment.loops_uv.size());
+    const std::vector<Point2d>& ring = fragment.loops_uv.front();
+    for (const Point2d& p : ring) {
+      CHECK(p[0] >= 0.0);
+      CHECK(p[0] <= 2.0 * kPi);
+      CHECK(p[1] >= 0.0);
+      CHECK(p[1] <= 2.0);
+    }
+    CHECK(std::count_if(ring.begin(), ring.end(), [](const Point2d& p) {
+            return p[0] == 0.7 && p[1] == 0.0;
+          }) == 1);
+    CHECK(std::count_if(ring.begin(), ring.end(), [](const Point2d& p) {
+            return p[0] == 0.7 && p[1] == 2.0;
+          }) == 1);
+    CHECK(std::fabs(signed_area2(ring)) ==
+          doctest::Approx(expected[i]).epsilon(1e-9));
+  }
+  const double sum =
+      std::fabs(signed_area2(fragments.value()[0].loops_uv.front())) +
+      std::fabs(signed_area2(fragments.value()[1].loops_uv.front()));
+  CHECK(sum == doctest::Approx(4.0 * kPi).epsilon(1e-9));
+}
+
+TEST_CASE("trim_face: an open cut that crosses the seam is refused") {
+  const Brep cylinder =
+      make_cylinder(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
+  const FaceId lateral = face_with_surface<Cylinder3>(cylinder);
+  REQUIRE_FALSE(lateral.is_null());
+  const detail::FaceUvProjection projection =
+      detail::face_uv_projection(cylinder, cylinder.face(lateral), 1e-12)
+          .value();
+
+  // One end sits on the periodic seam at u = 0, the other on the real rim:
+  // re-origining the chart is deferred, so the piece is refused.
+  std::vector<Point2d> chain;
+  chain.push_back(Point2d{0.0, 0.5});
+  chain.push_back(Point2d{1.0, 0.0});
+  const std::vector<FaceCut> cuts{FaceCut{chain}};
+  const auto fragments = detail::trim_face_split_domain(
+      lateral, projection, cuts, cylinder_rectangle_domain(),
+      std::span<const std::vector<Point2d>>{}, 1e-9);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == Errc::unsupported);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: open cut crosses the seam");
+  CHECK(fragments.error().context_a ==
+        static_cast<std::uint32_t>(lateral.index()));
+  CHECK(fragments.error().context_b == 0u);
+}
+
+TEST_CASE("trim_face: an open cut with both ends inside the chart is refused") {
+  const Brep cylinder =
+      make_cylinder(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
+  const FaceId lateral = face_with_surface<Cylinder3>(cylinder);
+  REQUIRE_FALSE(lateral.is_null());
+  const detail::FaceUvProjection projection =
+      detail::face_uv_projection(cylinder, cylinder.face(lateral), 1e-12)
+          .value();
+
+  std::vector<Point2d> chain;
+  chain.push_back(Point2d{0.5, 0.5});
+  chain.push_back(Point2d{0.5, 1.5});
+  const std::vector<FaceCut> cuts{FaceCut{chain}};
+  const auto fragments = detail::trim_face_split_domain(
+      lateral, projection, cuts, cylinder_rectangle_domain(),
+      std::span<const std::vector<Point2d>>{}, 1e-9);
+  REQUIRE_FALSE(fragments.has_value());
+  CHECK(fragments.error().code == Errc::unsupported);
+  CHECK(std::string_view(fragments.error().message) ==
+        "trim_face: cut chain ends inside the parameter domain");
+  // The refusal comes from the upstream windowing pass, which carries no
+  // context ids.
+  CHECK(fragments.error().context_a == 0u);
+  CHECK(fragments.error().context_b == 0u);
+}
+
+TEST_CASE("trim_face: an open cut with one end inside the chart is refused") {
+  const Brep cone =
+      make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
+  const FaceId lateral = face_with_surface<Cone3>(cone);
+  REQUIRE_FALSE(lateral.is_null());
+
+  // One end sits on the base rim, the other strictly inside the chart. The
+  // windowing pass rejects a piece whose ends are not both on the boundary,
+  // before the splitter can see it.
+  std::vector<Point2d> chain;
+  chain.push_back(Point2d{0.7, 0.0});
+  chain.push_back(Point2d{0.7, 1.0});
+  const std::vector<FaceCut> cuts{FaceCut{chain}};
+  const Result<std::vector<CurvedFragment>> split =
+      split_face_curved(cone, lateral, cuts, 1e-9);
+  REQUIRE_FALSE(split.has_value());
+  CHECK(split.error().code == Errc::unsupported);
+  CHECK(std::string_view(split.error().message) ==
+        "trim_face: cut chain ends inside the parameter domain");
+  CHECK(split.error().context_a == 0u);
+  CHECK(split.error().context_b == 0u);
+}
+
 TEST_CASE("trim_face: a trimmed cone face is refused instead of reopened") {
   // A horizontal plane at z = 1 cuts the canonical cone into a frustum whose
   // lateral face stores only the band between the base rim and the cut circle.

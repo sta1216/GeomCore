@@ -385,8 +385,10 @@ inline bool trim_face_chain_on_domain_side(
 // Windows the cut polylines of one face onto its parameter rectangle. Point
 // order is preserved and every seam crossing inserts the seam point itself, so
 // a returned piece either stays closed or ends exactly on a domain side. An
-// open piece that touches no side at all cannot be attached to the face
-// boundary and is rejected instead of being silently passed through.
+// open piece must start and end on the face boundary, except that a piece
+// touching a periodic seam may keep one end inside: its continuation lives on
+// the other seam copy. A piece that touches no boundary at all is rejected
+// instead of being silently passed through.
 inline Result<std::vector<std::vector<Point2d>>> trim_face_window_chains(
     std::span<const FaceCut> cuts, const TrimFaceDomain& domain,
     double tolerance) {
@@ -405,9 +407,26 @@ inline Result<std::vector<std::vector<Point2d>>> trim_face_window_chains(
     for (std::vector<Point2d>& piece : trim_face_window_polyline(
              points, domain, tolerance, false, true)) {
       if (piece.size() < 2) continue;
-      if (!trim_face_same_xy_rel(piece.front(), piece.back(), tolerance) &&
-          !trim_face_point_on_domain_side(piece.front(), domain, tolerance) &&
-          !trim_face_point_on_domain_side(piece.back(), domain, tolerance)) {
+      const bool closed =
+          trim_face_same_xy_rel(piece.front(), piece.back(), tolerance);
+      const bool front_on_side =
+          trim_face_point_on_domain_side(piece.front(), domain, tolerance);
+      const bool back_on_side =
+          trim_face_point_on_domain_side(piece.back(), domain, tolerance);
+      const auto on_identified = [&domain, tolerance](const Point2d& p) {
+        for (int side = 0; side < 4; ++side) {
+          if (domain.sides[side] == TrimSideKind::kRealBoundary) continue;
+          const double value = side < 2 ? p[0] : p[1];
+          if (trim_face_near_side(value, domain.bounds[side], tolerance)) {
+            return true;
+          }
+        }
+        return false;
+      };
+      const bool touches_identified =
+          on_identified(piece.front()) || on_identified(piece.back());
+      if (!closed && (!front_on_side || !back_on_side) &&
+          !touches_identified) {
         return Error{Errc::unsupported,
                      "trim_face: cut chain ends inside the parameter domain"};
       }

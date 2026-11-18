@@ -1458,9 +1458,59 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
       }
     }
     if (match == pieces.size()) {
-      return Error{Errc::unsupported,
-                   "split_face_curved: open cuts on a seam-only face",
-                   face.index(), static_cast<std::uint32_t>(i)};
+      // An open piece whose ends lie on two non-seam domain sides cuts the face
+      // from boundary to boundary: the rest of the fragment's boundary is the
+      // synthetic sides themselves, so the piece needs no partner across the
+      // seam. A piece that leaves through a periodic seam and returns elsewhere
+      // would need the chart re-origined at the cut, so refuse the mix instead
+      // of closing it with a chord across the chart.
+      const bool front_on_side =
+          trim_face_point_on_domain_side(piece.front(), domain, tolerance);
+      const bool back_on_side =
+          trim_face_point_on_domain_side(piece.back(), domain, tolerance);
+      const auto on_seam = [&domain, tolerance](const Point2d& point) noexcept {
+        if (domain.periodic_u &&
+            (trim_face_near_side(point[0], domain.bounds[0], tolerance) ||
+             trim_face_near_side(point[0], domain.bounds[1], tolerance))) {
+          return true;
+        }
+        return domain.periodic_v &&
+               (trim_face_near_side(point[1], domain.bounds[2], tolerance) ||
+                trim_face_near_side(point[1], domain.bounds[3], tolerance));
+      };
+      const bool front_on_seam = on_seam(piece.front());
+      const bool back_on_seam = on_seam(piece.back());
+      if (front_on_seam != back_on_seam) {
+        return Error{Errc::unsupported,
+                     "split_face_curved: open cut crosses the seam",
+                     face.index(), static_cast<std::uint32_t>(i)};
+      }
+      if (!front_on_side || !back_on_side || front_on_seam || back_on_seam) {
+        return Error{Errc::unsupported,
+                     "split_face_curved: open cuts on a seam-only face",
+                     face.index(), static_cast<std::uint32_t>(i)};
+      }
+      DomainChain chain;
+      chain.points = std::move(piece);
+      // The synthetic sides are sampled at fixed steps, so an open end that
+      // stops between two samples must pin the exact side value here; otherwise
+      // the side chord misses the cut endpoint and the fragment does not close.
+      const auto snap = [u_lo, u_hi, v_lo, v_hi, tolerance](Point2d& point) {
+        if (trim_face_near_side(point[0], u_lo, tolerance)) {
+          point[0] = u_lo;
+        } else if (trim_face_near_side(point[0], u_hi, tolerance)) {
+          point[0] = u_hi;
+        }
+        if (trim_face_near_side(point[1], v_lo, tolerance)) {
+          point[1] = v_lo;
+        } else if (trim_face_near_side(point[1], v_hi, tolerance)) {
+          point[1] = v_hi;
+        }
+      };
+      snap(chain.points.front());
+      snap(chain.points.back());
+      chains.push_back(std::move(chain));
+      continue;
     }
     paired[match] = 1;
     DomainChain chain;
@@ -1678,9 +1728,28 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
                                              domain.periodic_u,
                                              domain.periodic_v);
         if (!seam) {
-          return Error{Errc::numeric_failure,
-                       "split_face_curved: synthetic boundary chain is open",
-                       face.index(), f};
+          // A run can also enter and leave through the same parameter copy of a
+          // seam, as a bound-from-boundary cut does on a chart whose seam is
+          // not touched by the cut. The seam generatrix itself is then the
+          // fragment's boundary edge, so the ring closes along that copy
+          // instead of across the chart. The chord is a real edge, not a chart
+          // artifact, so the ring stays a normal (non-seam) ring.
+          const bool same_copy =
+              (domain.periodic_u &&
+               ((trim_face_seam_only_near_side(front[0], domain.bounds[0]) &&
+                 trim_face_seam_only_near_side(back[0], domain.bounds[0])) ||
+                (trim_face_seam_only_near_side(front[0], domain.bounds[1]) &&
+                 trim_face_seam_only_near_side(back[0], domain.bounds[1])))) ||
+              (domain.periodic_v &&
+               ((trim_face_seam_only_near_side(front[1], domain.bounds[2]) &&
+                 trim_face_seam_only_near_side(back[1], domain.bounds[2])) ||
+                (trim_face_seam_only_near_side(front[1], domain.bounds[3]) &&
+                 trim_face_seam_only_near_side(back[1], domain.bounds[3]))));
+          if (!same_copy) {
+            return Error{Errc::numeric_failure,
+                         "split_face_curved: synthetic boundary chain is open",
+                         face.index(), f};
+          }
         }
         points.push_back(front);
       } else {
