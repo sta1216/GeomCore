@@ -87,7 +87,11 @@ dependency. Existing helpers: `trim_face_split_domain`,
    area `π` (one apex point) and a band with area `2π`; a meridian open cut
    yields two half-charts of area `2π` each, both with one apex point.
 6. Regression: sphere cap and torus offset tests untouched; boolean gate
-   message unchanged; no changes to assembly or volume code.
+   message unchanged. Three temporary cone refusals keep the pre-fan contracts
+   until 4b2/4b3: `split_face_curved: cone lateral faces are not supported yet`,
+   `curved_solid_volume: cone faces are not supported yet`, and
+   `trimmed_face_boundaries: cone faces are not supported yet`. No other
+   assembly, mass or volume change.
 
 ## File Map
 
@@ -106,7 +110,9 @@ dependency. Existing helpers: `trim_face_split_domain`,
 ## Task 1 — Apex-tolerant cone projection
 
 **Files:** `include/geom/brep/face_uv.hpp`,
-`tests/unit/brep_face_uv_test.cpp`.
+`tests/unit/brep_face_uv_test.cpp`, plus the temporary cone refusals in
+`include/geom/brep/trim_face.hpp`, `include/geom/brep/detail/curved_volume.hpp`,
+`include/geom/brep/trimmed_domain.hpp` and their tests.
 
 **Interfaces:**
 
@@ -121,9 +127,11 @@ inline Result<Point2d> face_uv_project_cone(const Cone3& surface,
 `face_uv_project` dispatch, `kFaceUvPi`.
 
 **Produces:** apex accepted as `{has_previous_u ? previous_u : 0.0, v_apex}`
-where `v_apex = radius / tan(half_angle)`; points with `v` above
-`v_apex + 1e-9*max(1, v_apex)` still return
-`"face_loops_uv: cone projection is undefined at or beyond the apex"`.
+where `v_apex = radius / tan(half_angle)`; the band is symmetric
+(`|v - v_apex| <= 1e-9*max(1, v_apex)`) and only points strictly above it
+(`v > v_apex + tol`, on the other nappe) return
+`"face_loops_uv: cone projection is undefined at or beyond the apex"`. A cone
+thinner than its own band (`v_apex <= tol`) keeps the old refusal.
 `face_loops_uv` on a canonical cone lateral face returns one loop.
 
 **Steps:**
@@ -207,24 +215,20 @@ is not the full chart keeps the existing refusal.
 **Files:** `include/geom/brep/trim_face.hpp`,
 `tests/unit/brep_trim_face_test.cpp`.
 
-**Interfaces:**
-
-```cpp
-// True when `point` lies within the parameter tolerance of any of the four
-// domain sides (seam, real or collapsed).
-inline bool trim_face_point_on_domain_side(const Point2d& point,
-                                           const TrimFaceDomain& domain,
-                                           double tolerance) noexcept;
-```
+**Interfaces:** no new helper: `detail::trim_face_point_on_domain_side`
+(`trim_domain.hpp:154`) already reports whether a point lies within the
+parameter tolerance of any side.
 
 **Consumes:** `trim_face_window_chains`, `trim_face_seam_only_seam_pair`,
-`trim_face_domain_edge_side`, `split_segments`.
+`trim_face_domain_edge_side`, `trim_face_point_on_domain_side`,
+`split_segments`.
 
 **Produces:** an open chain whose two ends lie on domain sides becomes a
 non-island chain; both ends are snapped to the side value; the arrangement
 splits the synthetic side segment at the endpoint. An end strictly inside the
-domain returns `unsupported "split_face_curved: open cut ends inside the
-parameter domain"`; a chain crossing a periodic seam returns
+domain is already refused upstream by `trim_face_window_chains` with
+`unsupported "trim_face: cut chain ends inside the parameter domain"`; a piece
+with one end on a periodic seam and the other elsewhere is refused with
 `unsupported "split_face_curved: open cut crosses the seam"` (re-origining the
 chart is deferred); a chain lying on a side returns
 `"split_face_curved: cut lies on the parameter domain boundary"` as today.
@@ -234,10 +238,11 @@ chart is deferred); a chain lying on a side returns
 1. Add the failing tests:
 
    ```cpp
-   // Cone lateral face, meridian from the base rim to the apex at u = pi/2.
+   // Cone lateral face, meridian from the base rim to the apex at u = 0.7
+   // (deliberately not one of the pi/32 side samples).
    std::vector<geom::Point2d> meridian;
-   meridian.push_back({0.5 * geom::kFaceUvPi, 0.0});
-   meridian.push_back({0.5 * geom::kFaceUvPi, 2.0});
+   meridian.push_back({0.7, 0.0});
+   meridian.push_back({0.7, 2.0});
    const std::vector<geom::FaceCut> cuts{geom::FaceCut{meridian}};
    const auto split = geom::split_face_curved(cone.value(), lateral, cuts, 1e-9);
    REQUIRE(split.has_value());
@@ -246,16 +251,19 @@ chart is deferred); a chain lying on a side returns
    ```
 
    Also split a rectangle domain (`{0,2π,0,2}`, sides
-   `{seam,seam,real,real}`) with the meridian from `(π,0)` to `(π,2)` and check
-   two fragments of area `2π`; and a rejected chain ending at `(π,1)` inside
-   the chart.
+   `{seam,seam,real,real}`) with the meridian from `(0.7,0)` to `(0.7,2)` and
+   check two fragments of area `2π`; and a rejected chain ending at `(0.7,1)`
+   inside the chart (assert the upstream message).
 
 2. Run; expect the seam-pair refusal.
-3. Implement: in the windowing loop, after unwrapping, accept an open piece
-   when both ends pass `trim_face_point_on_domain_side`; snap each end exactly
-   to its side (`u_lo/u_hi/v_lo/v_hi`); keep the seam-pair path unchanged.
-   Reject interiors with the new message. Do not change the closed-island or
-   partition guard logic.
+3. Implement: in the pairing loop, after seam-pair matching fails, accept an
+   open piece when both ends pass `trim_face_point_on_domain_side` and neither
+   end is on a periodic seam side; snap each end exactly to its side
+   (`u_lo/u_hi/v_lo/v_hi`). Reject pieces that mix a seam end with a non-seam
+   end using the new message. Keep the seam-pair path, closed-island path and
+   partition guard unchanged. Ensure the arrangement has a vertex at the cut
+   endpoint: if `split_segments` does not split the side segment there, split
+   the side polyline at the endpoint before building the arrangement.
 4. Run focused and full suites.
 5. Commit `feat(trim_face): accept open cuts that end on the domain boundary`.
 
@@ -274,8 +282,10 @@ chart is deferred); a chain lying on a side returns
    has `loops.size() == loops_uv.size()`.
 2. Write ADR-0034: cone chart, apex projection rule, open-end acceptance,
    representations (apex at the back seam copy), refusal matrix (interior end,
-   side-lying chain, trimmed cone face), and what stays deferred (boolean gate,
-   apex-fan volume, trimmed cone tessellation, general twisted crossings).
+   side-lying chain, trimmed cone face, and the temporary
+   `split_face_curved`/`curved_solid_volume`/`trimmed_face_boundaries` cone
+   refusals), and what stays deferred (boolean gate, apex-fan volume, trimmed
+   cone tessellation, general twisted crossings).
 3. Add the §16.3 paragraph and cross-reference ADR-0032/ADR-0034; leave
    line endings as found (CRLF).
 4. Run Debug and Release suites; record the exact counts.
@@ -300,6 +310,7 @@ chart is deferred); a chain lying on a side returns
 - [ ] Apex projection limit is relative and documented; no new absolute epsilon.
 - [ ] Open-end detection uses the same relative parameter tolerance as the
       splitter, and endpoints are snapped so the arrangement has exact vertices.
-- [ ] No assembly, mass or volume code is touched.
+- [ ] Assembly code is untouched; mass and volume paths only add the three
+      temporary cone refusals recorded above, with no numerical change.
 - [ ] ADR records the refusal matrix and the deferred boolean/volume work.
 - [ ] Test counts are recorded in the exit report and in ledger.
