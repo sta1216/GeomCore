@@ -53,7 +53,9 @@ struct TrimFaceDomain {
 // The analytic uv rectangle of a surface whose face has no real boundary loop.
 // Only the synthetic-domain surfaces of this milestone are described: a sphere
 // is periodic in u and collapses at both poles, a torus is periodic on both
-// axes. Every other surface is not a synthetic domain yet.
+// axes, and a cone is periodic in u with a real base edge at v = 0 and a
+// collapsed apex at v = radius / tan(half_angle). Every other surface is not a
+// synthetic domain yet.
 //
 // Precondition: the caller has already established that the face is a
 // synthetic-domain face (its stored loop is the seam copy or the full
@@ -86,6 +88,16 @@ inline Result<TrimFaceDomain> trim_face_domain(const Brep& brep, FaceId face,
         domain.periodic_v = true;
         domain.sides = {TrimSideKind::kSeamCopy, TrimSideKind::kSeamCopy,
                         TrimSideKind::kSeamCopy, TrimSideKind::kSeamCopy};
+        return domain;
+      }
+      if (const auto* cone = std::get_if<Cone3>(&surface)) {
+        domain.bounds = {0.0, 2.0 * kFaceUvPi, 0.0,
+                         cone->radius / std::tan(cone->half_angle)};
+        domain.periodic_u = true;
+        domain.periodic_v = false;
+        domain.sides = {TrimSideKind::kSeamCopy, TrimSideKind::kSeamCopy,
+                        TrimSideKind::kRealBoundary,
+                        TrimSideKind::kCollapsed};
         return domain;
       }
     }

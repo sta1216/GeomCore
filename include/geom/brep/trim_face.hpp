@@ -2059,14 +2059,56 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
   const SurfaceGeometry& surface =
       brep.geometry().surfaces[brep.face(face).surface];
 
-  // Temporary guard: the cone chart has no domain splitter yet, so a cone lateral
-  // face must be refused rather than fall into the generic clip path, which would
-  // return fragments from a chart it does not understand. Task 2 replaces this
-  // guard with the cone chart dispatch.
+  // A canonical cone face stores its base rim plus the single apex point as the
+  // outer loop. The ring closes with the implicit chart diagonal from the apex
+  // back to the base seam, so its shoelace area is exactly half the chart
+  // (pi * v_apex). The area alone is not enough: a band that keeps the base and
+  // stops at half the apex height has the same half-chart area, because the
+  // shoelace sum of a band is 2*pi*z and the chart is 2*pi*v_apex. The canonical
+  // loop is therefore also required to sit entirely on the two v sides, with
+  // exactly one point on the collapsed apex side. Any other loop is a genuinely
+  // trimmed cone; dispatching it here would reopen the full chart and split away
+  // the trim. A synthetic face with no cuts falls through to the ordinary path,
+  // which returns it unchanged instead of building an empty synthetic
+  // arrangement.
   if (std::holds_alternative<Cone3>(surface)) {
-    return Error{Errc::unsupported,
-                 "split_face_curved: cone lateral faces are not supported yet",
-                 face.index(), 0u};
+    const Result<detail::TrimFaceDomain> domain =
+        detail::trim_face_domain(brep, face, projection, tolerance);
+    if (!domain) return domain.error();
+    bool synthetic = loops.size() == 1u;
+    if (synthetic) {
+      const double chart =
+          (domain.value().bounds[1] - domain.value().bounds[0]) *
+          (domain.value().bounds[3] - domain.value().bounds[2]);
+      const double loop_area = std::fabs(signed_area2(loops.front()));
+      synthetic = std::fabs(loop_area - 0.5 * chart) <= 1e-9 * chart;
+      if (synthetic) {
+        const double v_lo = domain.value().bounds[2];
+        const double v_hi = domain.value().bounds[3];
+        std::size_t apex_points = 0;
+        bool on_rows = true;
+        for (const Point2d& point : loops.front()) {
+          if (detail::trim_face_near_side(point[1], v_hi, tolerance)) {
+            ++apex_points;
+          } else if (!detail::trim_face_near_side(point[1], v_lo, tolerance)) {
+            on_rows = false;
+            break;
+          }
+        }
+        synthetic = on_rows && apex_points == 1u;
+      }
+    }
+    if (!synthetic) {
+      return Error{Errc::unsupported,
+                   "split_face_curved: trimmed cone faces are not supported "
+                   "yet",
+                   face.index(), 0u};
+    }
+    if (!cuts.empty()) {
+      return detail::trim_face_split_domain(
+          face, projection, cuts, domain.value(),
+          std::span<const std::vector<Point2d>>{}, tolerance);
+    }
   }
 
   // A full torus face stores its whole parameter rectangle as the outer loop, so

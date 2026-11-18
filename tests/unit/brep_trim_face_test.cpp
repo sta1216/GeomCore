@@ -378,6 +378,59 @@ Brep make_torus_patch() {
   return editor.commit().value();
 }
 
+// Builds the lateral face of the frustum left by cutting the canonical cone
+// (r = 1, h = 2) with the horizontal plane z = 1: the base rim at z = 0, the cut
+// rim at z = 1 and the seam between them. The full split_solid_by_plane path
+// cannot assemble that frustum yet, so the face is built directly. Its stored
+// loop covers the chart band 0 <= v <= 1, whose shoelace area is exactly
+// pi * v_apex = 2*pi, the same area as the canonical cone's rim-plus-apex loop:
+// the dispatch must therefore also require the apex structure to refuse it.
+Brep make_cone_frustum_band() {
+  const Cone3 surface{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0,
+                      std::atan2(1.0, 2.0)};
+  const Vec3d y_axis = cross(surface.axis, surface.x_axis);
+  constexpr double kBandHeight = 1.0;
+  const double top_radius =
+      surface.radius - kBandHeight * std::tan(surface.half_angle);
+  const Point3d top_center{surface.origin[0] + kBandHeight * surface.axis[0],
+                           surface.origin[1] + kBandHeight * surface.axis[1],
+                           surface.origin[2] + kBandHeight * surface.axis[2]};
+  const CircleCurve3 base_circle{surface.origin, surface.x_axis, y_axis,
+                                 surface.radius};
+  const CircleCurve3 top_circle{top_center, surface.x_axis, y_axis, top_radius};
+  const Point3d base_point = base_circle.eval(0.0);
+  const Point3d top_point = top_circle.eval(0.0);
+
+  SolidEditor editor;
+  const std::uint32_t surface_index = editor.add_surface(surface);
+  const FaceId face = editor.add_face(surface_index, false, kTol).value();
+  const VertexId base_vertex = editor.add_vertex(base_point, kTol).value();
+  const VertexId top_vertex = editor.add_vertex(top_point, kTol).value();
+  const std::uint32_t base_curve = editor.add_curve(base_circle);
+  const std::uint32_t top_curve = editor.add_curve(top_circle);
+  const std::uint32_t seam_curve = editor.add_curve(LineCurve3{
+      base_point, Vec3d{top_point[0] - base_point[0],
+                        top_point[1] - base_point[1],
+                        top_point[2] - base_point[2]}});
+  const EdgeId base_edge =
+      editor.add_edge(base_vertex, base_vertex, base_curve, 0.0,
+                      2.0 * detail::kFaceUvPi, kTol)
+          .value();
+  const EdgeId top_edge =
+      editor.add_edge(top_vertex, top_vertex, top_curve, 0.0,
+                      2.0 * detail::kFaceUvPi, kTol)
+          .value();
+  const EdgeId seam_edge =
+      editor.add_edge(base_vertex, top_vertex, seam_curve, 0.0, 1.0, kTol).value();
+  const std::array<CoedgeSpec, 4> loop{
+      CoedgeSpec{base_edge, false}, CoedgeSpec{seam_edge, false},
+      CoedgeSpec{top_edge, true}, CoedgeSpec{seam_edge, true}};
+  editor.add_loop(face, loop, true).value();
+  const std::array<FaceId, 1> faces{face};
+  editor.add_shell(faces, false).value();
+  return editor.commit().value();
+}
+
 // Checks that the uv rings are the cycle rings (outer counter-clockwise, holes
 // clockwise) and that every 3D vertex is the planar lift of its uv vertex.
 void check_plane_fragment(const Brep& brep, FaceId face,
@@ -638,22 +691,122 @@ TEST_CASE("trim_face: an open cut endpoint off the boundary is rejected") {
             .starts_with("split_face_curved:"));
 }
 
-TEST_CASE("trim_face: a cone lateral face propagates unsupported") {
+TEST_CASE("trim_face: a canonical cone lateral face without cuts is one ring") {
   const Brep cone =
-      make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 2.0, 3.0, kTol).value();
+      make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
   const FaceId lateral = face_with_surface<Cone3>(cone);
   REQUIRE_FALSE(lateral.is_null());
+
+  // The canonical cone chart: the base rim runs along v = 0 and the apex is the
+  // single point at v = v_apex. The stored loop is the rim plus that apex point.
+  const Result<std::vector<FaceUvLoop>> source =
+      face_loops_uv(cone, lateral, kTol);
+  REQUIRE(source.has_value());
+  REQUIRE(source.value().size() == 1u);
+  const std::vector<Point2d>& ring = source.value().front().points;
+  REQUIRE(ring.size() == 34u);
 
   const std::vector<FaceCut> none;
   const Result<std::vector<CurvedFragment>> fragments =
       split_face_curved(cone, lateral, none, kTol);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 1u);
+  const CurvedFragment& fragment = fragments.value().front();
+  REQUIRE(fragment.loops_uv.size() == 1u);
+  CHECK(fragment.loops.size() == fragment.loops_uv.size());
+  REQUIRE(fragment.loops_uv.front().size() == ring.size());
+  REQUIRE(fragment.loops.front().size() == ring.size());
+  for (std::size_t i = 0; i < ring.size(); ++i) {
+    CHECK(fragment.loops_uv.front()[i][0] == ring[i][0]);
+    CHECK(fragment.loops_uv.front()[i][1] == ring[i][1]);
+  }
+  CHECK(std::fabs(signed_area2(fragment.loops_uv.front())) ==
+        doctest::Approx(2.0 * kPi).epsilon(1e-12));
+  const double v_apex = 1.0 / std::tan(std::atan2(1.0, 2.0));
+  std::size_t apex_points = 0;
+  for (const Point2d& p : fragment.loops_uv.front()) {
+    if (p[1] == v_apex) ++apex_points;
+  }
+  CHECK(apex_points == 1u);
+}
+
+TEST_CASE("trim_face: a closed horizontal cut splits a cone cap from a band") {
+  const Brep cone =
+      make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
+  const FaceId lateral = face_with_surface<Cone3>(cone);
+  REQUIRE_FALSE(lateral.is_null());
+
+  // A closed horizontal cut at v = 1, with its ends on the two copies of the
+  // seam: the cap above it reaches the collapsed apex, the band below it is the
+  // full circumference at the base.
+  std::vector<Point2d> ring;
+  ring.reserve(65);
+  for (int i = 0; i <= 64; ++i) {
+    ring.push_back(Point2d{2.0 * kPi * static_cast<double>(i) / 64.0, 1.0});
+  }
+  REQUIRE(ring.front()[0] == 0.0);
+  REQUIRE(ring.back()[0] == 2.0 * kPi);
+  const std::vector<FaceCut> cuts{FaceCut{ring}};
+  const Result<std::vector<CurvedFragment>> fragments =
+      split_face_curved(cone, lateral, cuts, kTol);
+  REQUIRE(fragments.has_value());
+  REQUIRE(fragments.value().size() == 2u);
+
+  const double v_apex = 1.0 / std::tan(std::atan2(1.0, 2.0));
+  std::size_t cap_index = fragments.value().size();
+  for (std::size_t i = 0; i < fragments.value().size(); ++i) {
+    const CurvedFragment& fragment = fragments.value()[i];
+    REQUIRE(fragment.loops_uv.size() == 1u);
+    CHECK(fragment.loops.size() == fragment.loops_uv.size());
+    std::size_t apex_points = 0;
+    for (const Point2d& p : fragment.loops_uv.front()) {
+      if (p[1] == v_apex) ++apex_points;
+    }
+    if (apex_points == 1u) {
+      cap_index = i;
+    } else {
+      CHECK(apex_points == 0u);
+    }
+  }
+  REQUIRE(cap_index < fragments.value().size());
+  const CurvedFragment& cap = fragments.value()[cap_index];
+  const CurvedFragment& band = fragments.value()[1u - cap_index];
+  CHECK(std::fabs(signed_area2(cap.loops_uv.front())) ==
+        doctest::Approx(kPi).epsilon(1e-12));
+  CHECK(std::fabs(signed_area2(band.loops_uv.front())) ==
+        doctest::Approx(2.0 * kPi).epsilon(1e-12));
+  CHECK(std::fabs(signed_area2(cap.loops_uv.front())) +
+            std::fabs(signed_area2(band.loops_uv.front())) ==
+        doctest::Approx(3.0 * kPi).epsilon(1e-12));
+}
+
+TEST_CASE("trim_face: a trimmed cone face is refused instead of reopened") {
+  // A horizontal plane at z = 1 cuts the canonical cone into a frustum whose
+  // lateral face stores only the band between the base rim and the cut circle.
+  // split_solid_by_plane cannot assemble that frustum yet, so the same lateral
+  // face is built directly from the base rim, the cut rim and the seam.
+  const Brep frustum = make_cone_frustum_band();
+  const FaceId lateral = face_with_surface<Cone3>(frustum);
+  REQUIRE_FALSE(lateral.is_null());
+
+  const Result<std::vector<FaceUvLoop>> source =
+      face_loops_uv(frustum, lateral, kTol);
+  REQUIRE(source.has_value());
+  REQUIRE(source.value().size() == 1u);
+  // The band loop has exactly the canonical half-chart area (pi * v_apex = 2*pi
+  // for r = 1, h = 2), so the area gate alone must not reopen it.
+  CHECK(std::fabs(signed_area2(source.value().front().points)) ==
+        doctest::Approx(2.0 * kPi).epsilon(1e-12));
+
+  const std::vector<FaceCut> none;
+  const Result<std::vector<CurvedFragment>> fragments =
+      split_face_curved(frustum, lateral, none, kTol);
   REQUIRE_FALSE(fragments.has_value());
   CHECK(fragments.error().code == Errc::unsupported);
-  CHECK(std::string_view(fragments.error().message)
-            .find("cone lateral faces are not supported yet") !=
-        std::string_view::npos);
-  CHECK(fragments.error().context_a == static_cast<std::uint32_t>(lateral.index()));
-  CHECK(fragments.error().context_a == 1u);
+  CHECK(std::string_view(fragments.error().message) ==
+        "split_face_curved: trimmed cone faces are not supported yet");
+  CHECK(fragments.error().context_a ==
+        static_cast<std::uint32_t>(lateral.index()));
   CHECK(fragments.error().context_b == 0u);
 }
 
@@ -2644,6 +2797,36 @@ TEST_CASE("trim_face: sphere and torus synthetic domains") {
   for (int i = 0; i < 4; ++i) {
     CHECK(torus_domain.sides[i] == geom::detail::TrimSideKind::kSeamCopy);
   }
+}
+
+TEST_CASE("trim_face: canonical cone synthetic domains") {
+  const auto check_cone = [](double radius, double height) {
+    const geom::Brep cone =
+        geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                        radius, height, 1e-12)
+            .value();
+    const geom::FaceId lateral = face_with_surface<geom::Cone3>(cone);
+    REQUIRE_FALSE(lateral.is_null());
+    const geom::detail::FaceUvProjection projection =
+        geom::detail::face_uv_projection(cone, cone.face(lateral), 1e-12).value();
+    const auto domain =
+        geom::detail::trim_face_domain(cone, lateral, projection, 1e-12);
+    REQUIRE(domain.has_value());
+    const geom::detail::TrimFaceDomain& chart = domain.value();
+    const double v_apex = radius / std::tan(std::atan2(radius, height));
+    CHECK(chart.bounds[0] == 0.0);
+    CHECK(chart.bounds[1] == doctest::Approx(2.0 * kPi).epsilon(1e-12));
+    CHECK(chart.bounds[2] == 0.0);
+    CHECK(chart.bounds[3] == v_apex);
+    CHECK(chart.periodic_u);
+    CHECK_FALSE(chart.periodic_v);
+    CHECK(chart.sides[0] == geom::detail::TrimSideKind::kSeamCopy);
+    CHECK(chart.sides[1] == geom::detail::TrimSideKind::kSeamCopy);
+    CHECK(chart.sides[2] == geom::detail::TrimSideKind::kRealBoundary);
+    CHECK(chart.sides[3] == geom::detail::TrimSideKind::kCollapsed);
+  };
+  check_cone(1.0, 2.0);
+  check_cone(2.0, 3.0);
 }
 
 TEST_CASE("trim_face: windowing splits a chain at the periodic seam") {
