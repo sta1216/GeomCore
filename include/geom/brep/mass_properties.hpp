@@ -459,8 +459,9 @@ inline Result<void> mass_add_trimmed_face(const Brep& brep, FaceId id, const Sur
   // region is independent of curved_sampling_deflection; only the interior
   // quadrature density uses it. The step is max(sqrt(8*deflection), 5e-2 rad):
   // the floor binds for deflection <= 3.125e-4 and is load-bearing for the
-  // runtime (a 1e-9 step on the default fixture takes about 31 s). It does not
-  // cap the measured accuracy (4.4e-10 relative on r = 1, 4.4e-11 on r = 10).
+  // runtime (a 1e-9 deflection still samples at the 5e-2 floor; removing the
+  // floor made the default fixture take about 31 s during review). It does not
+  // cap the measured accuracy (4.4e-10 relative at radius 1, 4.4e-11 at 10).
   const double step = std::max(std::sqrt(8.0 * options.curved_sampling_deflection), 5e-2);
   return mass_integrate_trimmed_parametric(surface, triangulation.value().points,
                                            triangulation.value().triangles,

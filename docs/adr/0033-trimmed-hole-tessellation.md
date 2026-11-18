@@ -65,8 +65,9 @@ rather than clipped per piece.
   (`mass_properties.hpp:447`). The mass chart has no artificial cut, so it integrates
   the outer ring and every hole directly.
 - **Hole-free output is unchanged.** The four-argument tessellation overload delegates
-  with an empty hole span, so its output stays bitwise identical; the hole-free
-  canonical hash and count tests still pass.
+  with an empty hole span, so its output stays bitwise identical. The canonical
+  box/cylinder/torus hash and count tests still pass; the trimmed-hole fixture is not
+  hashed, so the claim for the trimmed path rests on the delegation and review.
 
 ## Evidence
 
@@ -116,8 +117,10 @@ not by a test; the benchmark note marks it unmeasured.
 
 - A curved face whose outer and hole rings are rectilinear, with the hole strictly
   inside the outer ring, now meshes watertight and weighs; on a periodic-`u` face the
-  hole must lie strictly inside one split piece and no sample may touch the artificial
-  cut. This is the supported class.
+  hole's *sampled* ring must unwrap strictly inside one split piece and no sample may
+  touch the artificial cut. Geometrically-contained holes can still unwrap to the other
+  side (the two-box counterexample in the benchmark note); those are refused. This is
+  the supported class.
 - Still refused, unchanged: non-rectilinear hole rings; holes crossing or touching the
   artificial cut; stored holes on synthetic faces
   (`split_face_curved: stored holes are not supported yet`, ADR-0032); general,
