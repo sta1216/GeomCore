@@ -649,7 +649,12 @@ TEST_CASE("trim_face: a cone lateral face propagates unsupported") {
       split_face_curved(cone, lateral, none, kTol);
   REQUIRE_FALSE(fragments.has_value());
   CHECK(fragments.error().code == Errc::unsupported);
-  CHECK(std::string_view(fragments.error().message).starts_with("face_loops_uv:"));
+  CHECK(std::string_view(fragments.error().message)
+            .find("cone lateral faces are not supported yet") !=
+        std::string_view::npos);
+  CHECK(fragments.error().context_a == static_cast<std::uint32_t>(lateral.index()));
+  CHECK(fragments.error().context_a == 1u);
+  CHECK(fragments.error().context_b == 0u);
 }
 
 TEST_CASE("trim_face: two collinear cuts weld at their shared endpoint") {

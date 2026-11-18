@@ -129,10 +129,34 @@ inline Result<Point2d> face_uv_project_cylinder(const Cylinder3& surface, const 
   return Point2d{u, v};
 }
 
-inline Result<Point2d> face_uv_project_cone(const Cone3& surface, const Point3d& point) {
+// `previous_u` and `has_previous_u` carry the last azimuth of the same loop.
+// The apex is one 3D point with no azimuth, so there the previous azimuth is
+// kept (0 when the apex starts the loop) and the chart point is v_apex. The
+// band is symmetric: |v - v_apex| <= 1e-9*max(1, v_apex) is still the apex,
+// with the lower edge absorbing a rounding-level undershoot on the base side
+// and the upper edge an overshoot. A point strictly above the band
+// (v > v_apex + tolerance, on the other nappe) stays an error; every other
+// point uses its own azimuth.
+inline Result<Point2d> face_uv_project_cone(const Cone3& surface, const Point3d& point,
+                                            double previous_u, bool has_previous_u) {
   const Vec3d offset = point - surface.origin;
   const double v = dot(offset, surface.axis);
-  const double rho = surface.radius - v * std::tan(surface.half_angle);
+  const double tan_half_angle = std::tan(surface.half_angle);
+  const double v_apex = surface.radius / tan_half_angle;
+  const double apex_tolerance = 1e-9 * std::max(1.0, v_apex);
+  // A cone thinner than the band itself would turn its whole base rim into the
+  // apex: no sample is farther than `apex_tolerance` from `v_apex`, so the loop
+  // would collapse without an error. Require the apex to be separated from the
+  // rim before accepting a band at all; a thinner cone keeps the old refusal.
+  if (face_uv_finite(v_apex) && v_apex > apex_tolerance &&
+      std::fabs(v - v_apex) <= apex_tolerance) {
+    const double u = has_previous_u ? previous_u : 0.0;
+    if (!face_uv_finite(u)) {
+      return Error{Errc::non_finite, "face_loops_uv: cone inverse is not finite", 0u, 0u};
+    }
+    return Point2d{u, v_apex};
+  }
+  const double rho = surface.radius - v * tan_half_angle;
   // At and beyond the apex the radius vanishes (or turns negative on the other
   // nappe), so the azimuth is undefined. The threshold is relative to the base
   // radius so that a rounding-level positive rho at the apex does not turn into
@@ -213,7 +237,9 @@ inline Result<Point2d> face_uv_project(const FaceUvProjection& projection, const
   if (const auto* cylinder = std::get_if<Cylinder3>(&surface)) {
     return face_uv_project_cylinder(*cylinder, point);
   }
-  if (const auto* cone = std::get_if<Cone3>(&surface)) return face_uv_project_cone(*cone, point);
+  if (const auto* cone = std::get_if<Cone3>(&surface)) {
+    return face_uv_project_cone(*cone, point, previous_u, has_previous_u);
+  }
   if (const auto* sphere = std::get_if<Sphere3>(&surface)) {
     return face_uv_project_sphere(*sphere, point, previous_u, has_previous_u);
   }

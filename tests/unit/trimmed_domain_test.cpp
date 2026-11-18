@@ -10,8 +10,11 @@
 
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <numbers>
 #include <optional>
+#include <string_view>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -394,4 +397,29 @@ TEST_CASE("trimmed domain: planar plate extracts outer and hole rings in order")
     CHECK(triangle_area(triangulation.value()) == doctest::Approx(15.0).epsilon(1e-12));
   }
   CHECK(plate_faces == 2);
+}
+
+TEST_CASE("trimmed domain: a cone face is refused until its chart lands") {
+  const geom::Brep cone = geom::make_cone(geom::Point3d{0.0, 0.0, 0.0},
+                                          geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0, 1e-9)
+                              .value();
+  geom::FaceId lateral{};
+  for (const geom::FaceId id : cone.face_ids()) {
+    const geom::Face& face = cone.face(id);
+    if (face.surface < cone.geometry().surfaces.size() &&
+        std::holds_alternative<geom::Cone3>(cone.geometry().surfaces[face.surface])) {
+      lateral = id;
+      break;
+    }
+  }
+  REQUIRE_FALSE(lateral.is_null());
+  const geom::Result<std::vector<geom::TrimmedBoundary>> boundaries =
+      geom::trimmed_face_boundaries(cone, lateral, uv_projection(cone, lateral), 1e-2);
+  REQUIRE_FALSE(boundaries.has_value());
+  CHECK(boundaries.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(boundaries.error().message) ==
+        "trimmed_face_boundaries: cone faces are not supported yet");
+  CHECK(boundaries.error().context_a == static_cast<std::uint32_t>(lateral.index()));
+  CHECK(boundaries.error().context_a == 1u);
+  CHECK(boundaries.error().context_b == 0u);
 }

@@ -50,6 +50,15 @@ geom::FaceId top_plane_face(const geom::Brep& brep) {
   return geom::FaceId{};
 }
 
+geom::FaceId cone_face(const geom::Brep& brep) {
+  for (const geom::FaceId id : brep.face_ids()) {
+    const geom::Face& face = brep.face(id);
+    if (face.surface == geom::kNoGeometry) continue;
+    if (std::holds_alternative<geom::Cone3>(brep.geometry().surfaces[face.surface])) return id;
+  }
+  return geom::FaceId{};
+}
+
 // A one-face, topologically closed shell whose only face is a bilinear NURBS
 // patch. curved_solid_volume must reject the face before it attempts to
 // integrate it.
@@ -379,6 +388,23 @@ TEST_CASE("curved_solid_volume: cylinder") {
   // pi*r^2 rather than the 32-gon; the lateral face is integrated on the exact
   // cylinder. The result must therefore equal the analytic volume.
   CHECK(relative_error(volume.value(), kPi * radius * radius * height) <= 1e-9);
+}
+
+TEST_CASE("curved_solid_volume: a cone face is refused until its fan lands") {
+  const geom::Brep brep =
+      geom::make_cone({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 1.0, 2.0, kTolerance).value();
+  REQUIRE(brep.solid_count() == 1);
+  const geom::FaceId lateral = cone_face(brep);
+  REQUIRE_FALSE(lateral.is_null());
+  const auto volume =
+      geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), kTolerance);
+  REQUIRE_FALSE(volume.has_value());
+  CHECK(volume.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(volume.error().message) ==
+        "curved_solid_volume: cone faces are not supported yet");
+  CHECK(volume.error().context_a == static_cast<std::uint32_t>(lateral.index()));
+  CHECK(volume.error().context_a == 1u);
+  CHECK(volume.error().context_b == 0u);
 }
 
 TEST_CASE("curved_solid_volume: half cylinder keeps exact semicircle rims") {

@@ -718,22 +718,141 @@ TEST_CASE("a torus seam loop covers both parameter periods") {
     CHECK(std::min(u_seam_error, v_seam_error) <= kTolerance);
   }
 }
-TEST_CASE("a cone lateral loop that reaches the apex is unsupported") {
-  const auto cone = geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0,
-                                    2.0, kTolerance);
+TEST_CASE("face loops uv: the cone apex projects to one chart point") {
+  const auto cone = geom::make_cone(geom::Point3d{0, 0, 0}, geom::Vec3d{0, 0, 1}, 1.0, 2.0, 1e-9);
+  REQUIRE(cone.has_value());
+  const geom::FaceId lateral = face_with_surface<geom::Cone3>(cone.value());
+  const auto loops = geom::face_loops_uv(cone.value(), lateral, 1e-9);
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  const auto& points = loops.value().front().points;
+  std::size_t apex = 0, rim = 0;
+  for (const geom::Point2d& p : points) {
+    CHECK(p[0] >= -1e-12);
+    CHECK(p[0] <= 2.0 * geom::detail::kFaceUvPi + 1e-12);
+    if (p[1] == 2.0) ++apex;
+    if (p[1] == 0.0) ++rim;
+  }
+  CHECK(apex == 1u);
+  CHECK(rim > 1u);
+  // The apex has no azimuth of its own: it inherits the previous rim azimuth,
+  // which the base ring leaves at one full turn. No interior step may jump.
+  REQUIRE(points.size() >= 2u);
+  const geom::Point2d& apex_point = points.back();
+  REQUIRE(apex_point[1] == 2.0);
+  CHECK(apex_point[0] == 2.0 * geom::detail::kFaceUvPi);
+  CHECK(apex_point[0] == points[points.size() - 2u][0]);
+  for (std::size_t i = 1u; i < points.size(); ++i) {
+    CHECK(std::fabs(points[i][0] - points[i - 1u][0]) <= geom::detail::kFaceUvPi);
+  }
+}
+
+TEST_CASE("a cone thinner than the apex band is not snapped to the apex") {
+  const auto cone =
+      geom::make_cone(geom::Point3d{0, 0, 0}, geom::Vec3d{0, 0, 1}, 1.0, 1e-9, kTolerance);
+  REQUIRE(cone.has_value());
+  const geom::FaceId lateral = face_with_surface<geom::Cone3>(cone.value());
+  REQUIRE_FALSE(lateral.is_null());
+  const auto loops = geom::face_loops_uv(cone.value(), lateral, kTolerance);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(loops.error().message) ==
+        "face_loops_uv: cone projection is undefined at or beyond the apex");
+
+  // Twice the old threshold is a valid thin cone: v_apex (2e-9) is greater than
+  // the band (1e-9), so the rim keeps v = 0 and only the apex snaps. This pins
+  // the gate boundary in both directions.
+  const auto valid =
+      geom::make_cone(geom::Point3d{0, 0, 0}, geom::Vec3d{0, 0, 1}, 1.0, 2e-9, kTolerance);
+  REQUIRE(valid.has_value());
+  const geom::FaceId valid_lateral = face_with_surface<geom::Cone3>(valid.value());
+  REQUIRE_FALSE(valid_lateral.is_null());
+  const auto& valid_surface =
+      std::get<geom::Cone3>(valid.value().geometry().surfaces[valid.value().face(valid_lateral).surface]);
+  const double valid_v_apex = valid_surface.radius / std::tan(valid_surface.half_angle);
+  const auto valid_loops = geom::face_loops_uv(valid.value(), valid_lateral, kTolerance);
+  REQUIRE(valid_loops.has_value());
+  REQUIRE(valid_loops.value().size() == 1u);
+  const auto& valid_points = valid_loops.value().front().points;
+  CHECK(valid_points.size() == 34u);
+  std::size_t valid_apex = 0, valid_rim = 0;
+  for (const geom::Point2d& p : valid_points) {
+    if (p[1] == valid_v_apex) ++valid_apex;
+    if (p[1] == 0.0) ++valid_rim;
+  }
+  CHECK(valid_apex == 1u);
+  CHECK(valid_rim == 33u);
+}
+
+TEST_CASE("an apex one ulp inside a zero-width band still maps") {
+  // tan(atan2(1, 7)) puts v_apex one ulp below the apex vertex at v = 7.0, so
+  // the apex sits exactly one ulp inside the accepted band. A zero tolerance
+  // would send it back to the singular path and refuse the loop.
+  constexpr double height = 7.0;
+  const auto cone = geom::make_cone(geom::Point3d{0, 0, 0}, geom::Vec3d{0, 0, 1}, 1.0, height,
+                                    kTolerance);
   REQUIRE(cone.has_value());
   const geom::Brep& brep = cone.value();
   const geom::FaceId lateral = face_with_surface<geom::Cone3>(brep);
   REQUIRE_FALSE(lateral.is_null());
+  const auto& surface =
+      std::get<geom::Cone3>(brep.geometry().surfaces[brep.face(lateral).surface]);
+  const double v_apex = surface.radius / std::tan(surface.half_angle);
+  const double apex_tolerance = 1e-9 * std::max(1.0, v_apex);
+  REQUIRE(v_apex != height);
+  REQUIRE(height - v_apex > 0.0);
+  REQUIRE(height - v_apex <= apex_tolerance);
 
-  // The lateral loop runs base circle -> apex -> base circle, and the apex has
-  // no azimuth, so the uv preimage of the loop does not exist.
   const auto loops = geom::face_loops_uv(brep, lateral, kTolerance);
-  REQUIRE_FALSE(loops.has_value());
-  CHECK(loops.error().code == geom::Errc::unsupported);
-  CHECK(std::string_view(loops.error().message).starts_with("face_loops_uv: cone projection"));
+  REQUIRE(loops.has_value());
+  REQUIRE(loops.value().size() == 1u);
+  std::size_t apex = 0;
+  for (const geom::Point2d& p : loops.value().front().points) {
+    if (p[1] == v_apex) ++apex;
+  }
+  CHECK(apex == 1u);
+}
 
-  // The flat cap of the same cone still exposes a planar ring.
+TEST_CASE("the cone projection still rejects a point beyond the apex") {
+  const auto cone = geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                                    1.0, 2.0, kTolerance);
+  REQUIRE(cone.has_value());
+  const geom::Brep& brep = cone.value();
+  const geom::FaceId lateral = face_with_surface<geom::Cone3>(brep);
+  REQUIRE_FALSE(lateral.is_null());
+  const auto projection =
+      geom::detail::face_uv_projection(brep, brep.face(lateral), kTolerance);
+  REQUIRE(projection.has_value());
+  const auto& surface =
+      std::get<geom::Cone3>(brep.geometry().surfaces[brep.face(lateral).surface]);
+  const double v_apex = surface.radius / std::tan(surface.half_angle);
+  const geom::Point3d beyond =
+      geom::detail::face_uv_eval(projection.value(), geom::Point2d{0.0, v_apex + 1e-3});
+  const auto projected = geom::detail::face_uv_project(projection.value(), beyond, 0.0, false);
+  REQUIRE_FALSE(projected.has_value());
+  CHECK(projected.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(projected.error().message) ==
+        "face_loops_uv: cone projection is undefined at or beyond the apex");
+
+  // One ulp past the accepted band is still beyond the apex: the band is
+  // closed, so the next representable value above v_apex + tolerance is out.
+  const double apex_tolerance = 1e-9 * std::max(1.0, v_apex);
+  const geom::Point2d just_beyond_uv{
+      0.0, std::nextafter(v_apex + apex_tolerance, std::numeric_limits<double>::infinity())};
+  const geom::Point3d just_beyond =
+      geom::detail::face_uv_eval(projection.value(), just_beyond_uv);
+  const auto outside = geom::detail::face_uv_project(projection.value(), just_beyond, 0.0, false);
+  REQUIRE_FALSE(outside.has_value());
+  CHECK(outside.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(outside.error().message) ==
+        "face_loops_uv: cone projection is undefined at or beyond the apex");
+}
+
+TEST_CASE("the flat cap of a cone keeps its planar ring") {
+  const auto cone = geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                                    1.0, 2.0, kTolerance);
+  REQUIRE(cone.has_value());
+  const geom::Brep& brep = cone.value();
   const geom::FaceId cap = cap_facing(brep, geom::Vec3d{0.0, 0.0, 1.0}, true);
   REQUIRE_FALSE(cap.is_null());
   const auto cap_loops = geom::face_loops_uv(brep, cap, kTolerance);

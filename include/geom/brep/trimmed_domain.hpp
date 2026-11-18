@@ -339,6 +339,16 @@ inline Result<std::vector<TrimmedBoundary>> trimmed_face_boundaries(
                  0u};
   }
 
+  const Face& brep_face = brep.face(face);
+  // Temporary guard: the cone chart has no trimmed-domain splitter yet, so a
+  // cone face must be refused rather than projecting its loops onto a chart the
+  // ring builder does not understand. Task 2/4b3 replaces this guard.
+  if (brep_face.surface < brep.geometry().surfaces.size() &&
+      std::holds_alternative<Cone3>(brep.geometry().surfaces[brep_face.surface])) {
+    return Error{Errc::unsupported, "trimmed_face_boundaries: cone faces are not supported yet",
+                 face.index(), 0u};
+  }
+
   Result<std::vector<FaceUvLoop>> loops =
       face_loops_uv(brep, face, projection.tolerance);
   if (!loops) return loops.error();

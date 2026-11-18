@@ -329,6 +329,14 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
       }
 
       const SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
+      // Temporary guard: the apex fan that closes a cone's lateral face is not
+      // integrated yet, so refuse the cone instead of returning a silently wrong
+      // volume. Task 4b2/4b3 replaces this guard with the cone fan.
+      if (std::holds_alternative<Cone3>(surface)) {
+        return Error{Errc::unsupported,
+                     "curved_solid_volume: cone faces are not supported yet",
+                     face_id.index(), 0u};
+      }
       const bool planar = std::holds_alternative<Plane3>(surface);
       if (planar) {
         // Planar faces have a constant divergence integrand, so only the exact
