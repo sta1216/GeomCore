@@ -3,6 +3,7 @@
 #include <geom/brep/boolean_solid_curved.hpp>
 #include <geom/brep/detail/curved_volume.hpp>
 #include <geom/brep/face_uv.hpp>
+#include <geom/brep/mass_properties.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/solid_editor.hpp>
 #include <geom/brep/split_solid.hpp>
@@ -615,4 +616,14 @@ TEST_CASE("QA-13: trimmed tessellation is watertight, finite and deterministic")
       CHECK(std::memcmp(&left, &right, sizeof(double)) == 0);
     }
   }
+}
+
+TEST_CASE("QA-20: the holed window cylinder meshes and weighs consistently") {
+  const geom::Brep brep = hole_window_cylinder();
+  const auto mesh = geom::tessellate(brep, geom::TessellationOptions{1e-3, 0.35});
+  REQUIRE(mesh.has_value());
+  check_watertight(mesh.value());
+  const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
+  REQUIRE(mass.has_value());
+  CHECK(std::abs(mass.value().volume - 5.826573829717787) <= 1e-6 * 5.826573829717787);
 }
