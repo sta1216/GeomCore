@@ -416,12 +416,52 @@ TEST_CASE("trimmed tessellation: a rectilinear hole meshes watertight") {
                                 std::abs(p[2] - z) <= 1e-6;
                        });
   };
-  CHECK(corner(-0.5, 0.5, 0.5));
-  CHECK(corner(0.5, 0.5, 0.5));
-  CHECK(corner(-0.5, 0.5, 1.5));
-  CHECK(corner(0.5, 0.5, 1.5));
+  // The hole rim is on the cylinder at u = pi/3 .. 2*pi/3, so its corners sit at
+  // x = +/-0.5, y = sqrt(3)/2, z = 0.5/1.5. The pocket back wall is at y = 0.5.
+  const double y = std::sqrt(3.0) / 2.0;
+  CHECK(corner(-0.5, y, 0.5));
+  CHECK(corner(0.5, y, 0.5));
+  CHECK(corner(-0.5, y, 1.5));
+  CHECK(corner(0.5, y, 1.5));
   CHECK(mesh.value().triangles.size() >= 950u);
   CHECK(mesh.value().triangles.size() <= 1450u);
+
+  const geom::FaceId lateral = lateral_face(brep);
+  REQUIRE(!lateral.is_null());
+  const geom::Result<geom::detail::FaceUvProjection> projection =
+      geom::detail::face_uv_projection(brep, brep.face(lateral), 1e-9);
+  REQUIRE(projection.has_value());
+  const auto uv_of = [&](std::uint32_t index, double previous_u, bool has_previous) {
+    return geom::detail::face_uv_project(projection.value(), mesh.value().positions[index], previous_u,
+                                 has_previous);
+  };
+  double uv_area = 0.0;
+  bool centroid_inside_hole = false;
+  for (std::size_t t = 0; t < mesh.value().triangles.size(); ++t) {
+    if (mesh.value().triangle_face[t] != lateral.index()) continue;
+    const auto& triangle = mesh.value().triangles[t];
+    const geom::Result<geom::Point2d> a = uv_of(triangle[0], 0.0, false);
+    REQUIRE(a.has_value());
+    const geom::Result<geom::Point2d> b = uv_of(triangle[1], a.value()[0], true);
+    REQUIRE(b.has_value());
+    const geom::Result<geom::Point2d> c = uv_of(triangle[2], a.value()[0], true);
+    REQUIRE(c.has_value());
+    geom::Point2d uv1 = b.value();
+    geom::Point2d uv2 = c.value();
+    uv1[0] = geom::detail::face_uv_unwrap(uv1[0], a.value()[0]);
+    uv2[0] = geom::detail::face_uv_unwrap(uv2[0], a.value()[0]);
+    uv_area += std::abs((uv1[0] - a.value()[0]) * (uv2[1] - a.value()[1]) -
+                        (uv1[1] - a.value()[1]) * (uv2[0] - a.value()[0])) /
+               2.0;
+    const double cu = (a.value()[0] + uv1[0] + uv2[0]) / 3.0;
+    const double cv = (a.value()[1] + uv1[1] + uv2[1]) / 3.0;
+    if (cu > std::numbers::pi / 3.0 + 1e-9 && cu < 2.0 * std::numbers::pi / 3.0 - 1e-9 &&
+        cv > 0.5 + 1e-9 && cv < 1.5 - 1e-9) {
+      centroid_inside_hole = true;
+    }
+  }
+  CHECK_FALSE(centroid_inside_hole);
+  CHECK(uv_area == doctest::Approx(11.519173063162574).epsilon(1e-12));
 }
 TEST_CASE("trimmed tessellation: coarse deflection keeps the hole open") {
   const geom::Brep brep = hole_window_cylinder();
@@ -431,6 +471,42 @@ TEST_CASE("trimmed tessellation: coarse deflection keeps the hole open") {
   REQUIRE(coarse.has_value());
   check_watertight(coarse.value());
   CHECK(coarse.value().triangles.size() < fine.value().triangles.size());
+
+  const geom::FaceId lateral = lateral_face(brep);
+  REQUIRE(!lateral.is_null());
+  const geom::Result<geom::detail::FaceUvProjection> projection =
+      geom::detail::face_uv_projection(brep, brep.face(lateral), 1e-9);
+  REQUIRE(projection.has_value());
+  bool centroid_inside_hole = false;
+  double uv_area = 0.0;
+  for (std::size_t t = 0; t < coarse.value().triangles.size(); ++t) {
+    if (coarse.value().triangle_face[t] != lateral.index()) continue;
+    const auto& triangle = coarse.value().triangles[t];
+    const geom::Result<geom::Point2d> a =
+        geom::detail::face_uv_project(projection.value(), coarse.value().positions[triangle[0]], 0.0, false);
+    REQUIRE(a.has_value());
+    const geom::Result<geom::Point2d> b = geom::detail::face_uv_project(
+        projection.value(), coarse.value().positions[triangle[1]], a.value()[0], true);
+    REQUIRE(b.has_value());
+    const geom::Result<geom::Point2d> c = geom::detail::face_uv_project(
+        projection.value(), coarse.value().positions[triangle[2]], a.value()[0], true);
+    REQUIRE(c.has_value());
+    geom::Point2d uv1 = b.value();
+    geom::Point2d uv2 = c.value();
+    uv1[0] = geom::detail::face_uv_unwrap(uv1[0], a.value()[0]);
+    uv2[0] = geom::detail::face_uv_unwrap(uv2[0], a.value()[0]);
+    uv_area += std::abs((uv1[0] - a.value()[0]) * (uv2[1] - a.value()[1]) -
+                        (uv1[1] - a.value()[1]) * (uv2[0] - a.value()[0])) /
+               2.0;
+    const double cu = (a.value()[0] + uv1[0] + uv2[0]) / 3.0;
+    const double cv = (a.value()[1] + uv1[1] + uv2[1]) / 3.0;
+    if (cu > std::numbers::pi / 3.0 + 1e-9 && cu < 2.0 * std::numbers::pi / 3.0 - 1e-9 &&
+        cv > 0.5 + 1e-9 && cv < 1.5 - 1e-9) {
+      centroid_inside_hole = true;
+    }
+  }
+  CHECK_FALSE(centroid_inside_hole);
+  CHECK(uv_area == doctest::Approx(11.519173063162574).epsilon(1e-12));
 }
 TEST_CASE("trimmed tessellation: a band-shaped domain refines with smaller deflection") {
   const geom::Brep brep = cut_cylinder();
