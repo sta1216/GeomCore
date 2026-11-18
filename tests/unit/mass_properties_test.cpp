@@ -645,27 +645,28 @@ TEST_CASE("mass properties: trimmed sampling deflection stays at the quadrature 
   CHECK(fine_error < coarse_error);
 }
 
-TEST_CASE("mass properties: trimmed dents and holes report their limitation") {
-  {
-    // The window at +y (u in [45, 135] deg) does not cross the seam, so it
-    // closes in uv and the trimmed face has an outer ring plus a hole loop; the
-    // parametric integration does not support holes yet (deferred to M3c-2).
-    const geom::Brep brep = hole_window_brep();
-    const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
-    REQUIRE(!mass.has_value());
-    CHECK(mass.error().code == geom::Errc::unsupported);
-    CHECK(std::string(mass.error().message) ==
-          "mass_properties: trimmed curved face has a hole");
-  }
-  {
-    // An oblique cut leaves an ellipse in uv, which is not rectilinear.
-    const geom::Brep brep = slanted_trim_brep();
-    const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
-    REQUIRE(!mass.has_value());
-    CHECK(mass.error().code == geom::Errc::unsupported);
-    CHECK(std::string(mass.error().message) ==
-          "mass_properties: trimmed curved face boundary is not rectilinear");
-  }
+TEST_CASE("mass properties: a trimmed curved face with a rectilinear hole") {
+  const geom::Brep brep = hole_window_brep();
+  const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
+  REQUIRE(mass.has_value());
+  const double expected = 2.0 * 3.14159265358979323846 - 0.45661147746179975;
+  CHECK(std::abs(mass.value().volume - expected) <= 1e-9 * expected);
+  CHECK(mass.value().centroid[1] < 0.0);
+
+  const auto again = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
+  REQUIRE(again.has_value());
+  CHECK(again.value().volume == mass.value().volume);
+  CHECK(again.value().centroid[1] == mass.value().centroid[1]);
+}
+
+TEST_CASE("mass properties: a slanted trim is still refused") {
+  // An oblique cut leaves an ellipse in uv, which is not rectilinear.
+  const geom::Brep brep = slanted_trim_brep();
+  const auto mass = geom::mass_properties(brep, geom::MassPropertiesOptions{1e-9, 24, 1e-5});
+  REQUIRE(!mass.has_value());
+  CHECK(mass.error().code == geom::Errc::unsupported);
+  CHECK(std::string(mass.error().message) ==
+        "mass_properties: trimmed curved face boundary is not rectilinear");
 }
 
 TEST_CASE("mass properties: trimmed sampling deflection is validated") {

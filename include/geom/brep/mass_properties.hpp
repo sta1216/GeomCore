@@ -439,19 +439,19 @@ inline Result<void> mass_add_trimmed_face(const Brep& brep, FaceId id, const Sur
   const Result<std::vector<TrimmedBoundary>> boundaries = trimmed_face_boundaries(
       brep, id, projection.value(), options.curved_sampling_deflection);
   if (!boundaries.has_value()) return boundaries.error();
-  if (boundaries.value().size() != 1u) {
-    return Error{Errc::unsupported, "mass_properties: trimmed curved face has a hole", id.index(),
-                 0u};
+  std::vector<TrimmedBoundary> simplified;
+  simplified.reserve(boundaries.value().size());
+  for (const TrimmedBoundary& boundary : boundaries.value()) {
+    if (!tessellate_ring_rectilinear(boundary.points)) {
+      return Error{Errc::unsupported,
+                   "mass_properties: trimmed curved face boundary is not rectilinear", id.index(),
+                   0u};
+    }
+    TrimmedBoundary domain = boundary;
+    domain.points = mass_simplify_rectilinear_ring(domain.points);
+    domain.arcs.assign(domain.points.size(), std::nullopt);
+    simplified.push_back(std::move(domain));
   }
-  if (!tessellate_ring_rectilinear(boundaries.value().front().points)) {
-    return Error{Errc::unsupported,
-                 "mass_properties: trimmed curved face boundary is not rectilinear", id.index(),
-                 0u};
-  }
-  TrimmedBoundary domain = boundaries.value().front();
-  domain.points = mass_simplify_rectilinear_ring(domain.points);
-  domain.arcs.assign(domain.points.size(), std::nullopt);
-  const std::vector<TrimmedBoundary> simplified{std::move(domain)};
   const Result<TrimmedUvTriangulation> triangulation = triangulate_trimmed_domain(simplified);
   if (!triangulation.has_value()) return triangulation.error();
   // The uv edges of a rectilinear trimmed domain are exact parameter lines, and
