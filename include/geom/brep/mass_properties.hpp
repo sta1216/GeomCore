@@ -51,21 +51,21 @@ inline namespace v1 {
 // Errc::unsupported rather than integrating the wrong region.
 //
 // A curved face whose boundary is a polyline trim (the curved-boolean output)
-// and whose uv domain is a single rectilinear ring is integrated over its
-// trimmed uv triangulation instead: every triangle is split until its longest
-// uv edge is shorter than the quadrature step, then the exact surface position
-// and Jacobian are sampled with the seven-point Dunavant rule. The step is
-// max(sqrt(8*curved_sampling_deflection), 5e-2 radians); the floor binds for
-// curved_sampling_deflection <= 3.125e-4 (where sqrt(8d) < 5e-2), so a finer
-// request cannot refine the interior further. The boundary samples produced by
-// trimmed_face_boundaries are not floored, but a rectilinear domain's samples
-// lie on exact parameter lines and are reduced to its corners, so the integrated
-// region does not depend on them. The floor therefore bounds the runtime (a
-// 1e-9 uv step on the default fixture takes about 31 s); it does not cap the
-// measured accuracy: the volume relative error is 4.4e-10 on the r = 1 fixture
-// and 4.4e-11 on the r = 10 fixture at the default. A trimmed face with a hole
-// or a non-rectilinear boundary stays Errc::unsupported; curved-face holes are
-// deferred to M3c-2.
+// and whose uv rings are all rectilinear (one outer ring plus any holes) is
+// integrated over its trimmed uv triangulation instead: every triangle is split
+// until its longest uv edge is shorter than the quadrature step, then the exact
+// surface position and Jacobian are sampled with the seven-point Dunavant rule.
+// The step is max(sqrt(8*curved_sampling_deflection), 5e-2 radians); the floor
+// binds for curved_sampling_deflection <= 3.125e-4 (where sqrt(8d) < 5e-2), so a
+// finer request cannot refine the interior further. The boundary samples
+// produced by trimmed_face_boundaries are not floored, but a rectilinear
+// domain's samples lie on exact parameter lines and are reduced to its corners,
+// so the integrated region does not depend on them. The floor therefore bounds
+// the runtime (a 1e-9 uv step on the default fixture takes about 31 s); it does
+// not cap the measured accuracy: the volume relative error is 4.4e-10 at radius
+// 1 and 4.4e-11 at radius 10 under the default. A trimmed face is meshed only
+// when every uv ring is rectilinear; non-rectilinear boundaries, general or
+// twisted holes, and NURBS holes stay Errc::unsupported (ADR-0033).
 //
 // All output values are finite; a non-finite integral is Errc::numeric_failure.
 // Options: a non-positive or non-finite sampling_deflection or
