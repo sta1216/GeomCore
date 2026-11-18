@@ -1098,11 +1098,20 @@ inline bool tessellate_ring_rectilinear(const std::vector<Point2d>& points) {
 
 inline constexpr double kStripEps = 1e-12;
 
-inline Result<bool> tessellate_trimmed_strip_triangles(
-    TessellateState& state, const FaceUvProjection& projection, const TessellateTrimmedRing& ring,
-    FaceId id, std::vector<std::array<std::uint32_t, 3>>& triangles) {
-  const std::size_t count = ring.points.size();
-  if (count < 4) return false;
+inline Result<bool> tessellate_trimmed_strip_triangles_impl(
+    TessellateState& state, const FaceUvProjection& projection, const TessellateTrimmedRing& outer,
+    std::span<const TessellateTrimmedRing> holes, std::span<const double> extra_levels, FaceId id,
+    std::vector<std::array<std::uint32_t, 3>>& triangles) {
+  std::vector<const TessellateTrimmedRing*> rings;
+  rings.reserve(1u + holes.size());
+  rings.push_back(&outer);
+  for (const TessellateTrimmedRing& hole : holes) rings.push_back(&hole);
+  std::size_t count = 0;
+  for (const TessellateTrimmedRing* ring : rings) {
+    if (ring->points.size() < 3) return false;
+    count += ring->points.size();
+  }
+  if (outer.points.size() < 4) return false;
 
   struct Horizontal {
     double v;
@@ -1120,18 +1129,42 @@ inline Result<bool> tessellate_trimmed_strip_triangles(
   std::vector<Vertical> verticals;
   xs.reserve(count);
   ys.reserve(count);
-  for (std::size_t i = 0; i < count; ++i) {
-    const Point2d& a = ring.points[i];
-    const Point2d& b = ring.points[(i + 1) % count];
-    xs.push_back(a[0]);
-    ys.push_back(a[1]);
-    const bool flat_v = std::fabs(a[1] - b[1]) <= kStripEps;
-    const bool flat_u = std::fabs(a[0] - b[0]) <= kStripEps;
-    if (!flat_v && !flat_u) return false;
-    if (flat_v && !flat_u) {
-      horizontals.push_back(Horizontal{a[1], std::min(a[0], b[0]), std::max(a[0], b[0])});
-    } else if (flat_u && !flat_v) {
-      verticals.push_back(Vertical{a[0], std::min(a[1], b[1]), std::max(a[1], b[1])});
+  double u_min = std::numeric_limits<double>::infinity();
+  double u_max = -std::numeric_limits<double>::infinity();
+  double v_min = std::numeric_limits<double>::infinity();
+  double v_max = -std::numeric_limits<double>::infinity();
+  for (const Point2d& point : outer.points) {
+    u_min = std::min(u_min, point[0]);
+    u_max = std::max(u_max, point[0]);
+    v_min = std::min(v_min, point[1]);
+    v_max = std::max(v_max, point[1]);
+  }
+  const double bound_tolerance =
+      1e-9 * (1.0 + std::max({std::fabs(u_min), std::fabs(u_max), std::fabs(v_min),
+                              std::fabs(v_max)}));
+  for (const TessellateTrimmedRing& hole : holes) {
+    for (const Point2d& point : hole.points) {
+      if (point[0] < u_min - bound_tolerance || point[0] > u_max + bound_tolerance ||
+          point[1] < v_min - bound_tolerance || point[1] > v_max + bound_tolerance) {
+        return false;
+      }
+    }
+  }
+  for (const TessellateTrimmedRing* ring : rings) {
+    const std::size_t ring_count = ring->points.size();
+    for (std::size_t i = 0; i < ring_count; ++i) {
+      const Point2d& a = ring->points[i];
+      const Point2d& b = ring->points[(i + 1) % ring_count];
+      xs.push_back(a[0]);
+      ys.push_back(a[1]);
+      const bool flat_v = std::fabs(a[1] - b[1]) <= kStripEps;
+      const bool flat_u = std::fabs(a[0] - b[0]) <= kStripEps;
+      if (!flat_v && !flat_u) return false;
+      if (flat_v && !flat_u) {
+        horizontals.push_back(Horizontal{a[1], std::min(a[0], b[0]), std::max(a[0], b[0])});
+      } else if (flat_u && !flat_v) {
+        verticals.push_back(Vertical{a[0], std::min(a[1], b[1]), std::max(a[1], b[1])});
+      }
     }
   }
   auto sort_unique = [](std::vector<double>& values) {
@@ -1146,8 +1179,9 @@ inline Result<bool> tessellate_trimmed_strip_triangles(
   sort_unique(xs);
   sort_unique(ys);
   std::vector<double> levels;
-  levels.reserve(horizontals.size());
+  levels.reserve(horizontals.size() + extra_levels.size());
   for (const Horizontal& segment : horizontals) levels.push_back(segment.v);
+  for (const double level : extra_levels) levels.push_back(level);
   sort_unique(levels);
   if (xs.size() < 2 || levels.size() < 2) return false;
 
@@ -1181,11 +1215,13 @@ inline Result<bool> tessellate_trimmed_strip_triangles(
                                double u1) -> std::optional<TessellateStripChain> {
     TessellateStripChain chain;
     chain.v = v;
-    for (std::size_t i = 0; i < count; ++i) {
-      const double pu = ring.points[i][0];
-      const double pv = ring.points[i][1];
-      if (std::fabs(pv - v) <= kStripEps && pu >= u0 - kStripEps && pu <= u1 + kStripEps) {
-        chain.u.push_back(pu);
+    for (const TessellateTrimmedRing* ring : rings) {
+      for (const Point2d& point : ring->points) {
+        const double pu = point[0];
+        const double pv = point[1];
+        if (std::fabs(pv - v) <= kStripEps && pu >= u0 - kStripEps && pu <= u1 + kStripEps) {
+          chain.u.push_back(pu);
+        }
       }
     }
     if (!is_cap(v)) {
@@ -1220,11 +1256,13 @@ inline Result<bool> tessellate_trimmed_strip_triangles(
   // every sample of the wall is a vertex of this face as well.
   const auto wall_samples = [&](double u, double va, double vb) {
     std::vector<std::pair<double, std::uint32_t>> ordered;
-    for (std::size_t i = 0; i < count; ++i) {
-      const Point2d& point = ring.points[i];
-      if (std::fabs(point[0] - u) <= kStripEps && point[1] >= va - kStripEps &&
-          point[1] <= vb + kStripEps) {
-        ordered.emplace_back(point[1], ring.positions[i]);
+    for (const TessellateTrimmedRing* ring : rings) {
+      for (std::size_t i = 0; i < ring->points.size(); ++i) {
+        const Point2d& point = ring->points[i];
+        if (std::fabs(point[0] - u) <= kStripEps && point[1] >= va - kStripEps &&
+            point[1] <= vb + kStripEps) {
+          ordered.emplace_back(point[1], ring->positions[i]);
+        }
       }
     }
     std::sort(ordered.begin(), ordered.end(),
@@ -1293,9 +1331,11 @@ inline Result<bool> tessellate_trimmed_strip_triangles(
   }
 
   std::map<std::pair<double, double>, std::uint32_t> vertices;
-  for (std::size_t i = 0; i < count; ++i) {
-    vertices.insert_or_assign(std::make_pair(ring.points[i][1], ring.points[i][0]),
-                              ring.positions[i]);
+  for (const TessellateTrimmedRing* ring : rings) {
+    for (std::size_t i = 0; i < ring->points.size(); ++i) {
+      vertices.insert_or_assign(std::make_pair(ring->points[i][1], ring->points[i][0]),
+                                ring->positions[i]);
+    }
   }
   const auto vertex_at = [&](double v, double u) -> Result<std::uint32_t> {
     const auto found = vertices.find(std::make_pair(v, u));
@@ -1374,6 +1414,64 @@ inline Result<bool> tessellate_trimmed_strip_triangles(
     if (!right.has_value()) return right.error();
   }
   return true;
+}
+
+// Meshes a piece of a periodic outer ring. `extra_levels` carries the hole rows
+// that the peer piece uses so both sides of a shared seam/cut wall expose the
+// same row vertices even when the hole is assigned to only one piece.
+inline Result<bool> tessellate_trimmed_strip_triangles(
+    TessellateState& state, const FaceUvProjection& projection, const TessellateTrimmedRing& outer,
+    std::span<const TessellateTrimmedRing> holes, FaceId id,
+    std::vector<std::array<std::uint32_t, 3>>& triangles) {
+  return tessellate_trimmed_strip_triangles_impl(
+      state, projection, outer, holes, std::span<const double>{}, id, triangles);
+}
+
+// The hole-free entry point keeps the historical four-argument contract: it
+// delegates with an empty hole span so its output stays bitwise identical.
+inline Result<bool> tessellate_trimmed_strip_triangles(
+    TessellateState& state, const FaceUvProjection& projection, const TessellateTrimmedRing& ring,
+    FaceId id, std::vector<std::array<std::uint32_t, 3>>& triangles) {
+  return tessellate_trimmed_strip_triangles(state, projection, ring,
+                                            std::span<const TessellateTrimmedRing>{}, id, triangles);
+}
+
+// Inserts samples into a vertical wall of a periodic piece. Both pieces that
+// meet along the wall receive the same position indices, so splitting a wall at
+// a hole level never opens a crack along the periodic seam or the artificial cut.
+inline void tessellate_insert_wall_samples(
+    TessellateTrimmedRing& ring, double wall_u,
+    const std::vector<std::pair<double, std::uint32_t>>& samples) {
+  const double tolerance = 1e-9 * (1.0 + std::fabs(wall_u));
+  std::vector<Point2d> points;
+  std::vector<std::uint32_t> positions;
+  points.reserve(ring.points.size() + samples.size());
+  positions.reserve(ring.positions.size() + samples.size());
+  const std::size_t count = ring.points.size();
+  for (std::size_t i = 0; i < count; ++i) {
+    const Point2d& a = ring.points[i];
+    const Point2d& b = ring.points[(i + 1) % count];
+    points.push_back(a);
+    positions.push_back(ring.positions[i]);
+    if (std::fabs(a[0] - wall_u) > tolerance || std::fabs(b[0] - wall_u) > tolerance) continue;
+    if (std::fabs(a[1] - b[1]) <= kStripEps) continue;
+    if (b[1] > a[1]) {
+      for (const auto& [v, position] : samples) {
+        if ((v - a[1]) * (v - b[1]) >= 0.0) continue;
+        points.push_back(Point2d{wall_u, v});
+        positions.push_back(position);
+      }
+    } else {
+      for (auto it = samples.rbegin(); it != samples.rend(); ++it) {
+        const double v = it->first;
+        if ((v - a[1]) * (v - b[1]) >= 0.0) continue;
+        points.push_back(Point2d{wall_u, v});
+        positions.push_back(it->second);
+      }
+    }
+  }
+  ring.points = std::move(points);
+  ring.positions = std::move(positions);
 }
 
 // Splits interior edges of a trimmed-face triangulation that are longer than the
@@ -1625,13 +1723,11 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
                  id.index(), static_cast<std::uint32_t>(outer_count)};
   }
 
-  // A trimmed face is only meshed here when its uv domain is a single outer ring
-  // with an axis-aligned boundary: the boundary-aligned strips cover it exactly,
-  // while holes and slanted (non-rectilinear) trims are rejected before any
-  // triangulation, independently of the deflection. Keeping the rejection here
-  // (instead of relying on the later sag check) makes the contract deterministic:
-  // a coarse deflection must not silently turn a hole or an ellipse into a
-  // chordal, non-manifold patch. Curved-face holes and slanted trims are M3c-2.
+  // A trimmed curved face is meshed here only when every ring is rectilinear:
+  // the boundary-aligned strips cover it exactly. Slanted trims and
+  // non-rectilinear holes are rejected before triangulation, independently of the
+  // deflection, so a coarse deflection cannot silently turn them into a chordal,
+  // non-manifold patch.
   std::vector<TessellateTrimmedRing> outer;
   std::vector<TessellateTrimmedRing> holes;
   for (TessellateTrimmedRing& ring : rings) {
@@ -1641,23 +1737,25 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
       holes.push_back(std::move(ring));
     }
   }
-  if (!holes.empty()) {
-    return Error{Errc::unsupported, "tessellate: trimmed curved face has a hole", id.index(),
-                 0u};
-  }
   if (!tessellate_ring_rectilinear(outer.front().points)) {
     return Error{Errc::unsupported,
                  "tessellate: trimmed curved face boundary is not rectilinear", id.index(), 0u};
+  }
+  for (const TessellateTrimmedRing& hole : holes) {
+    if (!tessellate_ring_rectilinear(hole.points)) {
+      return Error{Errc::unsupported,
+                   "tessellate: trimmed curved face hole boundary is not rectilinear", id.index(),
+                   0u};
+    }
   }
 
   // A cheap upper bound on the triangles the generic path can emit is checked
   // before that path allocates its triangulation: a simple polygon of n vertices
   // produces at most n - 2 triangles, and the fan expansion never adds more
-  // triangles than the ring has samples. Holes are rejected above.
-  std::size_t triangle_bound = 2u * rings.size();
-  for (const TessellateTrimmedRing& ring : rings) {
-    triangle_bound += ring.points.size();
-  }
+  // triangles than the ring has samples.
+  std::size_t triangle_bound = 2u * (outer.size() + holes.size());
+  for (const TessellateTrimmedRing& ring : outer) triangle_bound += ring.points.size();
+  for (const TessellateTrimmedRing& ring : holes) triangle_bound += ring.points.size();
   if (triangle_bound > kTrimmedMaxTriangles ||
       state.mesh.triangles.size() > kTrimmedMaxTriangles - triangle_bound) {
     return Error{Errc::numeric_failure,
@@ -1667,7 +1765,142 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
 
   std::vector<std::array<std::uint32_t, 3>> triangles;
   bool stripped = false;
-  if (holes.empty()) {
+  std::optional<std::array<TessellateTrimmedRing, 2>> pieces;
+  std::array<std::vector<TessellateTrimmedRing>, 2> assigned_holes;
+  if (!holes.empty()) {
+    if (projection.periodic_u()) pieces = tessellate_split_periodic_ring(outer.front());
+    if (pieces.has_value()) {
+      struct PieceBounds {
+        double u0 = 0.0;
+        double u1 = 0.0;
+        double v0 = 0.0;
+        double v1 = 0.0;
+      };
+      std::array<PieceBounds, 2> bounds;
+      for (std::size_t piece = 0; piece < 2; ++piece) {
+        bounds[piece].u0 = std::numeric_limits<double>::infinity();
+        bounds[piece].u1 = -std::numeric_limits<double>::infinity();
+        bounds[piece].v0 = std::numeric_limits<double>::infinity();
+        bounds[piece].v1 = -std::numeric_limits<double>::infinity();
+        for (const Point2d& point : pieces.value()[piece].points) {
+          bounds[piece].u0 = std::min(bounds[piece].u0, point[0]);
+          bounds[piece].u1 = std::max(bounds[piece].u1, point[0]);
+          bounds[piece].v0 = std::min(bounds[piece].v0, point[1]);
+          bounds[piece].v1 = std::max(bounds[piece].v1, point[1]);
+        }
+      }
+      double u_min = std::numeric_limits<double>::infinity();
+      double u_max = -std::numeric_limits<double>::infinity();
+      double v_min = std::numeric_limits<double>::infinity();
+      double v_max = -std::numeric_limits<double>::infinity();
+      for (const Point2d& point : outer.front().points) {
+        u_min = std::min(u_min, point[0]);
+        u_max = std::max(u_max, point[0]);
+        v_min = std::min(v_min, point[1]);
+        v_max = std::max(v_max, point[1]);
+      }
+      const double target = u_min + 0.5 * (u_max - u_min);
+      const double tolerance =
+          1e-9 * (1.0 + std::max({std::fabs(u_min), std::fabs(u_max), std::fabs(v_min),
+                                  std::fabs(v_max)}));
+      // The split cuts the ring at the bottom/top samples nearest the midpoint;
+      // that sample column, not the midpoint itself, is the artificial cut wall.
+      const double cut_wall =
+          std::fabs(bounds[0].u0 - target) <= std::fabs(bounds[0].u1 - target) ? bounds[0].u0
+                                                                             : bounds[0].u1;
+      const auto assign = [&](const TessellateTrimmedRing& hole) -> int {
+        int which = -1;
+        for (const Point2d& point : hole.points) {
+          if (std::fabs(point[0] - cut_wall) <= tolerance) return -2;
+        }
+        for (int piece = 0; piece < 2; ++piece) {
+          const PieceBounds& box = bounds[static_cast<std::size_t>(piece)];
+          bool inside = true;
+          for (const Point2d& point : hole.points) {
+            if (point[0] <= box.u0 + tolerance || point[0] >= box.u1 - tolerance ||
+                point[1] <= box.v0 + tolerance || point[1] >= box.v1 - tolerance) {
+              inside = false;
+              break;
+            }
+          }
+          if (!inside) continue;
+          if (which >= 0) return -2;
+          which = piece;
+        }
+        return which;
+      };
+      for (const TessellateTrimmedRing& hole : holes) {
+        const int which = assign(hole);
+        if (which < 0) {
+          return Error{Errc::unsupported,
+                       "tessellate: trimmed curved face hole crosses the periodic cut", id.index(),
+                       0u};
+        }
+        assigned_holes[static_cast<std::size_t>(which)].push_back(hole);
+      }
+
+      // A hole row forces the strip bands to cross the piece's seam and cut walls.
+      // Both pieces that meet on a wall must use the same split vertices, so the
+      // row samples are created once and inserted into every piece wall.
+      std::vector<double> levels;
+      for (const TessellateTrimmedRing& hole : holes) {
+        const std::size_t hole_count = hole.points.size();
+        for (std::size_t i = 0; i < hole_count; ++i) {
+          const Point2d& a = hole.points[i];
+          const Point2d& b = hole.points[(i + 1) % hole_count];
+          if (std::fabs(a[1] - b[1]) <= kStripEps && std::fabs(a[0] - b[0]) > kStripEps) {
+            levels.push_back(a[1]);
+          }
+        }
+      }
+      std::sort(levels.begin(), levels.end());
+      levels.erase(std::unique(levels.begin(), levels.end(),
+                               [](double a, double b) { return b - a <= kStripEps; }),
+                   levels.end());
+      std::vector<std::pair<double, std::uint32_t>> seam_samples;
+      std::vector<std::pair<double, std::uint32_t>> cut_samples;
+      for (const double level : levels) {
+        if (level <= v_min + tolerance || level >= v_max - tolerance) continue;
+        const Result<std::uint32_t> seam =
+            tessellate_append_point(state, face_uv_eval(projection, Point2d{u_min, level}));
+        if (!seam.has_value()) return seam.error();
+        seam_samples.emplace_back(level, seam.value());
+        const Result<std::uint32_t> cut_index =
+            tessellate_append_point(state, face_uv_eval(projection, Point2d{cut_wall, level}));
+        if (!cut_index.has_value()) return cut_index.error();
+        cut_samples.emplace_back(level, cut_index.value());
+      }
+      for (std::size_t piece = 0; piece < 2; ++piece) {
+        TessellateTrimmedRing& ring = pieces.value()[piece];
+        const PieceBounds& box = bounds[piece];
+        const double seam_u = std::fabs(box.u0 - cut_wall) <= tolerance ? box.u1 : box.u0;
+        const double cut_u = std::fabs(box.u0 - cut_wall) <= tolerance ? box.u0 : box.u1;
+        tessellate_insert_wall_samples(ring, seam_u, seam_samples);
+        tessellate_insert_wall_samples(ring, cut_u, cut_samples);
+      }
+
+      bool ok = true;
+      for (std::size_t piece = 0; piece < 2; ++piece) {
+        std::vector<std::array<std::uint32_t, 3>> part;
+        const Result<bool> strip = tessellate_trimmed_strip_triangles_impl(
+            state, projection, pieces.value()[piece], assigned_holes[piece], levels, id, part);
+        if (!strip.has_value()) return strip.error();
+        if (!strip.value()) {
+          ok = false;
+          break;
+        }
+        triangles.insert(triangles.end(), part.begin(), part.end());
+      }
+      stripped = ok;
+      if (!stripped) triangles.clear();
+    } else {
+      const Result<bool> strip = tessellate_trimmed_strip_triangles(
+          state, projection, outer.front(), holes, id, triangles);
+      if (!strip.has_value()) return strip.error();
+      stripped = strip.value();
+      if (!stripped) triangles.clear();
+    }
+  } else {
     const Result<bool> strip = tessellate_trimmed_strip_triangles(
         state, projection, outer.front(), id, triangles);
     if (!strip.has_value()) return strip.error();
@@ -1675,20 +1908,23 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
   }
   if (!stripped) {
     triangles.clear();
-    const std::optional<std::array<TessellateTrimmedRing, 2>> pieces =
-        projection.periodic_u()
-            ? tessellate_split_periodic_ring(outer.front())
-            : std::nullopt;
+    if (!pieces.has_value() && projection.periodic_u()) {
+      pieces = tessellate_split_periodic_ring(outer.front());
+    }
     if (pieces.has_value()) {
-      for (const TessellateTrimmedRing& piece : pieces.value()) {
+      for (std::size_t piece = 0; piece < 2; ++piece) {
+        std::vector<TessellateTrimmedRing> polygon;
+        polygon.push_back(pieces.value()[piece]);
+        for (const TessellateTrimmedRing& hole : assigned_holes[piece]) polygon.push_back(hole);
         const Result<std::vector<std::array<std::uint32_t, 3>>> part =
-            tessellate_trimmed_polygon_triangles(std::vector<TessellateTrimmedRing>{piece}, id);
+            tessellate_trimmed_polygon_triangles(std::move(polygon), id);
         if (!part.has_value()) return part.error();
         triangles.insert(triangles.end(), part.value().begin(), part.value().end());
       }
     } else {
       std::vector<TessellateTrimmedRing> polygon;
       polygon.push_back(std::move(outer.front()));
+      for (const TessellateTrimmedRing& hole : holes) polygon.push_back(hole);
       const Result<std::vector<std::array<std::uint32_t, 3>>> part =
           tessellate_trimmed_polygon_triangles(std::move(polygon), id);
       if (!part.has_value()) return part.error();
@@ -1710,6 +1946,7 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
     }
   };
   for (const TessellateTrimmedRing& ring : outer) add_ring_uvs(ring);
+  for (const TessellateTrimmedRing& ring : holes) add_ring_uvs(ring);
   const Result<void> refined = tessellate_refine_trimmed_edges(
       state, projection, triangles, std::move(constrained), deflection, id);
   if (!refined.has_value()) return refined.error();

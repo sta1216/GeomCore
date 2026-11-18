@@ -401,26 +401,36 @@ TEST_CASE("trimmed tessellation: the sag refinement subdivides the sliver band")
   CHECK(fine.value().triangles.size() >=
         static_cast<std::size_t>(1.5 * static_cast<double>(coarse.value().triangles.size())));
 }
-TEST_CASE("trimmed tessellation: a hole loop is rejected with the trimmed-path error") {
-  // The window sits fully inside the lateral face, so the face carries two loops.
-  // Hole domains are rejected deterministically, independent of the deflection,
-  // because the strip path cannot cover them and a chordal patch would break the
-  // watertight and surface-following contracts. This pins the honest error for
-  // the 2-loop fixture.
+TEST_CASE("trimmed tessellation: a rectilinear hole meshes watertight") {
   const geom::Brep brep = hole_window_cylinder();
   REQUIRE(geom::validate_topology(brep).ok());
-  const geom::FaceId lateral = lateral_face(brep);
-  REQUIRE(!lateral.is_null());
-  const auto loops = geom::face_loops_uv(brep, lateral, 1e-9);
-  REQUIRE(loops.has_value());
-  REQUIRE(loops.value().size() == 2);
-  for (const double deflection : {1e-2, 1e-3, 0.5, 1.0}) {
-    const auto mesh = geom::tessellate(brep, geom::TessellationOptions{deflection, 0.35});
-    REQUIRE(!mesh.has_value());
-    CHECK(mesh.error().code == geom::Errc::unsupported);
-    CHECK(std::string(mesh.error().message) ==
-          "tessellate: trimmed curved face has a hole");
-  }
+  const auto mesh = geom::tessellate(brep, geom::TessellationOptions{1e-3, 0.35});
+  REQUIRE(mesh.has_value());
+  check_watertight(mesh.value());
+  CHECK(mesh.value().triangle_face.size() == mesh.value().triangles.size());
+
+  const auto corner = [&](double x, double y, double z) {
+    return std::any_of(mesh.value().positions.begin(), mesh.value().positions.end(),
+                       [&](const geom::Point3d& p) {
+                         return std::abs(p[0] - x) <= 1e-6 && std::abs(p[1] - y) <= 1e-6 &&
+                                std::abs(p[2] - z) <= 1e-6;
+                       });
+  };
+  CHECK(corner(-0.5, 0.5, 0.5));
+  CHECK(corner(0.5, 0.5, 0.5));
+  CHECK(corner(-0.5, 0.5, 1.5));
+  CHECK(corner(0.5, 0.5, 1.5));
+  CHECK(mesh.value().triangles.size() >= 950u);
+  CHECK(mesh.value().triangles.size() <= 1450u);
+}
+TEST_CASE("trimmed tessellation: coarse deflection keeps the hole open") {
+  const geom::Brep brep = hole_window_cylinder();
+  const auto fine = geom::tessellate(brep, geom::TessellationOptions{1e-3, 0.35});
+  const auto coarse = geom::tessellate(brep, geom::TessellationOptions{1e-2, 0.35});
+  REQUIRE(fine.has_value());
+  REQUIRE(coarse.has_value());
+  check_watertight(coarse.value());
+  CHECK(coarse.value().triangles.size() < fine.value().triangles.size());
 }
 TEST_CASE("trimmed tessellation: a band-shaped domain refines with smaller deflection") {
   const geom::Brep brep = cut_cylinder();
