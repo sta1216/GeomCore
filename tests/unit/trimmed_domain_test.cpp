@@ -399,7 +399,7 @@ TEST_CASE("trimmed domain: planar plate extracts outer and hole rings in order")
   CHECK(plate_faces == 2);
 }
 
-TEST_CASE("trimmed domain: a cone face is refused until its chart lands") {
+TEST_CASE("trimmed domain: a cone lateral face yields one boundary with a single apex") {
   const geom::Brep cone = geom::make_cone(geom::Point3d{0.0, 0.0, 0.0},
                                           geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0, 1e-9)
                               .value();
@@ -413,13 +413,25 @@ TEST_CASE("trimmed domain: a cone face is refused until its chart lands") {
     }
   }
   REQUIRE_FALSE(lateral.is_null());
+
+  const double v_apex = 1.0 / std::tan(std::atan2(1.0, 2.0));
   const geom::Result<std::vector<geom::TrimmedBoundary>> boundaries =
       geom::trimmed_face_boundaries(cone, lateral, uv_projection(cone, lateral), 1e-2);
-  REQUIRE_FALSE(boundaries.has_value());
-  CHECK(boundaries.error().code == geom::Errc::unsupported);
-  CHECK(std::string_view(boundaries.error().message) ==
-        "trimmed_face_boundaries: cone faces are not supported yet");
-  CHECK(boundaries.error().context_a == static_cast<std::uint32_t>(lateral.index()));
-  CHECK(boundaries.error().context_a == 1u);
-  CHECK(boundaries.error().context_b == 0u);
+  REQUIRE(boundaries.has_value());
+  REQUIRE(boundaries.value().size() == 1u);
+  const geom::TrimmedBoundary& ring = boundaries.value().front();
+  CHECK(ring.outer);
+  REQUIRE(ring.points.size() == ring.arcs.size());
+
+  // The base rim is resampled along v = 0 and the collapsed apex side is the
+  // single point at (u = 2*pi, v = v_apex), so one apex copy closes the chart.
+  CHECK(ring.points.front()[1] == 0.0);
+  CHECK(ring.points.back()[0] == 2.0 * kPi);
+  CHECK(ring.points.back()[1] == v_apex);
+  std::size_t apex_points = 0u;
+  for (const geom::Point2d& point : ring.points) {
+    if (point[1] == v_apex) ++apex_points;
+    else CHECK(point[1] == 0.0);
+  }
+  CHECK(apex_points == 1u);
 }

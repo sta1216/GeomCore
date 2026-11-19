@@ -109,8 +109,9 @@ inline std::vector<Point2d> curved_volume_simplify_ring(const std::vector<Point2
 // curved_volume_planar_area), so a cylinder with circular cap provenance
 // integrates to exactly pi * r^2 * h. Cylinder lateral faces and trimmed
 // analytic patches in general are integrated on the exact surface with the
-// seven-point rule at a fixed subdivision level. Sphere and cone seam and apex
-// cases are not handled, and NURBS surfaces are rejected. Where a loop has no
+// seven-point rule at a fixed subdivision level. Sphere seam/pole loops and the
+// cone apex fan are closed by synthesising the collapsed uv rows (see the
+// append_ring lambda), and NURBS surfaces are rejected. Where a loop has no
 // circle provenance (for example a chorded test fixture), the planar area falls
 // back to the chord polygon and the result is that chord B-rep's volume.
 //
@@ -329,15 +330,14 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
       }
 
       const SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
-      // Temporary guard: the apex fan that closes a cone's lateral face is not
-      // integrated yet, so refuse the cone instead of returning a silently wrong
-      // volume. Task 4b2/4b3 replaces this guard with the cone fan.
-      if (std::holds_alternative<Cone3>(surface)) {
-        return Error{Errc::unsupported,
-                     "curved_solid_volume: cone faces are not supported yet",
-                     face_id.index(), 0u};
-      }
       const bool planar = std::holds_alternative<Plane3>(surface);
+      const Cone3* cone = std::get_if<Cone3>(&surface);
+      // The cone chart's collapsed side is the apex row v = radius/tan(half_angle).
+      // Face loops carry that row as a single uv copy, or as two copies when the
+      // loop travels the back seam as well; every copy evaluates to the same 3D
+      // apex.
+      const double cone_apex_v =
+          cone == nullptr ? 0.0 : cone->radius / std::tan(cone->half_angle);
       if (planar) {
         // Planar faces have a constant divergence integrand, so only the exact
         // (arc-aware) area is needed; skip the chord triangulation entirely.
@@ -455,7 +455,8 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
         }
       }
       const double simplify_tolerance = 1e-12 * volume_uv_scale;
-      const auto append_ring = [&polygon, sphere, simplify_tolerance](const FaceUvLoop& loop) {
+      const auto append_ring = [&polygon, sphere, cone, cone_apex_v,
+                                simplify_tolerance](const FaceUvLoop& loop) {
         const std::vector<Point2d> simplified =
             (sphere == nullptr && loop.points.size() > 3u)
                 ? curved_volume_simplify_ring(loop.points, simplify_tolerance)
@@ -463,23 +464,27 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
         const std::size_t count = simplified.size();
         for (std::size_t i = 0; i < count; ++i) {
           const Point2d& point = simplified[i];
-          if (sphere == nullptr) {
+          if (sphere == nullptr && cone == nullptr) {
             polygon.vertices.push_back(point);
             continue;
           }
-          const bool at_pole =
-              point[1] == kCurvedVolumeSouthPoleV || point[1] == kCurvedVolumeNorthPoleV;
-          if (!at_pole) {
+          const bool collapsed =
+              sphere != nullptr
+                  ? (point[1] == kCurvedVolumeSouthPoleV ||
+                     point[1] == kCurvedVolumeNorthPoleV)
+                  : point[1] == cone_apex_v;
+          if (!collapsed) {
             polygon.vertices.push_back(point);
             continue;
           }
-          // A sphere loop that passes through a pole projects that single point
-          // onto one azimuth, so the projected ring cuts the corner between the
-          // two meridians that meet there. Insert the missing pole corners so
-          // the fan closes along the neighbouring meridians; both corners
-          // evaluate to the same pole point, so no surface is invented.
-          const Point2d& previous = loop.points[(i + count - 1u) % count];
-          const Point2d& next = loop.points[(i + 1u) % count];
+          // A sphere loop that passes through a pole, or a cone loop that ends
+          // on its apex row, projects that collapsed side onto one azimuth, so
+          // the ring's closing edge cuts the corner between the two meridians
+          // that meet there. Insert the missing corners so the uv domain spans
+          // the whole chart window; every corner evaluates to the same 3D
+          // pole/apex, so no surface is invented and the fan closes exactly once.
+          const Point2d& previous = simplified[(i + count - 1u) % count];
+          const Point2d& next = simplified[(i + 1u) % count];
           if (previous[1] != point[1] && std::fabs(previous[0] - point[0]) > 1e-12) {
             polygon.vertices.push_back(Point2d{previous[0], point[1]});
           }
@@ -516,6 +521,12 @@ inline Result<double> curved_solid_volume(const Brep& brep, SolidId solid, doubl
         const Point2d& c = polygon.vertices[triangle[2]];
         const double twice_area =
             (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        if (twice_area == 0.0) {
+          // Collinear samples along a straight or collapsed uv row triangulate
+          // to zero area: they cover no parameter domain, so they contribute no
+          // volume and must not fail the face.
+          continue;
+        }
         if (!(twice_area > 0.0)) {
           return Error{Errc::degenerate, "curved_solid_volume: face triangulation failed",
                        face_id.index(), 0u};

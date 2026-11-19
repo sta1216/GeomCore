@@ -390,21 +390,21 @@ TEST_CASE("curved_solid_volume: cylinder") {
   CHECK(relative_error(volume.value(), kPi * radius * radius * height) <= 1e-9);
 }
 
-TEST_CASE("curved_solid_volume: a cone face is refused until its fan lands") {
+TEST_CASE("curved_solid_volume: a cone closes its lateral face through the apex fan") {
   const geom::Brep brep =
       geom::make_cone({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 1.0, 2.0, kTolerance).value();
   REQUIRE(brep.solid_count() == 1);
   const geom::FaceId lateral = cone_face(brep);
   REQUIRE_FALSE(lateral.is_null());
+
+  // The stored lateral loop is the base rim plus a single apex uv copy, so its
+  // chord polygon covers half the chart. The fan expansion duplicates that apex
+  // at the neighbouring meridian; every copy evaluates to the same 3D apex, so
+  // the integration must cover the whole chart exactly once.
   const auto volume =
       geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), kTolerance);
-  REQUIRE_FALSE(volume.has_value());
-  CHECK(volume.error().code == geom::Errc::unsupported);
-  CHECK(std::string_view(volume.error().message) ==
-        "curved_solid_volume: cone faces are not supported yet");
-  CHECK(volume.error().context_a == static_cast<std::uint32_t>(lateral.index()));
-  CHECK(volume.error().context_a == 1u);
-  CHECK(volume.error().context_b == 0u);
+  REQUIRE(volume.has_value());
+  CHECK(relative_error(volume.value(), 2.0 * kPi / 3.0) <= 1e-12);
 }
 
 TEST_CASE("curved_solid_volume: half cylinder keeps exact semicircle rims") {

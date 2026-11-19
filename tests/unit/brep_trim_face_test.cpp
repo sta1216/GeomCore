@@ -20,6 +20,7 @@
 #include <geom/brep/topology.hpp>
 #include <geom/brep/trim_domain.hpp>
 #include <geom/brep/trim_face.hpp>
+#include <geom/brep/trimmed_domain.hpp>
 #include <geom/brep/validate.hpp>
 #include <geom/cgeom/polygon2.hpp>
 #include <geom/core/error.hpp>
@@ -726,6 +727,52 @@ TEST_CASE("trim_face: a canonical cone lateral face without cuts is one ring") {
   std::size_t apex_points = 0;
   for (const Point2d& p : fragment.loops_uv.front()) {
     if (p[1] == v_apex) ++apex_points;
+  }
+  CHECK(apex_points == 1u);
+}
+
+TEST_CASE("trim_face: a cone lateral trimmed boundary keeps one collapsed apex side") {
+  const Brep cone =
+      make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
+  const FaceId lateral = face_with_surface<Cone3>(cone);
+  REQUIRE_FALSE(lateral.is_null());
+  const double v_apex = 1.0 / std::tan(std::atan2(1.0, 2.0));
+
+  const detail::FaceUvProjection projection =
+      detail::face_uv_projection(cone, cone.face(lateral), kTol).value();
+  const Result<std::vector<TrimmedBoundary>> boundaries =
+      trimmed_face_boundaries(cone, lateral, projection, 1e-2);
+  REQUIRE(boundaries.has_value());
+  REQUIRE(boundaries.value().size() == 1u);
+  const TrimmedBoundary& ring = boundaries.value().front();
+  CHECK(ring.outer);
+  REQUIRE(ring.arcs.size() == ring.points.size());
+  REQUIRE(ring.points.size() > 3u);
+
+  // The base rim runs along v = 0 and the collapsed apex side is the single
+  // point at (u = 2*pi, v = v_apex): the rim's circle provenance is resampled
+  // by the deflection planner, while the apex carries no arc.
+  CHECK(ring.points.front()[0] == 0.0);
+  CHECK(ring.points.front()[1] == 0.0);
+  CHECK(ring.points.back()[0] == 2.0 * kPi);
+  CHECK(ring.points.back()[1] == v_apex);
+  std::size_t apex_points = 0u;
+  for (std::size_t i = 0; i < ring.points.size(); ++i) {
+    const bool is_apex = ring.points[i][1] == v_apex;
+    if (is_apex) {
+      ++apex_points;
+      CHECK(i + 1u == ring.points.size());
+      CHECK_FALSE(ring.arcs[i].has_value());
+    } else {
+      CHECK(ring.points[i][1] == 0.0);
+      if (i + 2u == ring.points.size()) {
+        // The unwrapped end of the base circle is the closing sample of the rim
+        // run: it starts no span, so it carries no arc.
+        CHECK_FALSE(ring.arcs[i].has_value());
+      } else {
+        CHECK(ring.arcs[i].has_value());
+      }
+    }
   }
   CHECK(apex_points == 1u);
 }
