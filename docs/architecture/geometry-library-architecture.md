@@ -1300,8 +1300,8 @@ ADR-0028，实测见 `docs/benchmarks/m3c2.md`）。
 
 **锥面缺口**：垂直轴、顶点下方的平面给出不接触缝合线的内部闭环（判
 `"closed cut crosses the seam twice"`）；含轴平面给出终止在底圆的开放经线链
-（判 open cuts），且需要顶点焊接与顶点扇形体积；`curved_solid_volume(cone)` 目前
-在顶点投影处失败。消息为
+（判 open cuts），且需要顶点焊接与顶点扇形体积；`curved_solid_volume(cone)` 当时
+在顶点投影处失败。 (superseded by M3c-3c-4b1/4b2; see ADR-0034, ADR-0035)消息为
 `"boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are deferred to M3c-3"`，
 `face_pairs == fragments == kept == 0`。
 

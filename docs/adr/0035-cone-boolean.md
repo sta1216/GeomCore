@@ -176,9 +176,10 @@ a cone cut by a plane now assemble into one closed shell.
 | trimmed cone fragment (not one loop over the full chart) | `unsupported "boolean_solid_curved: cone operands must be whole cones; trimmed cone fragments are not supported"` |
 | trimmed cone tessellation | deferred to M3c-3c-4b3; `tessellate_cone_face` still fans the whole base ring to one apex vertex, which does not match a fragment's apex row |
 
-The first row covers every non-planar partner, so the cone gate message and the
-plane-only guard stay distinct: the gate is about the operand's face kind, the
-perpendicular guard is about the cut plane's orientation.
+The first row covers every non-planar partner. The cone gate message therefore
+concerns the partner's face kind (for example `cone/cone` or `cone/torus`); it no
+longer fires for a `Cone3` operand of the expected shape. The perpendicular guard is
+separate and concerns only the cut plane's orientation.
 
 ### Deferred
 
@@ -194,11 +195,11 @@ boolean tolerance `1e-9`. The plane `z = 1` gives the upper small cone (base rad
 `0.5`, height `1`) and the lower frustum; the box is `{-2,-2,1}..{2,2,4}`, and the
 union uses the low box `{-2,-2,1}..{2,2,3}`.
 
-| operation | measured volume | analytic |
+| operation | computed volume | analytic |
 | --- | ---: | ---: |
-| intersection | `0.2617993877991494` | `pi/12` |
-| difference | `1.8325957145940461` | `7*pi/12` |
-| union | `33.83259571459405` | `32 + 7*pi/12` |
+| intersection | `0.26179938779915246` | `pi/12` |
+| difference | `1.8325957145940359` | `7*pi/12` |
+| union | `33.832595714594021` | `32 + 7*pi/12` |
 
 QA-22 (`tests/unit/brep_boolean_curved_test.cpp`) runs the three operations once each
 through `check_cone_boolean`, which asserts:
@@ -212,9 +213,9 @@ through `check_cone_boolean`, which asserts:
 
 The focused run reports 1 case / 54 assertions / 0 failed. Full suites: Debug and
 Release each report 1008 cases / 670,604 assertions, 0 failed, zero warnings under
-`/W4 /WX /utf-8` with `GEOM_WERROR=ON`. The 4b1 baseline was 1001 / 670,383, and
-F1's whole-cone refusal test brought it to 1008 / 670,604 before this task; QA-22
-renames the existing three-operation case, so it adds no case or assertion.
+`/W4 /WX /utf-8` with `GEOM_WERROR=ON`. The 4b1 baseline was 1001 / 670,383; Tasks 1-3 and the F1 whole-cone refusal test
+brought it to 1008 / 670,604 before this task (F1 alone: +1 case, +16 assertions).
+QA-22 renames the existing three-operation case, so it adds no case or assertion.
 
 ## Consequences
 
