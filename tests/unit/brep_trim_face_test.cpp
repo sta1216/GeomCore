@@ -731,7 +731,7 @@ TEST_CASE("trim_face: a canonical cone lateral face without cuts is one ring") {
   CHECK(apex_points == 1u);
 }
 
-TEST_CASE("trim_face: a cone lateral trimmed boundary keeps one collapsed apex side") {
+TEST_CASE("trim_face: a cone lateral trimmed boundary spans the full chart") {
   const Brep cone =
       make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
   const FaceId lateral = face_with_surface<Cone3>(cone);

@@ -399,7 +399,7 @@ TEST_CASE("trimmed domain: planar plate extracts outer and hole rings in order")
   CHECK(plate_faces == 2);
 }
 
-TEST_CASE("trimmed domain: a cone lateral face yields one boundary with a single apex") {
+TEST_CASE("trimmed domain: a cone lateral face yields one boundary spanning the chart") {
   const geom::Brep cone = geom::make_cone(geom::Point3d{0.0, 0.0, 0.0},
                                           geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0, 1e-9)
                               .value();
@@ -437,4 +437,11 @@ TEST_CASE("trimmed domain: a cone lateral face yields one boundary with a single
     else CHECK(point[1] == 0.0);
   }
   CHECK(apex_points == 2u);
+  double twice_area = 0.0;
+  for (std::size_t i = 0; i < ring.points.size(); ++i) {
+    const geom::Point2d& a = ring.points[i];
+    const geom::Point2d& b = ring.points[(i + 1u) % ring.points.size()];
+    twice_area += a[0] * b[1] - b[0] * a[1];
+  }
+  CHECK(0.5 * twice_area == doctest::Approx(4.0 * kPi).epsilon(1e-12));
 }
