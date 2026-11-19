@@ -15,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace geom {
@@ -185,6 +186,70 @@ inline Result<std::size_t> trimmed_plan_ring(const std::vector<TrimmedRingRun>& 
   return total;
 }
 
+// A sphere ring that passes through a pole, or a cone ring that ends on its
+// apex row, projects that collapsed side onto one azimuth. The ring then closes
+// with a chord that cuts the corner between the two meridians meeting there;
+// insert the missing corners so the ring spans the whole chart window. Every
+// inserted corner evaluates to the same 3D pole/apex, so no surface is invented.
+inline bool trimmed_collapsed_v(const FaceUvProjection& projection, double v) {
+  if (projection.surface == nullptr) return false;
+  constexpr double kHalfPi = 1.57079632679489661923;
+  if (std::get_if<Sphere3>(projection.surface) != nullptr) {
+    return v == kHalfPi || v == -kHalfPi;
+  }
+  if (const auto* cone = std::get_if<Cone3>(projection.surface)) {
+    return v == cone->radius / std::tan(cone->half_angle);
+  }
+  return false;
+}
+
+inline void trimmed_expand_collapsed_side(TrimmedBoundary& ring,
+                                          const FaceUvProjection& projection) {
+  struct Item {
+    Point2d point;
+    std::size_t source;  // kNoSource for an inserted corner
+  };
+  static constexpr std::size_t kNoSource = static_cast<std::size_t>(-1);
+  const std::size_t n = ring.points.size();
+  std::vector<Item> items;
+  items.reserve(n + 2u);
+  for (std::size_t i = 0; i < n; ++i) {
+    const Point2d& point = ring.points[i];
+    if (!trimmed_collapsed_v(projection, point[1])) {
+      items.push_back(Item{point, i});
+      continue;
+    }
+    const Point2d& previous = ring.points[(i + n - 1u) % n];
+    const Point2d& next = ring.points[(i + 1u) % n];
+    if (previous[1] != point[1] && std::fabs(previous[0] - point[0]) > 1e-12) {
+      items.push_back(Item{Point2d{previous[0], point[1]}, kNoSource});
+    }
+    items.push_back(Item{point, i});
+    if (next[1] != point[1] && std::fabs(next[0] - point[0]) > 1e-12) {
+      items.push_back(Item{Point2d{next[0], point[1]}, kNoSource});
+    }
+  }
+  const std::size_t m = items.size();
+  if (m == n) return;
+
+  std::vector<Point2d> points;
+  std::vector<std::optional<FaceUvArcRef>> arcs;
+  points.reserve(m);
+  arcs.reserve(m);
+  for (std::size_t k = 0; k < m; ++k) {
+    points.push_back(items[k].point);
+    const Item& from = items[k];
+    const Item& to = items[(k + 1u) % m];
+    if (from.source != kNoSource && to.source == (from.source + 1u) % n) {
+      arcs.push_back(ring.arcs[from.source]);
+    } else {
+      arcs.push_back(std::nullopt);
+    }
+  }
+  ring.points = std::move(points);
+  ring.arcs = std::move(arcs);
+}
+
 inline void trimmed_reverse_ring(TrimmedBoundary& ring) {
   const std::size_t n = ring.points.size();
   std::vector<std::optional<FaceUvArcRef>> reversed(n);
@@ -309,6 +374,15 @@ inline Result<TrimmedBoundary> trimmed_build_ring(const FaceUvLoop& loop,
       ++i;
     }
   }
+  if (ring.points.size() < 3u) {
+    return Error{Errc::invalid_topology,
+                 "trimmed_face_boundaries: ring has fewer than three points", face.index(), 0u};
+  }
+  // A collapsed side (sphere pole or cone apex) projects onto one azimuth, so
+  // the ring would otherwise close with a chord across the corner. Restore the
+  // two zero-length meridians that meet there; every corner is the same 3D
+  // point.
+  trimmed_expand_collapsed_side(ring, projection);
   if (ring.points.size() < 3u) {
     return Error{Errc::invalid_topology,
                  "trimmed_face_boundaries: ring has fewer than three points", face.index(), 0u};

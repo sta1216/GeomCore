@@ -749,32 +749,25 @@ TEST_CASE("trim_face: a cone lateral trimmed boundary keeps one collapsed apex s
   REQUIRE(ring.arcs.size() == ring.points.size());
   REQUIRE(ring.points.size() > 3u);
 
-  // The base rim runs along v = 0 and the collapsed apex side is the single
-  // point at (u = 2*pi, v = v_apex): the rim's circle provenance is resampled
-  // by the deflection planner, while the apex carries no arc.
+  // The base rim runs along v = 0; the collapsed apex side is expanded into the
+  // two meridians that meet there, both carrying the same 3D apex.
   CHECK(ring.points.front()[0] == 0.0);
   CHECK(ring.points.front()[1] == 0.0);
-  CHECK(ring.points.back()[0] == 2.0 * kPi);
+  REQUIRE(ring.points.size() >= 3u);
+  CHECK(ring.points[ring.points.size() - 2u][0] == 2.0 * kPi);
+  CHECK(ring.points[ring.points.size() - 2u][1] == v_apex);
+  CHECK(ring.points.back()[0] == 0.0);
   CHECK(ring.points.back()[1] == v_apex);
   std::size_t apex_points = 0u;
   for (std::size_t i = 0; i < ring.points.size(); ++i) {
-    const bool is_apex = ring.points[i][1] == v_apex;
-    if (is_apex) {
+    if (ring.points[i][1] == v_apex) {
       ++apex_points;
-      CHECK(i + 1u == ring.points.size());
       CHECK_FALSE(ring.arcs[i].has_value());
     } else {
       CHECK(ring.points[i][1] == 0.0);
-      if (i + 2u == ring.points.size()) {
-        // The unwrapped end of the base circle is the closing sample of the rim
-        // run: it starts no span, so it carries no arc.
-        CHECK_FALSE(ring.arcs[i].has_value());
-      } else {
-        CHECK(ring.arcs[i].has_value());
-      }
     }
   }
-  CHECK(apex_points == 1u);
+  CHECK(apex_points == 2u);
 }
 
 TEST_CASE("trim_face: a closed horizontal cut splits a cone cap from a band") {

@@ -423,15 +423,18 @@ TEST_CASE("trimmed domain: a cone lateral face yields one boundary with a single
   CHECK(ring.outer);
   REQUIRE(ring.points.size() == ring.arcs.size());
 
-  // The base rim is resampled along v = 0 and the collapsed apex side is the
-  // single point at (u = 2*pi, v = v_apex), so one apex copy closes the chart.
+  // The base rim is resampled along v = 0; the collapsed apex side expands into
+  // the two meridians at u = 2*pi and u = 0, both evaluating to the same apex.
   CHECK(ring.points.front()[1] == 0.0);
-  CHECK(ring.points.back()[0] == 2.0 * kPi);
+  REQUIRE(ring.points.size() >= 3u);
+  CHECK(ring.points[ring.points.size() - 2u][0] == 2.0 * kPi);
+  CHECK(ring.points[ring.points.size() - 2u][1] == v_apex);
+  CHECK(ring.points.back()[0] == 0.0);
   CHECK(ring.points.back()[1] == v_apex);
   std::size_t apex_points = 0u;
   for (const geom::Point2d& point : ring.points) {
     if (point[1] == v_apex) ++apex_points;
     else CHECK(point[1] == 0.0);
   }
-  CHECK(apex_points == 1u);
+  CHECK(apex_points == 2u);
 }
