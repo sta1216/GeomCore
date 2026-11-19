@@ -1,6 +1,7 @@
 # ADR-0034: Cone chart, apex projection and open cuts on domain sides
 
-Status: accepted for M3c-3c-4b1 (2026-11-19)
+Status: accepted for M3c-3c-4b1 (2026-11-19); the cone volume, cone trimmed
+boundary and cone boolean limits are superseded by ADR-0035.
 
 ## Context
 
@@ -70,9 +71,12 @@ loop has area `pi * v_apex = 2*pi`, half of the chart rectangle's `4*pi`.
 | piece leaves through a seam and returns elsewhere | `unsupported "split_face_curved: open cut crosses the seam"` (`trim_face.hpp:1485`) |
 | open piece is not boundary-to-boundary, or has a seam end | `unsupported "split_face_curved: open cuts on a seam-only face"` (`trim_face.hpp:1490`) |
 | trimmed cone face (stored loop not the full half-chart) | `unsupported "split_face_curved: trimmed cone faces are not supported yet"`, context `(face.index(), 0)` (`trim_face.hpp:2172`) |
-| cone volume | `unsupported "curved_solid_volume: cone faces are not supported yet"` (`include/geom/brep/detail/curved_volume.hpp:337`) |
-| cone trimmed boundaries | `unsupported "trimmed_face_boundaries: cone faces are not supported yet"` (`include/geom/brep/trimmed_domain.hpp:348`) |
-| cone boolean operands | `unsupported "boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are deferred to M3c-3"` (`include/geom/brep/boolean_solid_curved.hpp:187`) |
+
+The cone volume, cone trimmed-boundary and cone boolean rows were refusals in the
+4b1 draft. M3c-3c-4b2 supersedes them: the apex fan measures cone volume, the
+expanded collapsed side accepts cone trimmed boundaries, and the boolean accepts
+whole cones cut by planes. See ADR-0035 for the new contract and the refusals that
+remain.
 
 ## Evidence
 
@@ -91,9 +95,9 @@ Fixture: canonical cone `radius = 1`, height `2`, solid tolerance `1e-12`, split
 | focused run | 1 case / 32 assertions / 0 failed |
 
 The Task 2 closed-cut case remains the companion pin: a horizontal cut at `v = 1`
-gives a `pi` cap with one apex point and a `2*pi` band with none. Task 4 adds no
-production behaviour; QA-21 intentionally repeats the Task 3 meridian acceptance as
-the end-to-end pin.
+gives a `pi` cap with one apex point and a `2*pi` band with none. M3c-3c-4b1's
+Task 4 adds no production behaviour; QA-21 intentionally repeats the Task 3 meridian
+acceptance as the end-to-end pin.
 
 The RED for this contract was measured on the parent commit `b9efed7`, using that
 commit's `trim_face.hpp`/`trim_domain.hpp` over the current tree: the parent has
@@ -108,20 +112,24 @@ exit 0; QA-21 adds 1 case / 32 assertions over the 1000 / 670,351 baseline.
 
 - A canonical cone lateral face now splits closed cuts and open cuts whose ends land
   on domain sides. The narrow wedge keeps one apex-row point (the cut end); the wide
-  remainder keeps two (the cut end and the back-seam copy at `u = 2*pi`). The apex
-  copies are not welded or fanned across fragments.
-- **Assembly of the two halves is deferred.** The two fragments each carry an apex
-  end, but assembling them fails with `"assemble_curved_solid: edge is used once"` /
-  `"assemble_solid: edge is used once"`, and the collapsed side would produce a
-  zero-length apex edge. No cone assembly, mass or volume path is enabled.
-- **The boolean gate stays closed.** `boolean_solid_curved` still rejects cone
-  operands with the message above, and no boolean operation changes result.
-- **Trimmed cone faces are still refused.** Only the canonical full half-chart face
-  is split; a trimmed cone face keeps the dispatch refusal. `trimmed_face_boundaries`
-  and `curved_solid_volume` still refuse cone faces.
-- **Apex tessellation and sampling stay mismatched.** The canonical cone mesh and
-  mass properties are unchanged. `tessellate_cone_face` fans the whole base ring to
-  the single apex vertex; a split fragment's apex row plus cut end does not match
-  that sampling, so trimmed-cone tessellation and apex-fan volume remain deferred.
+  remainder keeps two (the cut end and the back-seam copy at `u = 2*pi`). The
+  fragments keep both uv copies; assembly welds the 3D apex (ADR-0035).
+- **Assembly of the two halves is available through the boolean.** The M3c-3c-4b2
+  apex weld drops the zero-length apex-to-apex segment (the two uv copies weld to one
+  3D vertex) while keeping full-turn rims, so the two fragments assemble into one
+  closed shell (ADR-0035).
+- **The boolean gate is open for whole cones cut by planes.** `boolean_solid_curved`
+  accepts the canonical whole cone and refuses only curved partners, trimmed
+  fragments and oblique/axis-containing planes, with the messages in ADR-0035.
+- **Trimmed cone faces are still refused by the splitter.** Only the canonical full
+  half-chart face is split; a trimmed cone face keeps
+  `"split_face_curved: trimmed cone faces are not supported yet"`. The older
+  `trimmed_face_boundaries` and `curved_solid_volume` refusals are gone: both now
+  handle cone loops, including the collapsed apex row (ADR-0035).
+- **Apex fan volume is implemented; apex tessellation is still mismatched.**
+  `curved_solid_volume` inserts the missing chart corners at the apex row, so a whole
+  cone and its plane-cut fragments measure exactly. `tessellate_cone_face` still fans
+  the whole base ring to one apex vertex, so trimmed-cone tessellation remains
+  deferred to M3c-3c-4b3.
 - General twisted seam crossings, other nappes, NURBS operands and trimmed cone
   meshing remain outside this milestone.

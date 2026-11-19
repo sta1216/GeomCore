@@ -193,8 +193,8 @@ Steps:
 
 ## Self-review
 
-- [ ] Every task has a RED test and a concrete acceptance value.
-- [ ] No task changes a public signature.
-- [ ] The apex conventions match ADR-0034 / QA-21.
-- [ ] The cone gate message and the plane-only guard are distinct.
-- [ ] Counts and document references are updated together.
+- [x] Every task has a RED test and a concrete acceptance value.
+- [x] No task changes a public signature.
+- [x] The apex conventions match ADR-0034 / QA-21.
+- [x] The cone gate message and the plane-only guard are distinct.
+- [x] Counts and document references are updated together.

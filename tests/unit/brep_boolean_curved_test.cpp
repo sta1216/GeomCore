@@ -520,7 +520,13 @@ TEST_CASE("curved boolean: a trimmed cone fragment is refused as an operand") {
   }
 }
 
-TEST_CASE("curved boolean: a cone cut by a plane pins the analytic volumes") {
+// QA-22: the end-to-end cone/plane contract. One fixture runs all three
+// operations through `check_cone_boolean`, which already asserts the analytic
+// volume to 1e-12 (the cut rims are exact circles), one shell closed by uses,
+// `validate_topology`, a positive (outward) volume, and a bitwise-identical
+// repeat. The upper small cone is pi/12, the lower frustum 7*pi/12, and the
+// union with the low box 32 + 7*pi/12.
+TEST_CASE("QA-22: cone/plane booleans are closed and deterministic") {
   const double tolerance = 1e-9;
   const geom::Brep cone =
       geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
@@ -541,9 +547,10 @@ TEST_CASE("curved boolean: a cone cut by a plane pins the analytic volumes") {
   // circles, so the volumes are exact: pi/12 and 2*pi/3 - pi/12 = 7*pi/12.
   const double small_cone = kPi / 12.0;
   const double frustum = 7.0 * kPi / 12.0;
-  check_cone_boolean("intersection", cone, box, geom::SolidBooleanOp::intersection, small_cone);
-  check_cone_boolean("difference", cone, box, geom::SolidBooleanOp::difference, frustum);
-  check_cone_boolean("union", cone, low_box, geom::SolidBooleanOp::union_, 32.0 + frustum);
+  check_cone_boolean("QA-22 intersection", cone, box, geom::SolidBooleanOp::intersection,
+                     small_cone);
+  check_cone_boolean("QA-22 difference", cone, box, geom::SolidBooleanOp::difference, frustum);
+  check_cone_boolean("QA-22 union", cone, low_box, geom::SolidBooleanOp::union_, 32.0 + frustum);
 }
 
 TEST_CASE("curved boolean: a cone refuses an axis-containing plane cut") {
