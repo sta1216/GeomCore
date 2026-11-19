@@ -107,8 +107,9 @@ exit 0; QA-21 adds 1 case / 32 assertions over the 1000 / 670,351 baseline.
 ## Consequences
 
 - A canonical cone lateral face now splits closed cuts and open cuts whose ends land
-  on domain sides. The apex is one uv point per collapsed side; this does not create
-  shared topology between fragments.
+  on domain sides. The narrow wedge keeps one apex-row point (the cut end); the wide
+  remainder keeps two (the cut end and the back-seam copy at `u = 2*pi`). The apex
+  copies are not welded or fanned across fragments.
 - **Assembly of the two halves is deferred.** The two fragments each carry an apex
   end, but assembling them fails with `"assemble_curved_solid: edge is used once"` /
   `"assemble_solid: edge is used once"`, and the collapsed side would produce a
