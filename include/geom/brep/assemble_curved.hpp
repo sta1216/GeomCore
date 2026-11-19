@@ -608,6 +608,23 @@ inline Result<Brep> assemble_curved_impl(std::span<const CurvedAssembledFace> fa
     }
   }
 
+  // Step 3c: drop the zero-length segments left by welding coincident points.
+  // The seam-only cone chart carries two parameter copies of the apex (the cut
+  // end and the back-seam copy) that evaluate to the same 3D point; both weld
+  // to one vertex, so the segment between them has no 3D extent and must not
+  // become an edge (its key would be v->v and it would be used only once). The
+  // segment is dropped from the assembled loop, not from loops_uv, so the two
+  // neighbouring coedges meet at the welded apex. A closed rim also starts and
+  // ends at one vertex but carries a full turn, so it stays.
+  for (std::vector<std::vector<assemble_curved_piece>>& face_layouts : layouts) {
+    for (std::vector<assemble_curved_piece>& loop_pieces : face_layouts) {
+      std::erase_if(loop_pieces, [](const assemble_curved_piece& piece) {
+        if (piece.v0 != piece.v1) return false;
+        return !piece.arc || std::abs(piece.sweep) < 2.0 * kFaceUvPi - 1e-12;
+      });
+    }
+  }
+
   // Step 4: group the uses by undirected key and check that every edge is
   // shared by exactly two compatible pieces. A closed arc can start and end at
   // the same vertex, and two different circles (the outer equator and the tube

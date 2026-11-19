@@ -11,11 +11,14 @@
 #include <vector>
 
 #include <doctest/doctest.h>
+#include <geom/brep/assemble_curved.hpp>
+#include <geom/brep/detail/curved_volume.hpp>
 #include <geom/brep/face_query.hpp>
 #include <geom/brep/face_uv.hpp>
 #include <geom/brep/plane_frame.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/solid_editor.hpp>
+#include <geom/brep/split_solid.hpp>
 #include <geom/brep/tessellate.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/brep/trim_domain.hpp>
@@ -929,6 +932,127 @@ TEST_CASE("trim_face: a meridian open cut splits the cone chart in two") {
       }
     }
   }
+}
+
+TEST_CASE("trim_face: a cone split at z = 1 assembles into two closed halves") {
+  const Brep cone =
+      make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
+  const std::vector<SolidId> solids = cone.solid_ids();
+  REQUIRE(solids.size() == 1u);
+
+  // z = 1 cuts the cone into the lower frustum and the upper small cone. Both
+  // halves need the cone band to pair its base-rim arcs with the base cap and
+  // its cut-rim chords with the new cap; the small cone also needs its apex
+  // copies welded before the assembly can pair the meridian and seam edges.
+  const Result<SplitSolidResult> split = split_solid_by_plane(
+      cone, solids.front(), Plane3{Vec3d{0, 0, 1}, 1.0}, kTol);
+  const std::string_view split_message =
+      split.has_value() ? std::string_view{} : std::string_view(split.error().message);
+  REQUIRE_MESSAGE(split.has_value(), split_message);
+  const Brep& below = split.value().below;
+  const Brep& above = split.value().above;
+  CHECK(validate_topology(below).ok());
+  CHECK(validate_topology(above).ok());
+
+  const Result<double> below_volume =
+      detail::curved_solid_volume(below, below.solid_ids().front(), kTol);
+  const Result<double> above_volume =
+      detail::curved_solid_volume(above, above.solid_ids().front(), kTol);
+  REQUIRE(below_volume.has_value());
+  REQUIRE(above_volume.has_value());
+  // The cut rim is the SSI polyline: Cone3 has no analytic cut circle in
+  // split_solid_face_circle yet, so both halves are the inscribed-polygon
+  // approximations of the exact volumes (about 0.2 percent low). The exact
+  // 2*pi/3 fan is pinned by the meridian assembly test below.
+  CHECK(std::abs(below_volume.value() - 7.0 * kPi / 12.0) <= 1e-2);
+  CHECK(std::abs(above_volume.value() - kPi / 12.0) <= 1e-2);
+  CHECK(std::abs(below_volume.value() + above_volume.value() - 2.0 * kPi / 3.0) <=
+        1e-2);
+
+  // A full circular rim legitimately starts and ends at one welded vertex (the
+  // base rim of the frustum is a single 2*pi arc); any other zero-length edge
+  // would mean split pieces were left unpaired.
+  for (const Brep* half : {&below, &above}) {
+    for (const EdgeId id : half->edge_ids()) {
+      const Edge& edge = half->edge(id);
+      if (norm2(half->vertex(edge.v0).point - half->vertex(edge.v1).point) > 1e-24) {
+        continue;
+      }
+      REQUIRE(std::holds_alternative<CircleCurve3>(
+          half->geometry().curves[edge.curve]));
+      CHECK(std::abs(std::abs(edge.t1 - edge.t0) - 2.0 * kPi) <= 1e-9);
+    }
+  }
+}
+
+TEST_CASE("trim_face: assembling the cone meridian halves welds the apex copies") {
+  const Brep cone =
+      make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
+  const FaceId lateral = face_with_surface<Cone3>(cone);
+  const FaceId base = face_with_surface<Plane3>(cone);
+  REQUIRE_FALSE(lateral.is_null());
+  REQUIRE_FALSE(base.is_null());
+  const double v_apex = 1.0 / std::tan(std::atan2(1.0, 2.0));
+
+  // A meridian from the base rim to the apex leaves two lateral pieces. The
+  // wide piece carries two parameter copies of the apex (the cut's end and the
+  // back-seam copy) and a zero-length 3D edge between them; the assembly must
+  // weld those copies to one vertex instead of failing with "edge is used once".
+  const std::vector<Point2d> meridian{Point2d{0.7, 0.0}, Point2d{0.7, v_apex}};
+  const Result<std::vector<CurvedFragment>> lateral_split =
+      split_face_curved(cone, lateral, std::vector<FaceCut>{FaceCut{meridian}}, kTol);
+  REQUIRE(lateral_split.has_value());
+  REQUIRE(lateral_split.value().size() == 2u);
+  const Result<std::vector<CurvedFragment>> base_split =
+      split_face_curved(cone, base, std::vector<FaceCut>{}, kTol);
+  REQUIRE(base_split.has_value());
+  REQUIRE(base_split.value().size() == 1u);
+
+  // The seam-only splitter hands the lateral pieces back as straight chords on
+  // the base rim; heal them with the rim circle the way split_solid_by_plane
+  // does, so the only remaining repair is the apex weld under test.
+  const CircleCurve3 rim{Point3d{0, 0, 0}, Vec3d{1, 0, 0}, Vec3d{0, 1, 0}, 1.0};
+  const std::vector<CircleCurve3> circles{rim};
+  std::vector<CurvedAssembledFace> faces;
+  for (CurvedFragment fragment : lateral_split.value()) {
+    const Result<void> healed =
+        detail::split_solid_heal_fragment(fragment, circles, kTol);
+    REQUIRE(healed.has_value());
+    faces.push_back(CurvedAssembledFace{
+        cone.geometry().surfaces[cone.face(lateral).surface], std::move(fragment.loops),
+        std::move(fragment.loops_uv), std::move(fragment.arc_spans),
+        cone.face(lateral).reversed});
+  }
+  {
+    CurvedFragment fragment = base_split.value().front();
+    faces.push_back(CurvedAssembledFace{
+        cone.geometry().surfaces[cone.face(base).surface], std::move(fragment.loops),
+        std::move(fragment.loops_uv), std::move(fragment.arc_spans),
+        cone.face(base).reversed});
+  }
+
+  const Result<Brep> assembled = assemble_curved_solid(faces, kTol);
+  const std::string_view assembled_message =
+      assembled.has_value() ? std::string_view{} : std::string_view(assembled.error().message);
+  REQUIRE_MESSAGE(assembled.has_value(), assembled_message);
+  const Brep& solid = assembled.value();
+  CHECK(validate_topology(solid).ok());
+  CHECK(solid.faces().size() == 3u);
+  const Result<double> volume =
+      detail::curved_solid_volume(solid, solid.solid_ids().front(), kTol);
+  REQUIRE(volume.has_value());
+  CHECK(std::abs(volume.value() - 2.0 * kPi / 3.0) <= 1e-9);
+
+  // The welded apex is one vertex; the dropped zero-length segment leaves no
+  // edge with no 3D extent anywhere on the closed cone.
+  std::size_t zero_length_edges = 0;
+  for (const EdgeId id : solid.edge_ids()) {
+    const Edge& edge = solid.edge(id);
+    if (norm2(solid.vertex(edge.v0).point - solid.vertex(edge.v1).point) <= 1e-24) {
+      ++zero_length_edges;
+    }
+  }
+  CHECK(zero_length_edges == 0u);
 }
 
 // QA-21 is the end-to-end pin for the cone open-cut contract: one meridian from

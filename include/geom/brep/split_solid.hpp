@@ -1225,11 +1225,19 @@ inline Result<SplitSolidResult> split_solid_by_plane(const Brep& brep, SolidId s
     const Result<std::vector<CurvedFragment>> split_result =
         split_face_curved(brep, info.face, cuts, tolerance);
     if (!split_result.has_value()) return split_result.error();
+    std::vector<CircleCurve3> heal_circles = circles;
+    if (const auto* cone = std::get_if<Cone3>(info.surface)) {
+      if (cone->radius > 0.0) {
+        const Vec3d y_axis = detail::split_solid_unit(cross(cone->axis, cone->x_axis));
+        const CircleCurve3 rim{cone->origin, cone->x_axis, y_axis, cone->radius};
+        if (rim.is_valid()) heal_circles.push_back(rim);
+      }
+    }
     for (CurvedFragment fragment : split_result.value()) {
       if (fragment.loops.empty()) continue;
       const int side = classify(info, fragment);
       const Result<void> healed =
-          detail::split_solid_heal_fragment(fragment, circles, tolerance);
+          detail::split_solid_heal_fragment(fragment, heal_circles, tolerance);
       if (!healed.has_value()) return healed.error();
       add_face(side >= 0 ? above_faces : below_faces, *info.surface, fragment,
                brep.face(info.face).reversed);
