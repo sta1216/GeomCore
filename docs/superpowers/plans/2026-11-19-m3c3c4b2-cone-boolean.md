@@ -134,6 +134,7 @@ Acceptance: two-half cone assembles to one closed shell, volume `2*pi/3`,
 ## Task 3: open the cone gate for plane cuts
 
 Files: `include/geom/brep/boolean_solid_curved.hpp`,
+`include/geom/brep/split_solid.hpp`,
 `tests/unit/brep_boolean_curved_test.cpp`.
 
 Steps:
@@ -146,8 +147,19 @@ Steps:
    other operand's faces are all `Plane3`; otherwise keep an explicit
    `unsupported "boolean_solid_curved: cone operands only support plane cutters"`
    message.
-3. Keep cone/cone and cone/torus refused before pairing.
-4. Run the full curved boolean corpus (sphere/torus/cylinder/plane) and confirm
+4. Add the analytic cone/plane cut circle to `split_solid_face_circle` for planes
+   perpendicular to the cone axis: `rho = radius - t*tan(half_angle)` at axial
+   distance `t = (offset - dot(normal, origin)) / dot(normal, axis)`; center on
+   the axis, frame from `cone.x_axis` projected onto the plane. This replaces the
+   inscribed SSI polyline and is what lets the 1e-12 acceptance pass.
+5. For cone operands, refuse cutters whose planes intersect the cone's bounding
+   sphere but are not perpendicular to the axis:
+   `unsupported "boolean_solid_curved: cone cutters must be perpendicular to the
+   cone axis; oblique and axis-containing planes are deferred to M3c-3c-4b3"`.
+   A plane through the axis currently fails assembly with half-turn rim arcs, so
+   it must be refused deterministically instead.
+6. Keep cone/cone and cone/torus refused before pairing.
+7. Run the full curved boolean corpus (sphere/torus/cylinder/plane) and confirm
    no result changes.
 
 Acceptance: the three volumes above, refusals exact, existing corpus unchanged.
