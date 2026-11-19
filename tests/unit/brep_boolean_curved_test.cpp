@@ -553,6 +553,36 @@ TEST_CASE("QA-22: cone/plane booleans are closed and deterministic") {
   check_cone_boolean("QA-22 union", cone, low_box, geom::SolidBooleanOp::union_, 32.0 + frustum);
 }
 
+// A cone far from the origin can evaluate both parameter copies of a cut-circle
+// seam point to the same doubles. The duplicate then closes the trim ring with a
+// zero-length chord instead of the seam generatrix. Report that placement as a
+// documented refusal, not as an internal topology error.
+TEST_CASE("curved boolean: a translated cone refuses coincident seam copies") {
+  const double tolerance = 1e-9;
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, -2.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Brep box = geom::make_box(geom::Point3d{-2.0, -4.0, 1.0},
+                                       geom::Point3d{2.0, 0.0, 4.0}, tolerance)
+                             .value();
+  const geom::Brep low_box = geom::make_box(geom::Point3d{-2.0, -4.0, 1.0},
+                                            geom::Point3d{2.0, 0.0, 3.0}, tolerance)
+                                 .value();
+  for (const geom::SolidBooleanOp op :
+       {geom::SolidBooleanOp::difference, geom::SolidBooleanOp::union_}) {
+    geom::CurvedBooleanReport report{};
+    const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+        cone, only_solid(cone), op == geom::SolidBooleanOp::union_ ? low_box : box,
+        only_solid(op == geom::SolidBooleanOp::union_ ? low_box : box), op,
+        geom::CurvedBooleanOptions{tolerance}, &report);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == geom::Errc::unsupported);
+    CHECK(std::string_view{result.error().message}.find("cone seam copies coincide") !=
+          std::string_view::npos);
+  }
+}
+
 TEST_CASE("curved boolean: a cone refuses an axis-containing plane cut") {
   const double tolerance = 1e-9;
   const geom::Brep cone =

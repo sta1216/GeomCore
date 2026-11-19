@@ -58,7 +58,11 @@ C++20, CMake + VS2022 (MSVC 19.44) and GCC/Clang in CI, doctest 2.4.11,
    seam-only chart). A cone that is one face of a larger B-rep stays refused.
 3. The apex weld collapses coincident 3D apex copies inside a ring before
    pcurve creation; it does not merge the two uv copies in `loops_uv`.
-4. trimmed cone tessellation (4b3) stays out of scope.
+4. trimmed cone tessellation (4b3) stays out of scope;
+5. after final review a placement whose two seam copies round to one double is
+   refused with `unsupported "boolean_solid_curved: cone seam copies coincide at
+   this placement; cone booleans at this offset are deferred to M3c-3c-4b3"`
+   instead of reaching the healer (re-centring is deferred to 4b3).
 
 ## Review Focus
 
@@ -77,8 +81,7 @@ C++20, CMake + VS2022 (MSVC 19.44) and GCC/Clang in CI, doctest 2.4.11,
 
 - `include/geom/brep/detail/curved_volume.hpp` — remove cone guard, apex fan.
 - `include/geom/brep/trimmed_domain.hpp` — cone boundary support.
-- `include/geom/brep/mass_properties.hpp` — trimmed cone path.
-- `include/geom/brep/detail/assemble_curved.hpp` — apex weld.
+- `include/geom/brep/assemble_curved.hpp` — apex weld.
 - `include/geom/brep/boolean_solid_curved.hpp` — gate, plane-only guard.
 - `tests/unit/brep_curved_volume_test.cpp`, `brep_boolean_curved_test.cpp`,
   `brep_trim_face_test.cpp`, `tessellate_trimmed_test.cpp`.
@@ -113,7 +116,7 @@ Acceptance: whole cone `2.0943951023931953`, upper cone `0.2617993877991494`
 
 ## Task 2: apex weld in assembly
 
-Files: `include/geom/brep/detail/assemble_curved.hpp`,
+Files: `include/geom/brep/assemble_curved.hpp`,
 `tests/unit/brep_trim_face_test.cpp`, `tests/unit/brep_boolean_curved_test.cpp`.
 
 Steps:

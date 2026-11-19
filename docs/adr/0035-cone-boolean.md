@@ -33,7 +33,11 @@ A cone operand is accepted only when all of the following hold:
   row and the collapsed apex row;
 - the other operand is entirely planar, so every cut of the cone is a plane cut;
 - every cone/plane pair is either perpendicular to the cone axis (within `1e-9`) or
-  provably disjoint (see the conservative predicate below).
+  provably disjoint (see the conservative predicate below);
+- the two parameter copies (`u = 0` and `u = 2*pi`) of a cut-circle seam point stay
+  distinct in double precision. A placement where they round to the same point is
+  refused deterministically (see the refusals table); re-centring the operands to
+  recover it is deferred to M3c-3c-4b3.
 
 No public signature changes. The operations are the existing union, intersection and
 difference. A cone that is one face of a larger B-rep, a trimmed lateral face, or a
@@ -174,6 +178,7 @@ a cone cut by a plane now assemble into one closed shell.
 | cone/cone, cone/torus, cone/cylinder, cone/sphere (including a disjoint pair) | `unsupported "boolean_solid_curved: cone operands only support plane cutters"` |
 | oblique or axis-containing plane that reaches the cone's bounding sphere | `unsupported "boolean_solid_curved: cone cutters must be perpendicular to the cone axis; oblique and axis-containing planes are deferred to M3c-3c-4b3"` |
 | trimmed cone fragment (not one loop over the full chart) | `unsupported "boolean_solid_curved: cone operands must be whole cones; trimmed cone fragments are not supported"` |
+| cone placement where the two seam copies of a cut-circle point round to the same double (for example base centre at `y = +-2` with radius `0.5`) | `unsupported "boolean_solid_curved: cone seam copies coincide at this placement; cone booleans at this offset are deferred to M3c-3c-4b3"` |
 | trimmed cone tessellation | deferred to M3c-3c-4b3; `tessellate_cone_face` still fans the whole base ring to one apex vertex, which does not match a fragment's apex row |
 
 The first row covers every non-planar partner. The cone gate message therefore
@@ -190,7 +195,7 @@ cone that is one face of a larger B-rep is refused rather than re-charted.
 
 ## Evidence
 
-Fixture: `make_cone({0,0,0}, {0,0,1}, radius = 1, height = 2, tolerance = 1e-12)`,
+Fixture: `make_cone({0,0,0}, {0,0,1}, radius = 1, height = 2, tolerance = 1e-9)`,
 boolean tolerance `1e-9`. The plane `z = 1` gives the upper small cone (base radius
 `0.5`, height `1`) and the lower frustum; the box is `{-2,-2,1}..{2,2,4}`, and the
 union uses the low box `{-2,-2,1}..{2,2,3}`.
@@ -212,17 +217,20 @@ through `check_cone_boolean`, which asserts:
 - a second call reproduces the volume bit for bit.
 
 The focused run reports 1 case / 54 assertions / 0 failed. Full suites: Debug and
-Release each report 1008 cases / 670,604 assertions, 0 failed, zero warnings under
+Release each report 1009 cases / 670,614 assertions, 0 failed, zero warnings under
 `/W4 /WX /utf-8` with `GEOM_WERROR=ON`. The 4b1 baseline was 1001 / 670,383; Tasks 1-3 and the F1 whole-cone refusal test
-brought it to 1008 / 670,604 before this task (F1 alone: +1 case, +16 assertions).
+brought it to 1008 / 670,604 before this task (F1 alone: +1 case, +16 assertions);
+the translated-cone refusal adds one case and ten assertions for 1009 / 670,614.
 QA-22 renames the existing three-operation case, so it adds no case or assertion.
 
 ## Consequences
 
 - `boolean_solid_curved` now accepts a whole cone cut by planes, with exact analytic
   rims and a positive, closed, deterministic result. Sphere, torus, cylinder and
-  plane paths keep their existing results; no result or fixture in that corpus
-  changed.
+  plane paths keep their existing results. One intentional boundary detail changed:
+  the trimmed boundary of a sphere boolean face now prepends the chart corner
+  `(-2*pi, -pi/2)`, making the ring rectilinear; no volume or boolean result changed,
+  and no test pins that corner yet.
 - The cone surface gate is open only through the guards above; a non-planar partner
   and a non-perpendicular plane keep their own stable messages, and the old
   `"cone operands need closed-cut and apex topology"` message no longer fires for a

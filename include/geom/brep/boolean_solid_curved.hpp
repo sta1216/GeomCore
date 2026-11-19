@@ -190,8 +190,7 @@ inline CurvedBooleanSurfaceGate curved_boolean_surface_gate(
     return CurvedBooleanSurfaceGate{true, nullptr};
   }
   return CurvedBooleanSurfaceGate{
-      false, "boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are "
-             "deferred to M3c-3"};
+      false, "boolean_solid_curved: unsupported surface type"};
 }
 
 // Full parameter rectangle of a surface whose face may have no real boundary
@@ -2327,6 +2326,30 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
   assembled_faces.reserve(kept.size());
   for (CurvedBooleanCandidate& candidate : kept) {
     assembled_faces.push_back(std::move(candidate.face));
+  }
+
+  // A cone chart spans u = [0, 2*pi], and a seam-crossing cut can carry both
+  // parameter copies of the same 3D point. Far from the origin the two
+  // evaluations round to the same doubles; the duplicate then closes the ring
+  // with a zero-length chord instead of the seam, and assembly cannot pair the
+  // rim. Detect the coincidence and refuse deterministically rather than
+  // reporting an internal topology failure. Re-centring the operands would
+  // recover the case; that is deferred to M3c-3c-4b3.
+  for (const CurvedAssembledFace& face : assembled_faces) {
+    if (std::get_if<Cone3>(&face.surface) == nullptr) continue;
+    for (const std::vector<Point3d>& loop : face.loops) {
+      for (std::size_t pi = 0; pi < loop.size(); ++pi) {
+        const Point3d& first = loop[pi];
+        const Point3d& second = loop[(pi + 1) % loop.size()];
+        if (first[0] == second[0] && first[1] == second[1] && first[2] == second[2]) {
+          record_failure();
+          return Error{Errc::unsupported,
+                       "boolean_solid_curved: cone seam copies coincide at this placement; "
+                       "cone booleans at this offset are deferred to M3c-3c-4b3",
+                       0u, 0u};
+        }
+      }
+    }
   }
 
   const double weld = std::max(64.0 * tolerance, 1e-9 * scale);
