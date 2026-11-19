@@ -468,7 +468,9 @@ inline bool split_solid_face_circle(const SurfaceGeometry& surface, const Vec3d&
     const double t = (offset - dot(normal, split_solid_as_vec(cone->origin))) / alignment;
     if (!std::isfinite(t)) return false;
     const double rho = cone->radius - t * std::tan(cone->half_angle);
-    if (!(rho > 0.0) || !std::isfinite(rho)) return false;
+    // tan(half_angle) can round a few ulps low, leaving a sub-ulp positive rho for a
+    // plane tangent at the apex. Treat that as the degenerate apex, not a circle.
+    if (!(rho > 1e-12 * cone->radius) || !std::isfinite(rho)) return false;
     Point3d center = cone->origin + cone->axis * t;
     center = center - normal * (dot(normal, split_solid_as_vec(center)) - offset);
     Vec3d x_axis = split_solid_unit(cone->x_axis - normal * dot(cone->x_axis, normal));
