@@ -1,4 +1,4 @@
-﻿#include <doctest/doctest.h>
+#include <doctest/doctest.h>
 
 #include <algorithm>
 #include <array>
@@ -484,6 +484,40 @@ TEST_CASE("brep: boolean_solid_curved rejects NURBS operands") {
   REQUIRE(!result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
   CHECK(message_of(result.error()) == "boolean_solid_curved: NURBS operands are not supported");
+}
+
+TEST_CASE("curved boolean: a trimmed cone fragment is refused as an operand") {
+  const double tolerance = 1e-9;
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 1.0}, geom::Point3d{2.0, 2.0, 4.0}, tolerance)
+          .value();
+  const geom::Result<geom::CurvedBooleanResult> lower = geom::boolean_solid_curved(
+      cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::difference,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(lower.has_value(), message_of(lower.error()));
+  const geom::Result<geom::CurvedBooleanResult> upper = geom::boolean_solid_curved(
+      cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::intersection,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(upper.has_value(), message_of(upper.error()));
+
+  const geom::Brep cutter =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 0.0}, geom::Point3d{2.0, 2.0, 0.5}, tolerance)
+          .value();
+  const char* const message =
+      "boolean_solid_curved: cone operands must be whole cones; trimmed cone fragments are not "
+      "supported";
+  for (const geom::Brep* fragment : {&lower.value().brep, &upper.value().brep}) {
+    const geom::Result<geom::CurvedBooleanResult> refused = geom::boolean_solid_curved(
+        *fragment, only_solid(*fragment), cutter, only_solid(cutter),
+        geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == geom::Errc::unsupported);
+    CHECK(message_of(refused.error()) == message);
+  }
 }
 
 TEST_CASE("curved boolean: a cone cut by a plane pins the analytic volumes") {

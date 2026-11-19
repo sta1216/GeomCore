@@ -295,6 +295,17 @@ inline Result<CurvedBooleanFaceInfo> curved_boolean_face_info(const Brep& brep, 
     // of a full period is a trimmed lateral face and keeps its own loops.
     bool whole_cone = false;
     if (std::get_if<Cone3>(info.surface) != nullptr) {
+      // Only the canonical whole cone is supported. A trimmed lateral (a band,
+      // a cap, or a face with a stored hole) has a real rim or an inner loop;
+      // its outline cannot be treated as the analytic chart, so refuse it here
+      // instead of failing later inside the splitter or the outline
+      // triangulation.
+      if (info.loops.size() != 1u) {
+        return Error{Errc::unsupported,
+                     "boolean_solid_curved: cone operands must be whole cones; trimmed cone "
+                     "fragments are not supported",
+                     id.index(), 0u};
+      }
       const double u_lo_analytic = (*analytic_domain)[0];
       const double u_hi_analytic = (*analytic_domain)[1];
       const double v_lo_analytic = (*analytic_domain)[2];
@@ -305,6 +316,12 @@ inline Result<CurvedBooleanFaceInfo> curved_boolean_face_info(const Brep& brep, 
       whole_cone = u_hi - u_lo >= u_hi_analytic - u_lo_analytic - slack &&
                    std::abs(v_hi - v_hi_analytic) <= slack &&
                    std::abs(v_lo - v_lo_analytic) <= slack;
+      if (!whole_cone) {
+        return Error{Errc::unsupported,
+                     "boolean_solid_curved: cone operands must be whole cones; trimmed cone "
+                     "fragments are not supported",
+                     id.index(), 0u};
+      }
     }
     if (collapsed || whole_cone) {
       u_lo = (*analytic_domain)[0];
