@@ -155,7 +155,8 @@ Acceptance: the three volumes above, refusals exact, existing corpus unchanged.
 ## Task 4: QA-22, ADR-0035, bench, §16.3
 
 Files: `tests/unit/brep_boolean_curved_test.cpp`,
-`docs/adr/0035-cone-boolean.md`, `docs/benchmarks/m3c3c4b2.md`,
+`docs/adr/0035-cone-boolean.md`, `docs/adr/0034-cone-chart-open-cuts.md`,
+`docs/benchmarks/m3c3c4b1.md`, `docs/benchmarks/m3c3c4b2.md`,
 `docs/architecture/geometry-library-architecture.md`,
 `docs/superpowers/plans/2026-11-19-m3c3c4b2-cone-boolean.md`.
 
@@ -165,7 +166,9 @@ Steps:
 2. ADR-0035 records the plane-only scope, apex weld, apex fan, refusals and
    deferred cone/cone, tessellation and curved cutters.
 3. Benchmark note records the measured volumes and no timing gate; §16.3 gets an
-   M3c-3c-4b2 paragraph.
+   M3c-3c-4b2 paragraph. ADR-0034 and the M3c-3c-4b1 benchmark still say the cone
+   volume and trimmed-boundary paths refuse cone faces; update them to the new
+   support (the apex fan and the expanded trimmed boundary).
 4. Tick the plan boxes; final counts must match the measured suite.
 
 ## Exit criteria
