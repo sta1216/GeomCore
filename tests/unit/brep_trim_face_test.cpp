@@ -887,6 +887,89 @@ TEST_CASE("trim_face: a meridian open cut splits the cone chart in two") {
   }
 }
 
+// QA-21 is the end-to-end pin for the cone open-cut contract: one meridian from
+// the base rim (v = 0) to the apex (v = 2) splits the chart into the 0.7 wedge
+// and the rest, each collapsed copy carries the apex, and a second run repeats
+// every ring bitwise. It intentionally repeats the Task 3 acceptance on the
+// canonical cone and adds no new behaviour.
+TEST_CASE(
+    "QA-21: a cone meridian split is deterministic and closes at the apex") {
+  const Brep cone =
+      make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
+  const FaceId lateral = face_with_surface<Cone3>(cone);
+  REQUIRE_FALSE(lateral.is_null());
+
+  const std::vector<Point2d> meridian{Point2d{0.7, 0.0}, Point2d{0.7, 2.0}};
+  const std::vector<FaceCut> cuts{FaceCut{meridian}};
+  const Result<std::vector<CurvedFragment>> first =
+      split_face_curved(cone, lateral, cuts, 1e-9);
+  REQUIRE(first.has_value());
+  REQUIRE(first.value().size() == 2u);
+
+  const detail::FaceUvProjection projection =
+      detail::face_uv_projection(cone, cone.face(lateral), kTol).value();
+  const Point3d apex{0.0, 0.0, 2.0};
+  std::vector<double> areas;
+  std::vector<std::size_t> apex_points;
+  for (const CurvedFragment& fragment : first.value()) {
+    REQUIRE(fragment.loops_uv.size() == 1u);
+    CHECK(fragment.loops.size() == fragment.loops_uv.size());
+    const std::vector<Point2d>& ring = fragment.loops_uv.front();
+    std::size_t apex_count = 0;
+    for (const Point2d& p : ring) {
+      if (p[1] != 2.0) continue;
+      ++apex_count;
+      const Point3d evaluated = detail::face_uv_eval(projection, p);
+      CHECK(std::fabs(evaluated[0] - apex[0]) <= 1e-12);
+      CHECK(std::fabs(evaluated[1] - apex[1]) <= 1e-12);
+      CHECK(std::fabs(evaluated[2] - apex[2]) <= 1e-12);
+    }
+    areas.push_back(std::fabs(signed_area2(ring)));
+    apex_points.push_back(apex_count);
+  }
+  REQUIRE(areas.size() == 2u);
+  REQUIRE(apex_points.size() == 2u);
+  // Fragment order is the arrangement-face order pinned by Task 3: the
+  // seam-side 0.7 wedge first, then the wide chart remainder.
+  CHECK(areas[0] == doctest::Approx(0.7).epsilon(1e-9));
+  CHECK(areas[1] == doctest::Approx(2.0 * (2.0 * kPi - 0.7)).epsilon(1e-9));
+  CHECK(apex_points[0] == 1u);
+  CHECK(apex_points[1] == 2u);
+
+  const Result<std::vector<CurvedFragment>> again =
+      split_face_curved(cone, lateral, cuts, 1e-9);
+  REQUIRE(again.has_value());
+  REQUIRE(again.value().size() == first.value().size());
+  const auto same_uv = [](const std::vector<Point2d>& a,
+                          const std::vector<Point2d>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      if (a[i][0] != b[i][0] || a[i][1] != b[i][1]) return false;
+    }
+    return true;
+  };
+  const auto same_xyz = [](const std::vector<Point3d>& a,
+                           const std::vector<Point3d>& b) {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      if (a[i][0] != b[i][0] || a[i][1] != b[i][1] || a[i][2] != b[i][2]) {
+        return false;
+      }
+    }
+    return true;
+  };
+  for (std::size_t i = 0; i < first.value().size(); ++i) {
+    REQUIRE(again.value()[i].loops_uv.size() ==
+            first.value()[i].loops_uv.size());
+    REQUIRE(again.value()[i].loops.size() == first.value()[i].loops.size());
+    for (std::size_t l = 0; l < first.value()[i].loops_uv.size(); ++l) {
+      CHECK(same_uv(again.value()[i].loops_uv[l],
+                    first.value()[i].loops_uv[l]));
+      CHECK(same_xyz(again.value()[i].loops[l], first.value()[i].loops[l]));
+    }
+  }
+}
+
 // The cylinder lateral face is the generic rectangle: the same u-periodic chart
 // as the cone, but with real rims on both v sides instead of a collapsed apex.
 detail::TrimFaceDomain cylinder_rectangle_domain() {

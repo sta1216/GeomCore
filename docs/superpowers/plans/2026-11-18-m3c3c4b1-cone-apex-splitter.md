@@ -15,22 +15,24 @@ closed: no boolean operation changes result in this slice.
 the canonical case where one domain side (the apex) collapses to a single 3D
 point, exactly like a sphere pole but with only one pole. The splitter's
 geometric core already collapses a material cycle that owns a
-`TrimSideKind::kCollapsed` side into one pole point
+`TrimSideKind::kCollapsed` side into apex-row points
 (`trim_face_split_domain`). What is missing is upstream:
 
 - `face_uv_project_cone` refuses every point at or beyond the apex, so the
   stored loop cannot be read and every downstream consumer inherits the error.
 - `trim_face_domain` knows sphere and torus charts only; there is no cone chart.
 - `split_face_curved` has no cone dispatch, so a cone face falls through to the
-  generic clip path with a zero-area stored loop.
+  generic clip path with a half-chart stored slit loop.
 - `trim_face_split_domain` still pairs open cut pieces as seam-to-seam only; a
   meridian from the base circle to the apex is refused with
   `"open cuts on a seam-only face"`.
 
 Downstream representation is unchanged: fragments still carry
-`loops`/`loops_uv` of equal length, and the apex is one uv point on the back
-seam copy (`u = 2π`) produced by collapsing the top side, matching the sphere
-pole convention.
+`loops`/`loops_uv` of equal length. Collapsing the top side produces apex-row
+points only, not one shared pole vertex: a meridian split leaves one apex-row
+point on the narrow wedge and two on the wide remainder (the cut end plus the
+back-seam copy at `u = 2π`). Fragments are not welded or fanned across the
+apex.
 
 ## Tech Stack
 
@@ -58,7 +60,7 @@ dependency. Existing helpers: `trim_face_split_domain`,
   mesh, mass properties and tessellation must stay unchanged.
 - The boolean gate for cone operands stays as it is in this slice
   (`"boolean_solid_curved: cone operands need closed-cut and apex topology;
-  booleans are deferred to M3c-3c-3"`).
+  booleans are deferred to M3c-3"`).
 - TDD: test first, observe RED, minimal implementation, Debug and Release
   suites, one commit per task.
 - MSBuild header dependency tracking is unreliable in this repository: after a
@@ -70,25 +72,29 @@ dependency. Existing helpers: `trim_face_split_domain`,
 
 1. Apex projection: only points within a rounding-level band of the apex are
    accepted; points on the other nappe (beyond the apex) still error. The
-   returned `u` is stable (`previous_u`), so the ring closes without a jump, and
-   the apex appears once after consecutive-duplicate removal.
+   returned `u` is stable (`previous_u`), so the ring closes without a jump. The
+   collapsed side appears as apex-row points, one per side occurrence in the
+   fragment (a meridian split gives one on the narrow wedge and two on the wide
+   remainder), not as one shared pole vertex.
 2. Cone chart: bounds `[0, 2π] × [0, radius/tan(half_angle)]`, `u` periodic,
    `v = v_lo` real, `v = v_hi` collapsed. A genuinely trimmed cone face must
    not be reopened as the full chart.
-3. Dispatch: only a synthetic cone face (stored loop area zero, one loop) goes
-   to `trim_face_split_domain`; a trimmed cone face keeps the existing
-   `unsupported` behaviour.
+3. Dispatch: only a synthetic cone face (one stored loop, `|area - 0.5*chart|`
+   within `1e-9*chart`, loop points only on `v_lo`/`v_hi`, exactly one on the
+   collapsed row) goes to `trim_face_split_domain` with empty holes; a trimmed
+   cone face keeps the existing `unsupported` behaviour.
 4. Open chains: both ends must lie within the parameter tolerance of a domain
-   side; an end strictly inside the domain is refused; a chain lying on a side
-   is refused as a degenerate cut. The arrangement must produce two material
-   cycles, each keeping the real boundary edge and collapsing the apex side to
-   one point.
+   side and neither may lie on a periodic seam; an end strictly inside the
+   domain is refused; a chain lying on a side is refused as a degenerate cut.
+   The arrangement must produce two material cycles, each keeping the real
+   boundary edge and collapsing the apex side to apex-row points.
 5. Fragment geometry: a horizontal closed cut on the cone yields a cap with uv
-   area `π` (one apex point) and a band with area `2π`; a meridian open cut
-   yields two half-charts of area `2π` each, both with one apex point.
+   area `π` (one apex point) and a band with area `2π` (no apex point); a
+   meridian open cut at `u = 0.7` yields areas `0.7` and `2*(2π - 0.7)`, with
+   one and two apex-row points respectively, all evaluating to the 3D apex.
 6. Regression: sphere cap and torus offset tests untouched; boolean gate
-   message unchanged. Three temporary cone refusals keep the pre-fan contracts
-   until 4b2/4b3: `split_face_curved: cone lateral faces are not supported yet`,
+   message unchanged. Three cone refusals keep their contracts until later
+   slices: `split_face_curved: trimmed cone faces are not supported yet`,
    `curved_solid_volume: cone faces are not supported yet`, and
    `trimmed_face_boundaries: cone faces are not supported yet`. No other
    assembly, mass or volume change.
@@ -105,6 +111,7 @@ dependency. Existing helpers: `trim_face_split_domain`,
 - `tests/unit/brep_trim_face_test.cpp` — cone closed cut, cone meridian, generic
   rectangle open cut, rejection of an interior end.
 - `docs/adr/0034-cone-chart-open-cuts.md` — new ADR.
+- `docs/benchmarks/m3c3c4b1.md` — measured QA-21 totals and no-boolean note.
 - `docs/architecture/geometry-library-architecture.md` — §16.3 paragraph.
 
 ## Task 1 — Apex-tolerant cone projection
@@ -214,7 +221,8 @@ is not the full chart keeps the existing refusal.
    returns `unsupported "split_face_curved: trimmed cone faces are not
    supported yet"` with `(face.index(), 0)`. Do not route trimmed cones
    through the generic clip path.
-4. Run focused and full suites (expect 988 cases / about 668,860 assertions).
+4. Run focused and full suites; record the measured counts (the final Task 4
+   totals are 1001 cases / 670,383 assertions in Debug and Release).
 5. Commit `feat(trim_face): split closed cuts on a cone chart`.
 
 ## Task 3 — Open cut ends on any domain side
@@ -254,13 +262,14 @@ chart is deferred); a chain lying on a side returns
    const auto split = geom::split_face_curved(cone.value(), lateral, cuts, 1e-9);
    REQUIRE(split.has_value());
    REQUIRE(split.value().size() == 2u);
-   // Each half chart has area 2*pi and exactly one apex point.
+   // Each fragment has area 0.7 (narrow) and 2*(2*pi - 0.7) (wide),
+   // with one and two apex-row points respectively.
    ```
 
    Also split a rectangle domain (`{0,2π,0,2}`, sides
    `{seam,seam,real,real}`) with the meridian from `(0.7,0)` to `(0.7,2)` and
-   check two fragments of area `2π`; and a rejected chain ending at `(0.7,1)`
-   inside the chart (assert the upstream message).
+   check two fragments of area `1.4` and `2*(2π-0.7)`; and a rejected chain
+   ending at `(0.7,1)` inside the chart (assert the upstream message).
 
 2. Run; expect the seam-pair refusal.
 3. Implement: in the pairing loop, after seam-pair matching fails, accept an
@@ -277,25 +286,28 @@ chart is deferred); a chain lying on a side returns
 ## Task 4 — QA-21, ADR and the deferred contract
 
 **Files:** `tests/unit/brep_trim_face_test.cpp`,
-`tests/unit/brep_face_uv_test.cpp`,
 `docs/adr/0034-cone-chart-open-cuts.md`,
+`docs/benchmarks/m3c3c4b1.md`,
 `docs/architecture/geometry-library-architecture.md`, this plan.
 
 **Steps:**
 
-1. Add QA-21 as one test case that repeats the Task 1–3 checks on the canonical
-   cone: apex loop, closed horizontal cut (`π` cap with one apex, `2π` band),
-   meridian split (two `2π` halves, one apex each), and asserts every fragment
-   has `loops.size() == loops_uv.size()`.
-2. Write ADR-0034: cone chart, apex projection rule, open-end acceptance,
-   representations (apex at the back seam copy), refusal matrix (interior end,
-   side-lying chain, trimmed cone face, and the temporary
-   `split_face_curved`/`curved_solid_volume`/`trimmed_face_boundaries` cone
-   refusals), and what stays deferred (boolean gate, apex-fan volume, trimmed
-   cone tessellation, general twisted crossings).
+1. Add QA-21 as one small end-to-end pin on the canonical cone: a meridian cut
+   `(0.7,0)->(0.7,2)` through the public `split_face_curved` gives two
+   fragments with uv areas `0.7` and `2*(2π-0.7)`, apex-row point counts 1 and
+   2, every `v = 2` point evaluating to `(0,0,2)` within `1e-12`, and two runs
+   bitwise identical. It intentionally repeats the Task 3 meridian acceptance;
+   do not duplicate the apex-loop or closed-cut cases.
+2. Write ADR-0034: cone chart, apex projection rule, synthetic detection,
+   open-end acceptance (both ends on non-seam domain sides, snapped), fragment
+   representation, refusal matrix (interior end, side-lying chain, mixed seam,
+   non-boundary piece, trimmed cone, cone volume, cone trimmed boundaries,
+   cone boolean gate), and what stays deferred (assembly of the two halves,
+   apex-fan volume, trimmed-cone tessellation, general twisted crossings).
 3. Add the §16.3 paragraph and cross-reference ADR-0032/ADR-0034; leave
-   line endings as found (CRLF).
-4. Run Debug and Release suites; record the exact counts.
+   line endings as found (CRLF). Do not claim boolean support.
+4. Run Debug and Release suites; record the exact measured counts: 1001 cases /
+   670,383 assertions in both configurations, zero warnings.
 5. Commit `docs(m3c3c4b1): record the cone chart and open-cut contract`.
 
 ## Exit criteria
@@ -303,7 +315,8 @@ chart is deferred); a chain lying on a side returns
 - `face_loops_uv` on a canonical cone lateral face succeeds and yields one
   loop with exactly one apex point at `v = 2`.
 - `split_face_curved` splits a closed horizontal cone cut into a `π` cap and a
-  `2π` band, and a meridian open cut into two `2π` halves.
+  `2π` band, and a meridian open cut at `u = 0.7` into areas `0.7` and
+  `2*(2π-0.7)` with one and two apex-row points.
 - Open ends strictly inside the chart, chains lying on a side, and trimmed cone
   faces are refused with the stable messages above.
 - The boolean gate for cone operands and all sphere/torus/cylinder outputs are
@@ -313,11 +326,15 @@ chart is deferred); a chain lying on a side returns
 
 ## Self-review
 
-- [ ] Every task has a RED test that fails on the parent commit.
-- [ ] Apex projection limit is relative and documented; no new absolute epsilon.
-- [ ] Open-end detection uses the same relative parameter tolerance as the
+- [x] Every task has a RED test that fails on the parent commit. Tasks 1–3
+      recorded their RED before implementation; Task 4's QA-21 RED was measured
+      on the `b9efed7` headers (`"open cuts on a seam-only face"`, context
+      `1/0`) because the parent test file predates QA-21.
+- [x] Apex projection limit is relative and documented; no new absolute epsilon.
+- [x] Open-end detection uses the same relative parameter tolerance as the
       splitter, and endpoints are snapped so the arrangement has exact vertices.
-- [ ] Assembly code is untouched; mass and volume paths only add the three
-      temporary cone refusals recorded above, with no numerical change.
-- [ ] ADR records the refusal matrix and the deferred boolean/volume work.
-- [ ] Test counts are recorded in the exit report and in ledger.
+- [x] Assembly code is untouched; mass and volume paths only return the cone
+      refusals recorded above, with no numerical change.
+- [x] ADR records the refusal matrix and the deferred boolean/volume work.
+- [x] Test counts are recorded in the exit report and in the ledger: 1001
+      cases / 670,383 assertions in Debug and Release.
