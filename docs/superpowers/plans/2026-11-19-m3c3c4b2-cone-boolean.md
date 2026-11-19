@@ -62,7 +62,7 @@ C++20, CMake + VS2022 (MSVC 19.44) and GCC/Clang in CI, doctest 2.4.11,
 5. after final review a placement whose two seam copies round to one double is
    refused with `unsupported "boolean_solid_curved: cone seam copies coincide at
    this placement; cone booleans at this offset are deferred to M3c-3c-4b3"`
-   instead of reaching the healer (re-centring is deferred to 4b3).
+   after split/heal but before assembly (re-centring is deferred to 4b3).
 
 ## Review Focus
 
@@ -84,7 +84,7 @@ C++20, CMake + VS2022 (MSVC 19.44) and GCC/Clang in CI, doctest 2.4.11,
 - `include/geom/brep/assemble_curved.hpp` — apex weld.
 - `include/geom/brep/boolean_solid_curved.hpp` — gate, plane-only guard.
 - `tests/unit/brep_curved_volume_test.cpp`, `brep_boolean_curved_test.cpp`,
-  `brep_trim_face_test.cpp`, `tessellate_trimmed_test.cpp`.
+  `brep_trim_face_test.cpp`.
 - `docs/adr/0035-cone-boolean.md`, `docs/benchmarks/m3c3c4b2.md`,
   `docs/architecture/geometry-library-architecture.md` §16.3.
 

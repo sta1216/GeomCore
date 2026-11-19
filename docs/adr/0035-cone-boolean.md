@@ -178,7 +178,7 @@ a cone cut by a plane now assemble into one closed shell.
 | cone/cone, cone/torus, cone/cylinder, cone/sphere (including a disjoint pair) | `unsupported "boolean_solid_curved: cone operands only support plane cutters"` |
 | oblique or axis-containing plane that reaches the cone's bounding sphere | `unsupported "boolean_solid_curved: cone cutters must be perpendicular to the cone axis; oblique and axis-containing planes are deferred to M3c-3c-4b3"` |
 | trimmed cone fragment (not one loop over the full chart) | `unsupported "boolean_solid_curved: cone operands must be whole cones; trimmed cone fragments are not supported"` |
-| cone placement where the two seam copies of a cut-circle point round to the same double (for example base centre at `y = +-2` with radius `0.5`) | `unsupported "boolean_solid_curved: cone seam copies coincide at this placement; cone booleans at this offset are deferred to M3c-3c-4b3"` |
+| cone placement where the two seam copies of a cut-circle point round to the same double (observed with base centre `y = -2`, or `|y| >= 2.25`, and radius `0.5`; `y = +2` still passes) | `unsupported "boolean_solid_curved: cone seam copies coincide at this placement; cone booleans at this offset are deferred to M3c-3c-4b3"` |
 | trimmed cone tessellation | deferred to M3c-3c-4b3; `tessellate_cone_face` still fans the whole base ring to one apex vertex, which does not match a fragment's apex row |
 
 The first row covers every non-planar partner. The cone gate message therefore
@@ -192,6 +192,11 @@ Trimmed cone fragments, cone/cone and cone/curved cutters, oblique and axis-cont
 planes (which need half-turn rim arcs or an exact ellipse), trimmed cone tessellation,
 and NURBS operands stay outside this slice. The whole-cone restriction is also why a
 cone that is one face of a larger B-rep is refused rather than re-charted.
+
+A translated whole cone subtracted from a provably disjoint box at `|y| >= 10` still
+fails inside the pre-existing base-rim heal (`assemble_curved_solid: shared edge curve
+mismatch`). That is not a regression from this slice; it is tracked with the
+re-centring work in M3c-3c-4b3.
 
 ## Evidence
 

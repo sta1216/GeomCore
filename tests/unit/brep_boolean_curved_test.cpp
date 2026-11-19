@@ -580,6 +580,9 @@ TEST_CASE("curved boolean: a translated cone refuses coincident seam copies") {
     CHECK(result.error().code == geom::Errc::unsupported);
     CHECK(std::string_view{result.error().message}.find("cone seam copies coincide") !=
           std::string_view::npos);
+    // The guard runs after the split/heal, so `report` records the work already
+    // done (pairs/cuts/fragments) instead of staying zero; only the error and its
+    // message are contractual here.
   }
 }
 
