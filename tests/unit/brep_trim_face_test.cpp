@@ -785,13 +785,17 @@ TEST_CASE("trim_face: a meridian open cut splits the cone chart in two") {
       make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
   const FaceId lateral = face_with_surface<Cone3>(cone);
   REQUIRE_FALSE(lateral.is_null());
+  // The chart bound is radius / tan(half_angle); it may differ from the
+  // primitive height by a few ulps, so the apex row is not always exactly 2.0.
+  const double v_apex = 1.0 / std::tan(std::atan2(1.0, 2.0));
+  CHECK(v_apex == doctest::Approx(2.0));
 
   // A meridian from the base rim to the apex at u = 0.7, deliberately not one
   // of the pi/32 synthetic side samples, so the arrangement has to split the
   // side segment at the open end.
   std::vector<Point2d> meridian;
   meridian.push_back(Point2d{0.7, 0.0});
-  meridian.push_back(Point2d{0.7, 2.0});
+  meridian.push_back(Point2d{0.7, v_apex});
   const std::vector<FaceCut> cuts{FaceCut{meridian}};
 
   const Result<std::vector<CurvedFragment>> split =
@@ -811,8 +815,8 @@ TEST_CASE("trim_face: a meridian open cut splits the cone chart in two") {
       CHECK(p[0] >= 0.0);
       CHECK(p[0] <= 2.0 * kPi);
       CHECK(p[1] >= 0.0);
-      CHECK(p[1] <= 2.0);
-      if (p[1] == 2.0) {
+      CHECK(p[1] <= v_apex);
+      if (p[1] == v_apex) {
         // Apex-row points are parameter copies of one 3D vertex: the cut's end
         // and the back-seam copy must evaluate to the same apex within 1e-12.
         const Point3d evaluated = detail::face_uv_eval(projection, p);
@@ -830,11 +834,11 @@ TEST_CASE("trim_face: a meridian open cut splits the cone chart in two") {
                            }) == 1;
     };
     CHECK(has_point(0.7, 0.0));
-    CHECK(has_point(0.7, 2.0));
+    CHECK(has_point(0.7, v_apex));
     areas.push_back(std::fabs(signed_area2(ring)));
     apex_points.push_back(static_cast<std::size_t>(std::count_if(
         ring.begin(), ring.end(),
-        [](const Point2d& p) { return p[1] == 2.0; })));
+        [v_apex](const Point2d& p) { return p[1] == v_apex; })));
   }
   // A single meridian at u = 0.7 leaves the chart in two pieces: the wedge
   // between the seam and the cut (width 0.7) and the rest of the chart (width
@@ -898,8 +902,10 @@ TEST_CASE(
       make_cone(Point3d{0, 0, 0}, Vec3d{0, 0, 1}, 1.0, 2.0, kTol).value();
   const FaceId lateral = face_with_surface<Cone3>(cone);
   REQUIRE_FALSE(lateral.is_null());
+  const double v_apex = 1.0 / std::tan(std::atan2(1.0, 2.0));
+  CHECK(v_apex == doctest::Approx(2.0));
 
-  const std::vector<Point2d> meridian{Point2d{0.7, 0.0}, Point2d{0.7, 2.0}};
+  const std::vector<Point2d> meridian{Point2d{0.7, 0.0}, Point2d{0.7, v_apex}};
   const std::vector<FaceCut> cuts{FaceCut{meridian}};
   const Result<std::vector<CurvedFragment>> first =
       split_face_curved(cone, lateral, cuts, 1e-9);
@@ -917,7 +923,7 @@ TEST_CASE(
     const std::vector<Point2d>& ring = fragment.loops_uv.front();
     std::size_t apex_count = 0;
     for (const Point2d& p : ring) {
-      if (p[1] != 2.0) continue;
+      if (p[1] != v_apex) continue;
       ++apex_count;
       const Point3d evaluated = detail::face_uv_eval(projection, p);
       CHECK(std::fabs(evaluated[0] - apex[0]) <= 1e-12);

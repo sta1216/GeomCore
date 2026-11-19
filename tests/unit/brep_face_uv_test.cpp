@@ -726,11 +726,15 @@ TEST_CASE("face loops uv: the cone apex projects to one chart point") {
   REQUIRE(loops.has_value());
   REQUIRE(loops.value().size() == 1u);
   const auto& points = loops.value().front().points;
+  // radius / tan(half_angle) may differ from the primitive height by a few
+  // ulps, so do not require the apex row to be exactly 2.0.
+  const double v_apex = 1.0 / std::tan(std::atan2(1.0, 2.0));
+  CHECK(v_apex == doctest::Approx(2.0));
   std::size_t apex = 0, rim = 0;
   for (const geom::Point2d& p : points) {
     CHECK(p[0] >= -1e-12);
     CHECK(p[0] <= 2.0 * geom::detail::kFaceUvPi + 1e-12);
-    if (p[1] == 2.0) ++apex;
+    if (p[1] == v_apex) ++apex;
     if (p[1] == 0.0) ++rim;
   }
   CHECK(apex == 1u);
@@ -739,7 +743,7 @@ TEST_CASE("face loops uv: the cone apex projects to one chart point") {
   // which the base ring leaves at one full turn. No interior step may jump.
   REQUIRE(points.size() >= 2u);
   const geom::Point2d& apex_point = points.back();
-  REQUIRE(apex_point[1] == 2.0);
+  REQUIRE(apex_point[1] == v_apex);
   CHECK(apex_point[0] == 2.0 * geom::detail::kFaceUvPi);
   CHECK(apex_point[0] == points[points.size() - 2u][0]);
   for (std::size_t i = 1u; i < points.size(); ++i) {
