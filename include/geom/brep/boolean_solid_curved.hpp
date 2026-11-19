@@ -4,16 +4,21 @@
 // in trimmed faces.
 //
 // The driver is the curved counterpart of `boolean_solid` (which is planar
-// only). Operands must be built from planes, cylinders, tori, and (for the
-// sphere/sphere lens only) whole spheres; a torus can only be cut by a plane
-// (perpendicular to its axis or containing it). Sphere operands are accepted only
+// only). Operands must be built from planes, cylinders, tori, whole cones, and
+// (for the sphere/sphere lens only) whole spheres; a torus can only be cut by a
+// plane (perpendicular to its axis or containing it), and a cone only by a plane
+// perpendicular to its axis (an axis-containing or oblique plane would need the
+// half-turn rim arcs and the ellipse this slice cannot represent). A cone is
+// accepted only as a whole operand (one shell, one lateral face and its base cap,
+// the canonical seam-only chart) and only against an all-planar partner; a cone
+// paired with a cone, torus, cylinder or sphere is refused before any cut work.
+// Sphere operands are accepted only
 // as whole spheres that cross; the pair is re-charted onto a shared sphere frame
 // whose poles lie on the line through both centres, so the exact circle where the
 // two spheres cross becomes a latitude of both charts (ADR-0030). Every other use
 // of a sphere - trimmed or partial spheres, containment, tangency and separation -
 // is reported as `unsupported` before any work is done, as is every other analytic
-// surface kind (cone operands are deferred to M3c-3c, NURBS patches have no
-// analytic parameterization here).
+// surface kind (NURBS patches have no analytic parameterization here).
 //
 // The driver pairs face bounding boxes, asks the surface/surface intersector for
 // a cut curve per pair, clips each cut to the face it will split, splits every
@@ -156,14 +161,16 @@ inline bool curved_boolean_bounds_overlap(const CurvedBooleanBounds& a,
   return true;
 }
 
-// The surface kinds the driver can cut. Cone operands have an apex that
-// produces tangent loops the splitter cannot represent yet (an interior closed
-// ring not touching a seam, or an open meridian chain ending on the base rim);
-// NURBS patches have no analytic parameterization here. A sphere is periodic in
-// u and collapses at both poles, but its closed latitude cuts are supported:
-// the splitter synthesizes the parameter rectangle and represents a
-// pole-touching cap with one exact pole point. A torus is periodic on both
-// axes, which the cut chains and the seam splitter handle one axis at a time.
+// The surface kinds the driver can cut. A whole cone is accepted here: its
+// lateral face is the canonical seam-only chart whose cut-end and back-seam
+// copies of the apex are welded during assembly, and the driver restricts a cone
+// operand to plane cutters perpendicular to its axis (see the cone guards in
+// `boolean_solid_curved`). NURBS patches have no analytic parameterization here.
+// A sphere is periodic in u and collapses at both poles, but its closed latitude
+// cuts are supported: the splitter synthesizes the parameter rectangle and
+// represents a pole-touching cap with one exact pole point. A torus is periodic
+// on both axes, which the cut chains and the seam splitter handle one axis at a
+// time.
 struct CurvedBooleanSurfaceGate {
   bool supported = false;
   const char* message = nullptr;
@@ -172,7 +179,7 @@ struct CurvedBooleanSurfaceGate {
 inline CurvedBooleanSurfaceGate curved_boolean_surface_gate(
     const SurfaceGeometry& surface) noexcept {
   if (std::holds_alternative<Plane3>(surface) || std::holds_alternative<Cylinder3>(surface) ||
-      std::holds_alternative<Torus3>(surface)) {
+      std::holds_alternative<Torus3>(surface) || std::holds_alternative<Cone3>(surface)) {
     return CurvedBooleanSurfaceGate{true, nullptr};
   }
   if (std::holds_alternative<NurbsSurface>(surface)) {
@@ -183,9 +190,8 @@ inline CurvedBooleanSurfaceGate curved_boolean_surface_gate(
     return CurvedBooleanSurfaceGate{true, nullptr};
   }
   return CurvedBooleanSurfaceGate{
-      false,
-      "boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are "
-      "deferred to M3c-3"};
+      false, "boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are "
+             "deferred to M3c-3"};
 }
 
 // Full parameter rectangle of a surface whose face may have no real boundary
@@ -271,22 +277,43 @@ inline Result<CurvedBooleanFaceInfo> curved_boolean_face_info(const Brep& brep, 
     u_hi = u_lo + kCurvedBooleanTwoPi;
   }
   // A seam-only face (a sphere or cone lateral face, a torus cut along its own
-  // seam) has no boundary loop of its own: the loop-derived u-span collapses
-  // onto one parameter line even though the face covers the whole surface. The
-  // chart still needs the analytic range for the 5x5 sample and for the
-  // splitter, so substitute it -- but only for a span collapsed below the
-  // 1e-12 relative threshold; a genuinely trimmed face above it keeps its old
-  // range byte for byte.
+  // seam) has no boundary loop of its own: its stored loop is a zero-area slit
+  // (the pole, the two seam copies, the base rim plus the seam) even though the
+  // face covers the whole surface. The chart still needs the analytic range for
+  // the 5x5 sample, for the region test and for the splitter, so substitute it --
+  // but only for a collapsed span or a whole-cone loop; a genuinely trimmed face
+  // has a real rim above both thresholds and keeps its old range byte for byte.
   const std::optional<std::array<double, 4>> analytic_domain =
       curved_boolean_surface_uv_domain(*info.surface);
-  if (analytic_domain.has_value() &&
-      u_hi - u_lo <= 1e-12 * std::max(1.0, std::max(std::abs(u_lo), std::abs(u_hi)))) {
-    u_lo = (*analytic_domain)[0];
-    u_hi = (*analytic_domain)[1];
-    v_lo = (*analytic_domain)[2];
-    v_hi = (*analytic_domain)[3];
-    info.synthetic_domain = true;
-    info.synthetic_boundary = {u_lo, v_lo, u_hi, v_hi};
+  if (analytic_domain.has_value()) {
+    const bool collapsed =
+        u_hi - u_lo <= 1e-12 * std::max(1.0, std::max(std::abs(u_lo), std::abs(u_hi)));
+    // A whole cone's stored loop is the base rim (v = 0, the full period), the
+    // seam up to the collapsed apex and the seam back down: its chart is the
+    // analytic rectangle even though the loop itself only spans the triangle
+    // (0, 0), (2*pi, 0), (0, apex). A cone whose loop stops short of the apex or
+    // of a full period is a trimmed lateral face and keeps its own loops.
+    bool whole_cone = false;
+    if (std::get_if<Cone3>(info.surface) != nullptr) {
+      const double u_lo_analytic = (*analytic_domain)[0];
+      const double u_hi_analytic = (*analytic_domain)[1];
+      const double v_lo_analytic = (*analytic_domain)[2];
+      const double v_hi_analytic = (*analytic_domain)[3];
+      const double slack =
+          1e-9 * std::max(1.0, std::max(u_hi_analytic - u_lo_analytic,
+                                        std::abs(v_hi_analytic) + std::abs(v_lo_analytic)));
+      whole_cone = u_hi - u_lo >= u_hi_analytic - u_lo_analytic - slack &&
+                   std::abs(v_hi - v_hi_analytic) <= slack &&
+                   std::abs(v_lo - v_lo_analytic) <= slack;
+    }
+    if (collapsed || whole_cone) {
+      u_lo = (*analytic_domain)[0];
+      u_hi = (*analytic_domain)[1];
+      v_lo = (*analytic_domain)[2];
+      v_hi = (*analytic_domain)[3];
+      info.synthetic_domain = true;
+      info.synthetic_boundary = {u_lo, v_lo, u_hi, v_hi};
+    }
   }
   info.u = {u_lo, u_hi};
   info.v = {v_lo, v_hi};
@@ -1319,6 +1346,39 @@ inline bool curved_boolean_torus_plane_cut_supported(const Plane3& plane, const 
   return false;
 }
 
+// A cone's cut rim is a circle only when the cutting plane is perpendicular to
+// the cone axis: an oblique plane cuts an ellipse, which the splitter cannot
+// trace, and a plane containing the axis leaves two half-turn rim arcs the
+// assembler cannot stitch. Both are deferred to M3c-3c-4b3. A plane that does not
+// reach the cone cuts nothing, so its orientation is harmless; the test is
+// against a conservative bounding sphere centred a third of the height up the
+// axis with radius hypot(radius, 2*height/3), which contains the whole cone
+// including its base disk. The perpendicularity band is 1e-9, far wider than the
+// rounding error of a constructed perpendicular plane and far narrower than any
+// constructed oblique cut.
+constexpr double kCurvedBooleanConePerpendicularSlack = 1e-9;
+
+inline bool curved_boolean_cone_plane_cut_supported(const Cone3& cone, const Plane3& plane,
+                                                    double tolerance) noexcept {
+  const double length = std::sqrt(plane.normal[0] * plane.normal[0] +
+                                  plane.normal[1] * plane.normal[1] +
+                                  plane.normal[2] * plane.normal[2]);
+  if (!(length > 0.0) || !std::isfinite(length)) return false;
+  const Vec3d unit{plane.normal[0] / length, plane.normal[1] / length,
+                   plane.normal[2] / length};
+  const double axis_norm = std::sqrt(dot(cone.axis, cone.axis));
+  if (!(axis_norm > 0.0) || !std::isfinite(axis_norm)) return false;
+  const Vec3d axis{cone.axis[0] / axis_norm, cone.axis[1] / axis_norm,
+                   cone.axis[2] / axis_norm};
+  if (std::abs(dot(unit, axis)) >= 1.0 - kCurvedBooleanConePerpendicularSlack) return true;
+  const double height = cone.radius / std::tan(cone.half_angle);
+  if (!(height > 0.0) || !std::isfinite(height)) return false;
+  const Vec3d center = split_solid_as_vec(cone.origin) + axis * (height / 3.0);
+  const double sphere_radius = std::hypot(cone.radius, 2.0 * height / 3.0);
+  const double distance = std::abs(dot(unit, center) - plane.offset / length);
+  return !(distance <= sphere_radius + tolerance);
+}
+
 // The exact circles in which a face pair meets. A plane and a cylinder or a
 // sphere with a parallel axis meet in one circle; two spheres meet in one circle
 // perpendicular to their centre line; a plane perpendicular to a torus axis
@@ -1750,6 +1810,59 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
     infos_b.push_back(info.value());
   }
 
+  // A cone operand is only cut by planes. The analytic cone/plane cut circle, the
+  // apex fan and the seam-only chart this driver now supports have no analogue
+  // for a curved partner, so a cone paired with a cone, a torus, a cylinder or a
+  // sphere is refused before any cut work. The test is on the operand faces, not
+  // on a particular overlapping pair: a disjoint cone/torus boolean is still a
+  // cone/curved pair this slice does not accept.
+  {
+    const auto has_cone = [](const std::vector<detail::CurvedBooleanFaceInfo>& infos) {
+      return std::any_of(infos.begin(), infos.end(),
+                         [](const detail::CurvedBooleanFaceInfo& info) {
+                           return std::get_if<Cone3>(info.surface) != nullptr;
+                         });
+    };
+    const auto all_planar = [](const std::vector<detail::CurvedBooleanFaceInfo>& infos) {
+      return std::all_of(infos.begin(), infos.end(),
+                         [](const detail::CurvedBooleanFaceInfo& info) {
+                           return std::get_if<Plane3>(info.surface) != nullptr;
+                         });
+    };
+    if ((has_cone(infos_a) && !all_planar(infos_b)) ||
+        (has_cone(infos_b) && !all_planar(infos_a))) {
+      record_failure();
+      return Error{Errc::unsupported,
+                   "boolean_solid_curved: cone operands only support plane cutters", 0u, 0u};
+    }
+  }
+
+  // A cone can only be cut by a plane perpendicular to its axis; see the
+  // predicate for why. Check every cone/plane face pair (in either operand
+  // order) so an axis-containing or oblique cutter is refused before the splitter
+  // produces half-turn arcs or an ellipse it cannot represent.
+  for (std::size_t ia = 0; ia < infos_a.size(); ++ia) {
+    for (std::size_t ib = 0; ib < infos_b.size(); ++ib) {
+      const detail::CurvedBooleanFaceInfo& face_a = infos_a[ia];
+      const detail::CurvedBooleanFaceInfo& face_b = infos_b[ib];
+      const Cone3* cone = std::get_if<Cone3>(face_a.surface);
+      const Plane3* plane = std::get_if<Plane3>(face_b.surface);
+      if (cone == nullptr || plane == nullptr) {
+        const Cone3* cone_b = std::get_if<Cone3>(face_b.surface);
+        const Plane3* plane_a = std::get_if<Plane3>(face_a.surface);
+        if (cone_b == nullptr || plane_a == nullptr) continue;
+        cone = cone_b;
+        plane = plane_a;
+      }
+      if (detail::curved_boolean_cone_plane_cut_supported(*cone, *plane, tolerance)) continue;
+      record_failure();
+      return Error{Errc::unsupported,
+                   "boolean_solid_curved: cone cutters must be perpendicular to the cone axis; "
+                   "oblique and axis-containing planes are deferred to M3c-3c-4b3",
+                   face_a.id.index(), face_b.id.index()};
+    }
+  }
+
   // A sphere/sphere pair has no splitter that can follow the seam unless both
   // operands are re-charted onto their centre line first: the cut circle is a
   // latitude of the shared chart only then (see the helper). This runs before the
@@ -2019,6 +2132,18 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
                      bool from_a) -> Result<void> {
     for (std::size_t index = 0; index < infos.size(); ++index) {
       const detail::CurvedBooleanFaceInfo& info = infos[index];
+      // A whole-cone operand's base rim is the seam-only chart's synthetic
+      // bottom side: it arrives as straight chords while the cone's own base
+      // cap already carries the exact analytic arcs. Healing both fragments
+      // with the cone's base circle re-engages the same arc run on each side,
+      // so the shared rim agrees on one circle and one subdivision.
+      std::vector<CircleCurve3> heal_circles = circles[index];
+      for (const detail::CurvedBooleanFaceInfo& cone_info : infos) {
+        const Cone3* cone = std::get_if<Cone3>(cone_info.surface);
+        if (cone == nullptr || !(cone->radius > 0.0)) continue;
+        heal_circles.push_back(CircleCurve3{cone->origin, cone->x_axis,
+                                            cross(cone->axis, cone->x_axis), cone->radius});
+      }
       const Result<std::vector<CurvedFragment>> split =
           split_face_curved(brep, info.id, cuts[index], tolerance);
       if (!split.has_value()) {
@@ -2029,7 +2154,7 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
         if (fragment.loops.empty()) continue;
         ++report.fragments;
         const Result<void> healed =
-            detail::split_solid_heal_fragment(fragment, circles[index], tolerance);
+            detail::split_solid_heal_fragment(fragment, heal_circles, tolerance);
         if (!healed.has_value()) {
           record_failure();
           return healed.error();

@@ -457,6 +457,26 @@ inline bool split_solid_face_circle(const SurfaceGeometry& surface, const Vec3d&
     circle = CircleCurve3{center, x_axis, y_axis, std::sqrt(radius2)};
     return circle.is_valid();
   }
+  if (const auto* cone = std::get_if<Cone3>(&surface)) {
+    // A plane perpendicular to the axis meets the cone in a circle whose radius
+    // follows from the axial distance to the base: rho = radius - t*tan(half_angle).
+    // cos(half_angle) > 0, so the sign of the normal does not matter: the circle
+    // axis is +n for every face.
+    const double alignment = dot(normal, cone->axis);
+    if (!(std::abs(alignment) >= 1.0 - 1e-12)) return false;
+    if (!(cone->radius > 0.0)) return false;
+    const double t = (offset - dot(normal, split_solid_as_vec(cone->origin))) / alignment;
+    if (!std::isfinite(t)) return false;
+    const double rho = cone->radius - t * std::tan(cone->half_angle);
+    if (!(rho > 0.0) || !std::isfinite(rho)) return false;
+    Point3d center = cone->origin + cone->axis * t;
+    center = center - normal * (dot(normal, split_solid_as_vec(center)) - offset);
+    Vec3d x_axis = split_solid_unit(cone->x_axis - normal * dot(cone->x_axis, normal));
+    if (!(norm2(x_axis) > 0.5)) x_axis = frame.u;
+    const Vec3d y_axis = split_solid_unit(cross(normal, x_axis));
+    circle = CircleCurve3{center, x_axis, y_axis, rho};
+    return circle.is_valid();
+  }
   return false;
 }
 

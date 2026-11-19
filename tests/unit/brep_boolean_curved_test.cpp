@@ -1,4 +1,4 @@
-#include <doctest/doctest.h>
+﻿#include <doctest/doctest.h>
 
 #include <algorithm>
 #include <array>
@@ -358,6 +358,33 @@ void check_qa_rejection(const char* name, const geom::Brep& a, const geom::Brep&
   CHECK(message_of(again.error()) == message_of(first.error()));
 }
 
+// A cone/plane boolean must produce one closed, outward single-shell solid. The
+// winding-derived volume is positive exactly when the shell faces outward; the
+// analytic cut rim lets the value match the analytic volume to 1e-12, and a
+// repeated call must reproduce that volume bit for bit.
+void check_cone_boolean(const char* name, const geom::Brep& a, const geom::Brep& b,
+                        geom::SolidBooleanOp op, double expected) {
+  INFO(name);
+  const geom::Result<geom::CurvedBooleanResult> first = geom::boolean_solid_curved(
+      a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
+  REQUIRE_MESSAGE(first.has_value(), name << ": " << message_of(first.error()));
+  const geom::Brep& brep = first.value().brep;
+  CHECK_MESSAGE(geom::validate_topology(brep).ok(), name << ": invalid topology");
+  const auto shells = brep.solid_shells(only_solid(brep));
+  REQUIRE_MESSAGE(shells.size() == 1, name << ": expected one shell");
+  CHECK_MESSAGE(geom::detail::heal_detail::shell_is_closed_by_uses(brep, shells.front()),
+                name << ": an edge is not used by exactly two coedges");
+  const double volume = volume_of(brep);
+  CHECK_MESSAGE(std::abs(volume - expected) <= 1e-12,
+                name << ": volume " << volume << " expected " << expected);
+  CHECK_MESSAGE(volume > 0.0, name << ": shell is not outward");
+
+  const geom::Result<geom::CurvedBooleanResult> again = geom::boolean_solid_curved(
+      a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
+  REQUIRE_MESSAGE(again.has_value(), name << ": the repeated call failed");
+  CHECK_MESSAGE(volume_of(again.value().brep) == volume, name << ": volume is not deterministic");
+}
+
 }  // namespace
 
 TEST_CASE("brep: boolean_solid_curved subtracts a box from a quarter cylinder") {
@@ -459,53 +486,149 @@ TEST_CASE("brep: boolean_solid_curved rejects NURBS operands") {
   CHECK(message_of(result.error()) == "boolean_solid_curved: NURBS operands are not supported");
 }
 
-TEST_CASE("brep: boolean_solid_curved rejects cone operands") {
+TEST_CASE("curved boolean: a cone cut by a plane pins the analytic volumes") {
   const double tolerance = 1e-9;
   const geom::Brep cone =
-      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 1.0,
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
                       tolerance)
           .value();
-  REQUIRE(geom::validate_topology(cone).ok());
   const geom::Brep box =
-      geom::make_box(geom::Point3d{-2.0, -2.0, 0.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance)
+      geom::make_box(geom::Point3d{-2.0, -2.0, 1.0}, geom::Point3d{2.0, 2.0, 4.0}, tolerance)
           .value();
+  const geom::Brep low_box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 1.0}, geom::Point3d{2.0, 2.0, 3.0}, tolerance)
+          .value();
+  REQUIRE(geom::validate_topology(cone).ok());
+  REQUIRE(geom::validate_topology(box).ok());
+  REQUIRE(geom::validate_topology(low_box).ok());
 
-  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
-      cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::union_,
-      geom::CurvedBooleanOptions{tolerance});
-  REQUIRE(!result.has_value());
-  CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
-        "boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are "
-        "deferred to M3c-3");
+  // Cone r = 1, h = 2: the plane z = 1 leaves the upper small cone (base radius
+  // 0.5, height 1, apex present) and the lower frustum. Both rims are analytic
+  // circles, so the volumes are exact: pi/12 and 2*pi/3 - pi/12 = 7*pi/12.
+  const double small_cone = kPi / 12.0;
+  const double frustum = 7.0 * kPi / 12.0;
+  check_cone_boolean("intersection", cone, box, geom::SolidBooleanOp::intersection, small_cone);
+  check_cone_boolean("difference", cone, box, geom::SolidBooleanOp::difference, frustum);
+  check_cone_boolean("union", cone, low_box, geom::SolidBooleanOp::union_, 32.0 + frustum);
 }
 
-TEST_CASE("curved boolean: cone operands are deferred with a diagnostic") {
+TEST_CASE("curved boolean: a cone refuses an axis-containing plane cut") {
   const double tolerance = 1e-9;
-  const geom::Result<geom::Brep> cone =
+  const geom::Brep cone =
       geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
-                      tolerance);
-  const geom::Result<geom::Brep> box =
-      geom::make_box(geom::Point3d{-2.0, -2.0, -1.0}, geom::Point3d{2.0, 2.0, 2.0}, tolerance);
-  REQUIRE(cone.has_value());
-  REQUIRE(box.has_value());
-  for (const geom::SolidBooleanOp op : {geom::SolidBooleanOp::union_,
-                                        geom::SolidBooleanOp::intersection,
-                                        geom::SolidBooleanOp::difference,
-                                        geom::SolidBooleanOp::symmetric_difference}) {
-    geom::CurvedBooleanReport report{};
-    report.face_pairs = 999;
-    const geom::Result<geom::CurvedBooleanResult> out = geom::boolean_solid_curved(
-        cone.value(), only_solid(cone.value()), box.value(), only_solid(box.value()), op,
-        geom::CurvedBooleanOptions{tolerance}, &report);
-    REQUIRE_FALSE(out.has_value());
-    CHECK(out.error().code == geom::Errc::unsupported);
-    const std::string message(out.error().message);
-    CHECK(message.find("deferred to M3c-3") != std::string::npos);
-    CHECK(report.face_pairs == 0);
-    CHECK(report.fragments == 0);
-    CHECK(report.kept == 0);
+                      tolerance)
+          .value();
+  // x = 0 contains the cone axis; the other planes either miss the cone or are
+  // perpendicular to it. Half-turn rim arcs from the axis-containing cut cannot
+  // be assembled yet, so the refusal must be deterministic.
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{0.0, -2.0, -1.0}, geom::Point3d{2.0, 2.0, 3.0}, tolerance)
+          .value();
+  REQUIRE(geom::validate_topology(cone).ok());
+  REQUIRE(geom::validate_topology(box).ok());
+
+  constexpr std::string_view message =
+      "boolean_solid_curved: cone cutters must be perpendicular to the cone axis; oblique and "
+      "axis-containing planes are deferred to M3c-3c-4b3";
+  check_qa_rejection("axis-containing", cone, box, geom::SolidBooleanOp::intersection, message);
+  check_qa_rejection("axis-containing reversed", box, cone, geom::SolidBooleanOp::intersection,
+                     message);
+}
+
+TEST_CASE("curved boolean: the cone cut plane predicate accepts only perpendicular planes") {
+  const double tolerance = 1e-9;
+  const double half_angle = std::atan2(1.0, 2.0);
+  const geom::Cone3 cone{geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                         geom::Vec3d{1.0, 0.0, 0.0}, 1.0, half_angle};
+  REQUIRE(cone.is_valid());
+  const auto supported = geom::detail::curved_boolean_cone_plane_cut_supported;
+
+  // Perpendicular, including the antiparallel normal; the plane may also miss
+  // the cone (the bounding sphere radius is hypot(1, 4/3) = 5/3).
+  CHECK(supported(cone, geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 1.0}, tolerance));
+  CHECK(supported(cone, geom::Plane3{geom::Vec3d{0.0, 0.0, -1.0}, -1.0}, tolerance));
+  CHECK(supported(cone, geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 3.0}, tolerance));
+
+  // A plane parallel to the axis but outside the conservative bounding sphere
+  // cuts nothing and is harmless.
+  CHECK(supported(cone, geom::Plane3{geom::Vec3d{1.0, 0.0, 0.0}, 2.0}, tolerance));
+
+  // Axis-containing and oblique planes that do reach the cone are deferred.
+  CHECK_FALSE(supported(cone, geom::Plane3{geom::Vec3d{1.0, 0.0, 0.0}, 0.0}, tolerance));
+  const double inv_sqrt2 = 1.0 / std::numbers::sqrt2_v<double>;
+  CHECK_FALSE(supported(cone,
+                        geom::Plane3{geom::Vec3d{inv_sqrt2, 0.0, -inv_sqrt2}, inv_sqrt2},
+                        tolerance));
+  // An oblique plane that misses the bounding sphere is harmless as well.
+  CHECK(supported(cone,
+                  geom::Plane3{geom::Vec3d{inv_sqrt2, 0.0, -inv_sqrt2}, 100.0}, tolerance));
+}
+
+TEST_CASE("curved boolean: a perpendicular plane cuts a cone in an analytic circle") {
+  const double half_angle = std::atan2(1.0, 2.0);
+  const geom::Cone3 cone{geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                         geom::Vec3d{1.0, 0.0, 0.0}, 1.0, half_angle};
+  REQUIRE(cone.is_valid());
+  const geom::PlaneFrame frame{};
+  geom::CircleCurve3 circle;
+
+  // z = 1: the rim radius is radius - t*tan(half_angle) = 1 - 0.5 = 0.5.
+  REQUIRE(geom::detail::split_solid_face_circle(geom::SurfaceGeometry{cone},
+                                                geom::Vec3d{0.0, 0.0, 1.0}, 1.0, frame, circle));
+  CHECK(circle.center[0] == doctest::Approx(0.0));
+  CHECK(circle.center[1] == doctest::Approx(0.0));
+  CHECK(circle.center[2] == doctest::Approx(1.0));
+  CHECK(circle.radius == doctest::Approx(0.5));
+  CHECK(circle.is_valid());
+
+  // The same circle with the antiparallel normal.
+  REQUIRE(geom::detail::split_solid_face_circle(geom::SurfaceGeometry{cone},
+                                                geom::Vec3d{0.0, 0.0, -1.0}, -1.0, frame,
+                                                circle));
+  CHECK(circle.center[2] == doctest::Approx(1.0));
+  CHECK(circle.radius == doctest::Approx(0.5));
+
+  // Tangent at the apex, beyond it and oblique planes have no circular rim.
+  CHECK_FALSE(geom::detail::split_solid_face_circle(geom::SurfaceGeometry{cone},
+                                                    geom::Vec3d{0.0, 0.0, 1.0}, 2.0, frame,
+                                                    circle));
+  CHECK_FALSE(geom::detail::split_solid_face_circle(geom::SurfaceGeometry{cone},
+                                                    geom::Vec3d{0.0, 0.0, 1.0}, 2.5, frame,
+                                                    circle));
+  const double inv_sqrt2 = 1.0 / std::numbers::sqrt2_v<double>;
+  CHECK_FALSE(geom::detail::split_solid_face_circle(
+      geom::SurfaceGeometry{cone}, geom::Vec3d{inv_sqrt2, 0.0, -inv_sqrt2}, inv_sqrt2, frame,
+      circle));
+}
+
+TEST_CASE("curved boolean: cone operands with a non-planar partner are refused") {
+  const double tolerance = 1e-9;
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Brep other_cone =
+      geom::make_cone(geom::Point3d{0.25, 0.0, 0.25}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Brep torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 1.0}, geom::Vec3d{0.0, 0.0, 1.0}, 2.0, 0.5,
+                       tolerance)
+          .value();
+  const geom::Brep cylinder =
+      geom::make_cylinder(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                          tolerance)
+          .value();
+  for (const geom::Brep* brep : {&cone, &other_cone, &torus, &cylinder}) {
+    REQUIRE(geom::validate_topology(*brep).ok());
   }
+
+  constexpr std::string_view message =
+      "boolean_solid_curved: cone operands only support plane cutters";
+  check_qa_rejection("cone/cone", cone, other_cone, geom::SolidBooleanOp::union_, message);
+  check_qa_rejection("cone/torus", cone, torus, geom::SolidBooleanOp::intersection, message);
+  check_qa_rejection("torus/cone", torus, cone, geom::SolidBooleanOp::intersection, message);
+  check_qa_rejection("cone/cylinder", cone, cylinder, geom::SolidBooleanOp::difference, message);
 }
 
 TEST_CASE("brep: boolean_solid_curved rejects coplanar face contact") {
@@ -1857,8 +1980,7 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
 
   // Diagnosed rejections. The expected messages are the ones the driver
   // documents:
-  //   cone     "boolean_solid_curved: cone operands need closed-cut and apex
-  //             topology; booleans are deferred to M3c-3"
+  //   cone     "boolean_solid_curved: cone operands only support plane cutters"
   //   NURBS    "boolean_solid_curved: NURBS operands are not supported"
   //   tangent  "boolean_solid_curved: tangent face contact is not supported yet"
   //   coplanar "boolean_solid_curved: coplanar face contact is not supported yet"
@@ -1888,9 +2010,8 @@ TEST_CASE("brep: boolean_solid_curved QA corpus") {
     const char* message;
   };
   const std::array<RejectionCase, 4> rejections{{
-      {"cone box", &cone, &wide_box, geom::SolidBooleanOp::union_,
-       "boolean_solid_curved: cone operands need closed-cut and apex topology; booleans are "
-       "deferred to M3c-3"},
+      {"cone cylinder", &cone, &cylinder, geom::SolidBooleanOp::union_,
+       "boolean_solid_curved: cone operands only support plane cutters"},
       {"NURBS box", &nurbs, &wide_box, geom::SolidBooleanOp::union_,
        "boolean_solid_curved: NURBS operands are not supported"},
       {"tangent box", &tangent_box, &cylinder, geom::SolidBooleanOp::union_,
