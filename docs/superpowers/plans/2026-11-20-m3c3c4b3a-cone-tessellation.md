@@ -1,6 +1,6 @@
 # M3c-3c-4b3a: Trimmed Cone Tessellation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Make every trimmed cone frustum produced by `boolean_solid_curved` and `split_solid_by_plane` tessellate watertight by measuring chord sag on the actual cone surface instead of in parameter space.
 
@@ -41,7 +41,7 @@
 - Consumes: `FaceUvProjection{surface, periodic_u, periodic_v, bounds}`, `face_uv_project(projection, point, hint_u, along_tangent)`, `face_uv_eval(projection, uv)`, `Cone3`.
 - Produces: `namespace detail` helper `std::optional<double> tessellate_nearest_sag_square(const FaceUvProjection& projection, const Point3d& point, double hint_u);` in `tessellate.hpp` — returns `nullopt` for non-cone faces or when the projection fails, otherwise the squared 3D distance from `point` to its nearest point on the cone.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add a `TEST_CASE("tessellate: trimmed cone frusta are watertight")` to `tests/unit/brep_boolean_curved_test.cpp`. Use the existing `make_cone`/`make_box`/`boolean_solid_curved` helpers from the QA-22 case (cone `{0,0,0}`, `{0,0,1}`, radius 1, height 2, tol 1e-9; box `{-2,-2,1}..{2,2,4}`; low box `{...}..{2,2,3}`). For each result call:
 
@@ -68,12 +68,12 @@ Cases and expected values (measured at probe report §5):
 
 Also assert `triangle_face.size() == triangles.size()` and every id `< brep.face_count()`.
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `.\build\tests\Debug\geom_tests.exe --test-case="tessellate: trimmed cone frusta are watertight"`
 Expected: FAIL for difference/union/lower split with `Errc::numeric_failure`, message `tessellate: trimmed face refinement budget is exhausted`, context `(1, 0)`; intersection and upper split already pass.
 
-- [ ] **Step 3: Implement the cone sag metric**
+- [x] **Step 3: Implement the cone sag metric**
 
 In `include/geom/brep/tessellate.hpp`, add the helper above `tessellate_refine_trimmed_edges`:
 
@@ -115,17 +115,17 @@ if (const std::optional<double> geometric =
 
 Keep the error type/message unchanged. Do not touch the rectilinear gate, the strip builder, periodic split, or trimmed boundaries.
 
-- [ ] **Step 4: Run the focused tests to verify they pass**
+- [x] **Step 4: Run the focused tests to verify they pass**
 
 Run: `.\build\tests\Debug\geom_tests.exe --test-case="tessellate: trimmed cone frusta are watertight"`
 Expected: PASS, 5 cases' assertions green.
 
-- [ ] **Step 5: Run the full suites**
+- [x] **Step 5: Run the full suites**
 
 Run: `.\build\tests\Debug\geom_tests.exe` and `.\build-rel\tests\Release\geom_tests.exe`
 Expected: all pass, zero warnings, 1010 cases (Task 1 adds one case; record the exact assertion totals in the report).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add include/geom/brep/tessellate.hpp tests/unit/brep_boolean_curved_test.cpp
@@ -144,7 +144,7 @@ git commit -m "fix(m3c3c4b3a): measure cone chord sag on the surface"
 - Consumes: Task 1 helper behavior; existing split/boolean builders and `mesh_volume`/edge-count helpers from Task 1.
 - Produces: `std::optional<double> tessellate_cone_radial_sag_square(...)` — the renamed helper; its value is the squared distance from the point to the cone point at the same azimuth and axial height, an upper bound on the true nearest-surface distance.
 
-- [ ] **Step 1: Write the matrix and helper tests**
+- [x] **Step 1: Write the matrix and helper tests**
 
 Add `TEST_CASE("tessellate: split cone heights stay watertight")` and `TEST_CASE("tessellate: canonical cone faces keep their apex")` with:
 - split z=0.5 lower: 140/276, volume `1.209417839998`.
@@ -158,20 +158,20 @@ Every case also asserts boundary 0, nonmanifold 0, `triangle_face` size/id bound
 
 Add `TEST_CASE("tessellate: the cone sag helper is cone-only")` that builds a plane projection and a cylinder projection (reuse projections from existing trimmed tests) and asserts `detail::tessellate_cone_radial_sag_square(projection, point, 0.0)` is `nullopt` for both.
 
-- [ ] **Step 2: Rename and document the helper**
+- [x] **Step 2: Rename and document the helper**
 
 Rename `tessellate_nearest_sag_square` to `tessellate_cone_radial_sag_square` at its definition and both call sites. Add a comment: the projection keeps the point's azimuth and axial height, so the value is an upper bound on the true nearest-surface distance — conservative for both the split decision and the final check.
 
-- [ ] **Step 3: Prove the RED is real**
+- [x] **Step 3: Prove the RED is real**
 
 Temporarily restore the pre-Task-1 header: `git checkout dcb5979 -- include/geom/brep/tessellate.hpp`, rebuild, run the new cases.
 Expected: the split/translated/union cases fail with the refinement-budget error; the apex/canonical cases pass. Restore with `git checkout HEAD -- include/geom/brep/tessellate.hpp` and rebuild.
 
-- [ ] **Step 4: Run the full suites**
+- [x] **Step 4: Run the full suites**
 
 Debug and Release, zero warnings; record exact counts.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tests/unit/brep_boolean_curved_test.cpp

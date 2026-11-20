@@ -67,7 +67,7 @@ the relative error is `|error| / analytic`.
 The maximum absolute volume error is `2.917e-3` at split `z = 1.5`, below. The maximum
 relative error is `5.069e-3` at apex intersection `z = 1.5`, where the volume is only
 `0.0327`; that row is still pinned to `1e-9` relative by its 12-decimal literal. The
-probe report calls `2.917e-3` the "maximum relative error"; the probe column is
+original brief and plan text call `2.917e-3` the "maximum relative error"; the probe column is
 absolute and the plan was corrected to "maximum absolute", so this note keeps both
 numbers and labels the units. Task 1's
 five-row QA-22 census uses a `5e-3` relative band; the other eight rows use `1e-9`

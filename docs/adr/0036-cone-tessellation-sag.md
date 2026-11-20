@@ -25,7 +25,8 @@ frustum:
 
 - maximum parameter sag at the final check: `9.1028e-3`, i.e. `9.1x` the `1e-3`
   deflection;
-- distance from the same chord midpoints to the cone surface at the same azimuth and
+- distance from the same triangle centroids (the points the final check measures)
+  to the cone surface at the same azimuth and
   axial height: `1.09421e-3`, i.e. `1.09x` the deflection and about `8.3x` smaller;
 - the parameter predicate splits `1032` edges, exactly the `8*121 + 64` budget, and
   still fails;
@@ -130,7 +131,7 @@ largest relative error is `5.07e-3` at apex intersection `z = 1.5`
 (`1.659e-4 / 0.0327249`), because that volume is small; the case is pinned by its
 12-decimal literal at `1e-9` relative, not by the `5e-3` band. Task 1's five-row
 QA-22 census uses `doctest::Approx(...).epsilon(5e-3)` and its largest relative
-error is `2.63e-3` at the intersection. The probe report calls `2.917e-3` the
+error is `2.63e-3` at the intersection. The original brief and plan text call `2.917e-3` the
 "maximum relative error"; the measured probe column is absolute, so this ADR
 records both quantities rather than repeating the label.
 
