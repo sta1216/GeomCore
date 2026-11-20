@@ -716,11 +716,91 @@ TEST_CASE("tessellate: trimmed cone frusta are watertight") {
   check("QA-22 union", united.value().brep, 142, 280, 32.0 + frustum, 0);
 }
 
+// A split cone reuses one closed circle edge for its cap and its lateral band.
+// Those two faces go through different meshing paths, so on glibc their rim
+// vertices used to differ in the last bit and the mesh grew 122 boundary edges.
+// The mesher now snaps both rims to the circle's canonical samples, which must
+// restore the watertight counts on every platform.
+TEST_CASE("tessellate: split cone fragments stay watertight") {
+  const double tolerance = 1e-9;
+  const geom::TessellationOptions options{1e-3, 0.35};
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Result<geom::SplitSolidResult> split = geom::split_solid_by_plane(
+      cone, cone.solid_ids().front(), geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 1.0}, tolerance);
+  REQUIRE(split.has_value());
+  const auto check = [&](const char* name, const geom::Brep& brep, std::size_t positions,
+                         std::size_t triangles, double volume) {
+    INFO(std::string(name));
+    const geom::Result<geom::TriMesh> mesh = geom::tessellate(brep, options);
+    REQUIRE_MESSAGE(mesh.has_value(), name << ": " << message_of(mesh.error()));
+    const geom::TriMesh& first = mesh.value();
+    CHECK_MESSAGE(first.positions.size() == positions,
+                  name << ": positions " << first.positions.size());
+    CHECK_MESSAGE(first.triangles.size() == triangles,
+                  name << ": triangles " << first.triangles.size());
+    CHECK_MESSAGE(first.triangle_face.size() == first.triangles.size(),
+                  name << ": triangle_face size " << first.triangle_face.size());
+    for (const std::uint32_t face : first.triangle_face) {
+      CHECK_MESSAGE(face < brep.face_ids().size(), name << ": face id " << face);
+    }
+    const geom::detail::CurvedBooleanMeshClosure closure =
+        geom::detail::curved_boolean_mesh_closure(first);
+    CHECK_MESSAGE(closure.closed(), name << ": mesh is not closed");
+    CHECK_MESSAGE(closure.used_once == 0, name << ": mesh has boundary edges");
+    CHECK_MESSAGE(closure.nonmanifold == 0, name << ": mesh is non-manifold");
+    CHECK_MESSAGE(mesh_volume(first) == doctest::Approx(volume).epsilon(5e-3),
+                  name << ": mesh volume " << mesh_volume(first) << " expected " << volume);
+    const geom::Result<geom::TriMesh> again = geom::tessellate(brep, options);
+    REQUIRE(again.has_value());
+    CHECK(positions_bitwise_equal(first, again.value()));
+  };
+  check("split z=1 below", split.value().below, 134, 264, 1.830287422577);
+  check("split z=1 above", split.value().above, 51, 98, 0.261110903259);
+
+  const auto split_at = [&](double height) {
+    const geom::Result<geom::SplitSolidResult> result = geom::split_solid_by_plane(
+        cone, cone.solid_ids().front(), geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, height},
+        tolerance);
+    REQUIRE(result.has_value());
+    return result.value();
+  };
+  const geom::SplitSolidResult lower = split_at(0.5);
+  check("split z=0.5 below", lower.below, 140, 276, 1.209417839998);
+  const geom::SplitSolidResult upper = split_at(1.5);
+  check("split z=1.5 below", upper.below, 124, 244, 2.058752793525);
+
+  const geom::Brep translated =
+      geom::make_cone(geom::Point3d{1.0, 2.0, 3.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Result<geom::SplitSolidResult> translated_split = geom::split_solid_by_plane(
+      translated, translated.solid_ids().front(),
+      geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 4.0}, tolerance);
+  REQUIRE(translated_split.has_value());
+  check("translated split below", translated_split.value().below, 134, 264, 1.830287422577);
+
+  // A 45-degree cone is the degenerate case for the snap band: its apex is the
+  // same distance from the base centre as the rim, so a sphere membership test
+  // would fold the apex fan. The plane/radial check must leave it alone.
+  const geom::Brep forty_five =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 1.0,
+                      tolerance)
+          .value();
+  check("45-degree whole cone", forty_five, 72, 140, 1.0458312377352195);
+  const geom::Result<geom::SplitSolidResult> split_45 = geom::split_solid_by_plane(
+      forty_five, forty_five.solid_ids().front(),
+      geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.5}, tolerance);
+  REQUIRE(split_45.has_value());
+  check("45-degree split above", split_45.value().above, 51, 98, 0.13055545162948387);
+}
+
 // The trimmed cone refinement must hold for boolean fragments translated away
 // from the origin as well: the cut rims of the two operands move together, so
 // the mesh equals the z=1 difference counts and volume, and a second run is
-// bitwise identical. Split-solid cone fragments are not covered here: their
-// independent rim sampling is still a known open item (M3c-3c-4b3b).
+// bitwise identical.
 TEST_CASE("tessellate: translated cone booleans stay watertight") {
   const double tolerance = 1e-9;
   const geom::TessellationOptions options{1e-3, 0.35};

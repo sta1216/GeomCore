@@ -119,7 +119,7 @@ the translated upper cone. The `z = 0.5` cap is an ear-clipped polygon with no v
 at `(0,0,0.5)`; that is the measured geometry, and the unique apex is the cone's
 analytic `(0,0,2)`.
 
-The maximum absolute volume error is `2.733e-3` (whole cone). Split-solid cone fragments are not part of this matrix: their two rims are sampled independently, which happens to agree on MSVC but not with glibc, so their watertightness is deferred to M3c-3c-4b3b. The
+The maximum absolute volume error is `2.733e-3` (whole cone). The split-solid rows (`z = 0.5/1/1.5` and a translated cut) are part of this matrix: their caps and bands read one closed cut circle, and the mesher now places every rim vertex on that circle's uniform samples. The
 largest relative error is `5.07e-3` at apex intersection `z = 1.5`
 (`1.659e-4 / 0.0327249`), because that volume is small; the case is pinned by its
 12-decimal literal at `1e-9` relative, not by the `5e-3` band. Task 1's three-row
@@ -130,8 +130,8 @@ records both quantities rather than repeating the label.
 
 Focused matrix (four cases: the Task 1 trimmed-frusta case, the Task 2 translated
 boolean, the apex case and the helper-only case): 1,352 assertions pass in Debug and
-Release. All cone tests (`*cone*`) are 45 cases / 3,482 assertions. Full suites: Debug
-and Release each report 1013 cases / 671,966 assertions, 0 failed, zero warnings under
+Release. All cone tests (`*cone*`) are 46 cases / 4,941 assertions. Full suites: Debug
+and Release each report 1014 cases / 673,425 assertions, 0 failed, zero warnings under
 `/W4 /WX /utf-8` with `GEOM_WERROR=ON`. Task 1's baseline was 1010 / 671,694; Task 2
 adds 3 cases and 272 assertions once the split-solid rows are out of the matrix.
 
@@ -139,10 +139,20 @@ adds 3 cases and 272 assertions once the split-solid rows are out of the matrix.
 
 - Trimmed cone frusta produced by `boolean_solid_curved` now tessellate watertight at
   the requested deflection, with the counts and volumes in the table. The `72`/`51`
-  rim pair is the ordinary case, not a special case. Split-solid cone fragments keep
-  independent rim sampling on each side of the cut; that closes on MSVC but not with
-  glibc, so their watertightness is deferred to M3c-3c-4b3b and they are not claimed
-  here.
+  rim pair is the ordinary case, not a special case.
+- Split-solid cone fragments share one closed cut circle per rim. Their cap and band
+  used to place the rim vertices through different evaluations, so on glibc the two
+  copies differed in the last bit (214 positions / 304 triangles / 122 boundary edges
+  against 134/264/0 on MSVC). `tessellate()` now snaps every position on a closed
+  full-turn circle edge to that circle's uniform samples, merges bitwise-identical
+  positions and drops the resulting zero-area triangles. The snap only runs for solids
+  carrying a cone surface. A mesh point belongs to the rim only when its axial
+  offset from the circle plane and its in-plane radius error are both within
+  `1e-9 * max(1, radius)`; that band only decides membership. Snapped positions are
+  exact circle evaluations and the merge key is exact, so no weld tolerance is
+  introduced. The band is checked in the circle plane, not as a 3D distance from the
+  centre: a 45-degree cone puts its apex on the base-rim sphere, and a radial-only
+  test would fold the apex fan.
 - The cone is the only surface that takes the geometric sag path. The parameter
   metric remains for planes, cylinders, spheres, tori and every non-cone trimmed
   face, including its fallback when a cone projection fails, so those results stay

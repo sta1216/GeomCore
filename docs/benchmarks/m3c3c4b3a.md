@@ -1,13 +1,13 @@
 # M3c-3c-4b3a: cone tessellation
 
-Date: 2026-11-20. The matrix was measured at `75915ae` (Task 2 test commit `0a2556a`; Task 1 `3d0801a`). The full-suite counts were measured at `43218b4` after the split-solid rows left the matrix; the binaries are the Debug and Release builds of that commit.
+Date: 2026-11-20. The matrix was measured at `75915ae` (Task 2 test commit `0a2556a`; Task 1 `3d0801a`). The split-solid rows were restored after the canonical-rim snap; the full-suite counts were measured on the final tree; the binaries are the Debug and Release builds of that tree.
 
 ## Scope
 
 This note records the measured behavior of the cone chordal-sag change:
 
 - trimmed cone frusta produced by `boolean_solid_curved` now tessellate watertight
-  at `TessellationOptions{1e-3, 0.35}`; split-solid cone fragments are not claimed
+  at `TessellationOptions{1e-3, 0.35}`; split-solid cone fragments are part of the matrix
   (see Limits);
 - the split predicate and the final acceptance check measure the distance to the
   cone surface at the same azimuth and axial height, not the parameter-midpoint
@@ -18,7 +18,8 @@ This note records the measured behavior of the cone chordal-sag change:
 
 The matrix is pinned by `tests/unit/brep_boolean_curved_test.cpp`:
 `tessellate: trimmed cone frusta are watertight` (line 652, three QA-22 rows),
-`tessellate: translated cone booleans stay watertight` (one translated boolean)
+`tessellate: translated cone booleans stay watertight` (one translated boolean),
+`tessellate: split cone fragments stay watertight` (five split rows)
 `tessellate: canonical cone faces keep their apex` (three apex rows) and `tessellate: the cone sag helper is cone-only` (line 785). The
 shared census is `check_cone_tessellation` (line 439).
 
@@ -54,19 +55,21 @@ the relative error is `|error| / analytic`.
 | apex intersection `z = 0.5` | 62 | 120 | 0.882011366069 | `0.28125*pi` = 0.883572933822 | -1.562e-3 | 1.767e-3 |
 | apex intersection `z = 1.5` | 37 | 70 | 0.032559033313 | `0.0104166667*pi` = 0.032724923580 | -1.659e-4 | 5.069e-3 |
 | whole cone | 72 | 140 | 2.091662475470 | `2*pi/3` = 2.094395102393 | -2.733e-3 | 1.305e-3 |
+| split `z = 1` below | 134 | 264 | 1.830287422577 | `7*pi/12` | -2.308e-3 | 1.260e-3 |
+| split `z = 1` above | 51 | 98 | 0.261110903259 | `pi/12` | -6.885e-4 | 2.630e-3 |
+| split `z = 0.5` below | 140 | 276 | 1.209417839998 | 1.210822168571 | -1.404e-3 | 1.160e-3 |
+| split `z = 1.5` below | 124 | 244 | 2.058752793525 | 2.061670178918 | -2.917e-3 | 1.415e-3 |
+| translated split | 134 | 264 | 1.830287422577 | `7*pi/12` | -2.308e-3 | 1.260e-3 |
 
-The maximum absolute volume error is `2.733e-3` at the whole cone. The maximum
+The maximum absolute volume error is `2.917e-3` at the split `z = 1.5` row; the whole cone is next at `2.733e-3`. The maximum
 relative error is `5.069e-3` at apex intersection `z = 1.5`, where the volume is only
 `0.0327`; that row is still pinned to `1e-9` relative by its 12-decimal literal. The
-original brief and plan text call `2.917e-3` the "maximum relative error"; the probe column is
-absolute and the plan was corrected to "maximum absolute", so this note keeps both
-numbers and labels the units. Task 1's
-three-row QA-22 census uses a `5e-3` relative band; the other four rows use `1e-9`
-relative.
+QA-22, translated and split rows are pinned to a `5e-3` relative band; the apex and
+whole-cone rows are pinned to `1e-9` relative by their 12-decimal literals.
 
 ## Watertightness and determinism
 
-Every one of the seven rows reports:
+Every one of the twelve rows reports:
 
 - `closure.closed()` true, `used_once == 0` (no boundary edges) and
   `nonmanifold == 0`;
@@ -102,8 +105,8 @@ the same doubles is still the documented refusal, not an internal error.
 ## Focused and full runs
 
 - Four-case matrix filter: 4 cases / 1,352 assertions, 0 failed.
-- All cone tests with `*cone*`: 45 cases / 3,482 assertions, 0 failed.
-- Full suites, both configurations: 1,013 cases / 671,966 assertions, 0 failed, zero
+- All cone tests with `*cone*`: 46 cases / 4,941 assertions, 0 failed.
+- Full suites, both configurations: 1,014 cases / 673,425 assertions, 0 failed, zero
   warnings with `GEOM_WERROR=ON`. Debug and Release report the same numbers. Task 1's
   baseline was 1,010 / 671,694; Task 2 adds 3 cases and 272 assertions after the
   split-solid rows leave the matrix.
@@ -129,14 +132,19 @@ test suite asserts them.
   (`tessellate.hpp:1543`) and the trimmed mesh has a global cap of 2,000,000
   triangles (`tessellate.hpp:955`), so a pathological cone fragment still terminates
   with a refusal instead of running without bound.
-- **No new tolerance.** The only tolerances are still `0.9 * deflection` for
-  refinement and `deflection` for final acceptance. The sag helper itself is an exact
-  double computation.
-- **Split-solid cone fragments are not claimed.** `split_solid_by_plane` gives the
-  two sides of the cut independent rim samples; MSVC happens to produce matching
-  counts and the mesh closes, glibc does not (214 positions / 304 triangles / 122
-  boundary edges against 134/264/0). The split-solid rows were removed from this
-  matrix and the fix (shared edge samples) is M3c-3c-4b3b.
+- **No new weld tolerance.** The refinements still use `0.9 * deflection` and the
+  final acceptance `deflection`; the sag helper is an exact double computation. The
+  rim snap adds one membership band, `1e-9 * max(1, radius)`, applied in the circle
+  plane (axial offset and in-plane radius error). It decides which mesh points are
+  rim points; snapped values are exact and the merge key is exact. A 45-degree cone
+  (apex on the base-rim sphere) is kept out by the plane/radial split.
+- **Split-solid cone fragments use one canonical rim.** The cap and the lateral
+  band read the same closed cut circle, but the two meshing paths placed its vertices
+  through different evaluations; glibc differed in the last bit (214 positions / 304
+  triangles / 122 boundary edges against 134/264/0). `tessellate()` now snaps every
+  position on a closed full-turn circle edge to the circle's uniform samples and
+  merges the resulting exact duplicates, so the split rows are back in the matrix and
+  close on every platform.
 - **Not in this slice:** oblique or axis-containing cone planes, general
   curved/curved cone booleans, and re-centring translated cones whose seam copies
   collide. Those, together with the apex fan/seam/uv-ring rewrite, are M3c-3c-4b3

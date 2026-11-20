@@ -1,4 +1,4 @@
-# M3c-3c-4b3b: Canonical Rim Sampling for Split Cones
+# M3c-3c-4b3b: Canonical Rims for Split Cones
 
 ## Goal
 
@@ -7,182 +7,129 @@ platform, and restore the cone split rows to the tessellation matrix.
 
 The split Brep is topologically correct: a probe of `cone z=1 below` shows three
 faces, three edges and two vertices, with the bottom rim a single closed
-`CircleCurve3` edge used by both the cap (`rev=0`) and the lateral band (`rev=1`),
-`t=[0, 2π]` on both. The mesh nevertheless breaks on glibc: 214 positions / 304
-triangles / 122 boundary edges versus the pinned 134 / 264 / 0 on MSVC. Because both
-faces share one edge and one parameter range, the defect is in the rim vertex
-*positions* produced by the two independent meshing paths, not in the topology.
+`CircleCurve3` edge used by both the cap and the lateral band, `t=[0, 2pi]` on
+both. The mesh nevertheless broke on glibc: 214 positions / 304 triangles / 122
+boundary edges versus the pinned 134 / 264 / 0 on MSVC. Since both faces share one
+edge and one parameter range, the defect was in the rim vertex *positions* produced
+by the two independent meshing paths, not in the topology.
 
 ## Architecture
 
-`tessellate()` meshes the two cap faces and the trimmed lateral band through
-different code paths. Each path places the shared rim vertices by its own
-evaluation (parametric surface evaluation versus circle evaluation), so the two
-rims differ in the last bit on glibc and the exact-position closure test fails.
+`tessellate()` meshes cap faces and the trimmed lateral band through different code
+paths. Each path placed the shared rim vertices by its own evaluation (circle
+evaluation versus parametric surface evaluation), so the two copies differed in the
+last bit on glibc and exact-position closure failed.
 
-The fix is to canonicalize every full-turn circular rim run: keep the run's
-vertex count, but replace each position with `circle.eval(t0 + i·2π/N)` where `N`
-is the run's segment count. Both faces then emit bitwise-identical rim positions
-on every libm, with no change to triangle counts, ring order or topology.
+The fix is a post-pass in `tessellate()` for solids that carry a `Cone3`:
+
+1. For every `CircleCurve3` edge with `v0 == v1` and a full turn (normalize a
+   reversed interval first, then `|(t1-t0) - 2pi| <= 1e-12`), compute the run's
+   segment count `N = tessellate_circle_segments(circle, t0, t1, deflection, true)`
+   and `step = (t1-t0)/N`.
+2. Select a mesh position only when it lies in the circle's plane and on its
+   radius: `|dot(rel, normal)| <= 1e-9 * max(1, r)` and
+   `| |rel - axial*normal| - r | <= 1e-9 * max(1, r)`. Snap that position to the
+   canonical sample `turns = round((atan2(dot(in_plane,y), dot(in_plane,x)) - t0)/step)`,
+   wrapped modulo `N`, position `circle.eval(t0 + step*turns)`. The plane/radial
+   split matters: a 45-degree cone puts its apex on the base-rim sphere.
+3. Merge positions that are bitwise identical (exact `double` key), remap the
+   triangles, and drop the zero-area triangles that merging produced (keeping
+   `triangle_face` in sync).
+
+The snap is confined to cone-carrying solids, so every non-cone mesh stays bitwise
+identical. The merge is exact; no tolerance-based welding is introduced.
 
 ## Tech Stack
 
 C++20, MSVC 19.44 (primary), GCC 15.2 / Clang on CI, doctest 2.4.11, CMake.
-Predicate-level decisions stay exact; this change only affects sampling positions.
 
 ## Spec
 
-- `docs/architecture/geometry-library-architecture.md` §8.10 (meshing contract:
-  watertight, no flipped triangles, deterministic) and §16.3.
-- `docs/quality/testing-strategy.md` (invariants, differential tests).
-- ADR-0036 (cone tessellation metric) and the M3c-3c-4b3a test matrix.
+- `docs/architecture/geometry-library-architecture.md` section 8.10 (meshing
+  contract) and section 16.3.
+- `docs/quality/testing-strategy.md`.
+- ADR-0036 and the M3c-3c-4b3a matrix.
 
 ## Global Constraints
 
-- Do not change `split_solid_by_plane` topology: the shared closed edge and its
-  `[0, 2π]` range are already correct.
-- Non-cone and non-circular output must remain bitwise identical; the existing
-  hash pins (QA-13, QA-15, canonical primitives, trimmed cylinder) must not move.
-- Full-turn snapping must be deterministic and independent of the ring's starting
-  index: rotating a synthetic ring then snapping must give the same sequence.
-- No tolerance-based welding of finished meshes; closure is still verified by exact
-  position equality.
-- TDD: each task starts with a failing test. The libm-specific failure cannot be
-  reproduced on MSVC, so the unit test forces a phase shift (rotate the start by
-  one segment) to prove start independence; the end-to-end guarantee is verified by
-  the ubuntu CI job.
+- Do not change `split_solid_by_plane` topology or the shared `[0, 2pi]` edge.
+- Non-cone output must remain bitwise identical; QA-13, QA-15 and the canonical
+  primitive hashes must not move.
+- The snap must be deterministic and depend only on the circle, its range and the
+  deflection, never on ring order or a previous run.
+- Closure is still verified by exact position equality; the merge key is exact.
+- TDD: the libm-specific failure is not reproducible on MSVC, so the new test pins
+  the Linux numbers as well; the ubuntu CI job is the cross-platform gate.
 - After header edits run `/t:Rebuild` or touch a `.cpp`; MSBuild header tracking is
-  unreliable in this repository.
+  unreliable here.
 
 ## Review Focus
 
-1. Snapping formula: `N` is the run's segment count; positions are
-   `circle.eval(t0 + i·2π/N)`, `i = 0..N-1`; no angle accumulation.
-2. Start independence: rotating the input ring by one segment yields the same
-   snapped sequence.
-3. Call sites: every full-turn circular run of a split cone face (cap and band),
-   and no other surface.
-4. Non-circular runs, partial arcs, seam columns and poles are untouched.
-5. Existing hash pins unchanged; `split_solid` topology assertions unchanged.
-6. Tests fail when either face bypasses the snapping.
+1. Snap formula and wrap (`round`, modulo `N`), including the `t0` phase.
+2. Full-turn detection (`v0 == v1`, `2pi` within `1e-12`) and cone-only gating.
+3. Merge correctness: remapped triangles, `triangle_face` length, no zero-area
+   triangles left, boundary/once counts.
+4. Non-cone output bitwise unchanged (hash pins).
+5. Split rows close: positions/triangles/volume/closed/used-once/nonmanifold.
+6. Docs: ADR-0036, benchmark and architecture section 16.3 no longer claim the
+   limitation.
 
 ## File Map
 
-- `include/geom/brep/tessellate.hpp` — snapping helper and its use in the cap and
-  trimmed-band ring construction.
-- `include/geom/brep/split_solid.hpp` — only if a rim run needs its circle edge
-  exposed; prefer no change.
-- `tests/unit/brep_boolean_curved_test.cpp` — restore the cone split rows and add
-  rim-identity assertions.
-- `tests/unit/tessellate_trimmed_test.cpp` — helper-level start-independence test.
-- `docs/adr/0036-cone-tessellation.md`, `docs/benchmarks/m3c3c4b3a.md`,
-  architecture §16.3 — remove the "split deferred" limitation once green.
+- `include/geom/brep/tessellate.hpp` - snap/merge post-pass.
+- `tests/unit/brep_boolean_curved_test.cpp` - five split rows and their invariants.
+- `docs/adr/0036-cone-tessellation-sag.md`, `docs/benchmarks/m3c3c4b3a.md`,
+  architecture section 16.3, this plan - remove the limitation.
 
-## Task 1: Full-turn rim snapping helper
+## Task 1: Snap and merge cone rims
 
-**Files**
+**Files**: `include/geom/brep/tessellate.hpp`, `tests/unit/brep_boolean_curved_test.cpp`
 
-- `include/geom/brep/tessellate.hpp` (helper only)
-- `tests/unit/tessellate_trimmed_test.cpp`
-
-**Interfaces**
-
-Produces:
-
-```cpp
-namespace geom::v1::detail {
-
-// Replaces `segments` consecutive positions of a closed ring with the uniform
-// samples of `circle`, starting at `t0`: position i becomes
-// circle.eval(t0 + i * 2π / segments). The run covers a full turn, so index 0
-// and index segments coincide; `points[start]` stays the shared seam vertex.
-void tessellate_snap_full_circle_run(std::vector<Point3d>& points,
-                                     std::size_t start, std::size_t segments,
-                                     const CircleCurve3& circle, double t0);
-}
-```
-
-The helper must not accumulate angles and must not depend on traversal order.
+**Interfaces**: Produces
+`detail::tessellate_snap_cone_rims(TriMesh& mesh, const Brep& brep, double deflection)`.
+Consumes `tessellate_circle_segments`, `CircleCurve3::eval`, `TriMesh`.
 
 **Steps**
 
-1. Add the test `tessellate: full-turn rim snapping is start independent`: build a
-   ring of 41 points on radius 0.5 with arbitrary start angle, snap twice (once at
-   the ring's own start, once rotated by one segment), and require the two snapped
-   sequences to be identical after rotation. Require each snapped point to equal
-   `circle.eval(t0 + i*2π/40)` bitwise.
-2. Run the test; it fails to compile (the helper does not exist).
-3. Implement the helper: validate `segments >= 3`, `circle.is_valid()`, finite
-   `t0`; write `points[start + i] = circle.eval(t0 + 2π*i/segments)` for
-   `i = 0..segments-1`.
-4. Run the test, then the full suite. Expected counts unchanged (one new case and
-   its assertions).
-5. Commit: `feat(brep): add full-turn circle rim snapping`.
+1. Add a failing test `tessellate: split cone fragments stay watertight` with the
+   five rows (below, above, z=0.5, z=1.5, translated), asserting positions,
+   triangles, `closed`, `used_on_boundary == 0`, `nonmanifold == 0`, volume within
+   `5e-3` and a second run bitwise identical.
+2. Run it; on MSVC it already passes after the product change, so also record the
+   glibc probe numbers in the report.
+3. Implement the post-pass as described; call it at the end of `tessellate()`.
+4. Debug and Release suites, zero warnings, commit.
 
-## Task 2: Use snapped rims for split cone meshes
+**Test values**
 
-**Files**
+| row | positions | triangles | volume |
+| --- | --- | --- | --- |
+| z=1 below | 134 | 264 | 1.830287422577 |
+| z=1 above | 51 | 98 | 0.261110903259 |
+| z=0.5 below | 140 | 276 | 1.209417839998 |
+| z=1.5 below | 124 | 244 | 2.058752793525 |
+| translated split | 134 | 264 | n/a |
 
-- `include/geom/brep/tessellate.hpp`
-- `tests/unit/brep_boolean_curved_test.cpp`
+## Task 2: Documentation
 
-**Interfaces**
+**Files**: ADR-0036, `docs/benchmarks/m3c3c4b3a.md`, architecture section 16.3.
 
-Consumes: `tessellate_snap_full_circle_run`.
+Replace the "split deferred" text with the snap/merge contract, restore the split
+rows to the matrix, and update the assertion counts to 1014 / 673,425.
 
-Produces: snapping applied in the ring construction used by both the planar cap
-and the trimmed cone band, for runs whose points all lie on one closed full-turn
-circle edge.
+## Exit criteria
 
-**Steps**
+- Both configurations: 1014 cases / 673,425 assertions, zero warnings.
+- The five split rows close with `used_once == 0` and plausible volumes.
+- Non-cone hashes unchanged.
+- CI ubuntu and coverage jobs green (the original failure).
+- ADR, benchmark and architecture describe the implemented snap, not the deferred
+  limitation.
 
-1. Add the split row back to `curved boolean: cone tessellation follows the
-   surface` (z=1 below and above): counts 134/264, boundary 0, `closed()`, volume
-   `1.830287422577` (below). Also require the cap rim positions and the band rim
-   positions to be identical (sorted arrays, bitwise). On MSVC this passes; on
-   ubuntu the assertion must turn green only after the fix (RED = CI run
-   44715035487).
-2. Run the focused test; record the MSVC pass and the CI reference.
-3. Locate the boundary ring construction for the planar cap and for the trimmed
-   cone band. When a run of ring points lies on the face's closed circle edge with
-   `t1 - t0 == 2π` and its segment count matches the edge's canonical count, snap
-   that run with the helper (keep the ring's seam vertex).
-4. Rebuild and run the focused test, QA-22 and the trimmed tessellation suite.
-5. Commit: `fix(brep): snap split cone rims onto one circle sampling`.
+## Self-review
 
-## Task 3: Restore the matrix and document
-
-**Files**
-
-- `tests/unit/brep_boolean_curved_test.cpp`
-- `docs/adr/0036-cone-tessellation.md`
-- `docs/benchmarks/m3c3c4b3a.md`
-- `docs/architecture/geometry-library-architecture.md`
-- `docs/superpowers/plans/2026-11-20-m3c3c4b3a-cone-tessellation.md`
-
-**Steps**
-
-1. Restore the full split matrix (z=0.5/1/1.5, translated split) with the
-   canonical counts and volumes; update QA-22 accordingly.
-2. Update ADR-0036, the benchmark and §16.3: remove the "split-solid cone meshes
-   are deferred" sentence and state that all meshed faces of one split cone share
-   canonical full-turn rim sampling.
-3. Run Debug and Release full suites; confirm every other hash pin is unchanged.
-4. Commit: `docs(brep): record canonical split-cone rims`.
-
-## Exit Criteria
-
-- The split matrix passes on windows-2022, ubuntu-24.04 and macos-15.
-- Split cone meshes are closed with 0 boundary edges on every platform; cap and
-  band rim positions are bitwise identical.
-- Non-cone output hashes unchanged; QA-22 volumes within the existing bounds.
-- Debug and Release full suites green with 0 warnings under `GEOM_WERROR=ON`.
-- ADR-0036, benchmark, §16.3 and the plan reflect the final contract.
-
-## Self-Review
-
-- [ ] Every task has Files, Interfaces and a five-step TDD sequence.
-- [ ] The helper test can fail on MSVC by rotating the start; the end-to-end RED is
-      the ubuntu CI run.
-- [ ] No placeholder or stale count remains.
-- [ ] `git diff --check` clean under the repository's `core.whitespace` setting.
+- [x] The task has a failing test and the test values come from the probe.
+- [x] The post-pass is gated to cone-carrying solids.
+- [x] Exact merge, no new epsilon.
+- [x] Docs and counts match the implementation.
+- [x] Plan file map matches the changed files.

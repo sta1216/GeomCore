@@ -2153,6 +2153,90 @@ inline bool tessellate_supported_surface(const SurfaceGeometry& surface) {
          std::holds_alternative<Sphere3>(surface) || std::holds_alternative<Torus3>(surface);
 }
 
+// Split cones and their caps sample one cut circle through different code paths,
+// so the same rim can appear as several position slots whose coordinates differ
+// in the last bit (glibc) while MSVC happens to agree. Snap every position that
+// lies on a closed full-turn circle edge to the uniform samples of that circle,
+// then merge bitwise-identical positions. The snapped values are computed from
+// the circle alone, so coincident samples become the same doubles and share one
+// index; coincident positions that are not on a rim are left untouched.
+inline void tessellate_snap_cone_rims(TriMesh& mesh, const Brep& brep, double deflection) {
+  bool has_cone = false;
+  for (const SurfaceGeometry& surface : brep.geometry().surfaces) {
+    if (std::holds_alternative<Cone3>(surface)) {
+      has_cone = true;
+      break;
+    }
+  }
+  if (!has_cone || mesh.positions.empty()) return;
+  for (const EdgeId id : brep.edge_ids()) {
+    const Edge& edge = brep.edge(id);
+    if (edge.v0 != edge.v1 || edge.curve == kNoGeometry ||
+        edge.curve >= brep.geometry().curves.size()) {
+      continue;
+    }
+    const auto* circle = std::get_if<CircleCurve3>(&brep.geometry().curves[edge.curve]);
+    if (circle == nullptr || !circle->is_valid()) continue;
+    double t0 = edge.t0;
+    double t1 = edge.t1;
+    if (t1 < t0) std::swap(t0, t1);
+    const double span = t1 - t0;
+    if (!(std::abs(span - 2.0 * kPi) <= 1e-12)) continue;
+    const Result<std::uint32_t> segments =
+        tessellate_circle_segments(*circle, t0, t1, deflection, true);
+    if (!segments.has_value() || segments.value() < 3u) continue;
+    const double count = static_cast<double>(segments.value());
+    const double step = span / count;
+    const double radius_tolerance = 1e-9 * std::max(1.0, circle->radius);
+    Vec3d normal = cross(circle->x_axis, circle->y_axis);
+    const double normal_length = std::sqrt(dot(normal, normal));
+    if (!(normal_length > 0.0)) continue;
+    normal = Vec3d{normal[0] / normal_length, normal[1] / normal_length, normal[2] / normal_length};
+    for (Point3d& point : mesh.positions) {
+      const Vec3d relative = point - circle->center;
+      const double axial = dot(relative, normal);
+      if (!(std::abs(axial) <= radius_tolerance)) continue;
+      const Vec3d in_plane = relative - Vec3d{axial * normal[0], axial * normal[1], axial * normal[2]};
+      const double radial = std::sqrt(dot(in_plane, in_plane));
+      if (!(std::abs(radial - circle->radius) <= radius_tolerance)) continue;
+      const double angle = std::atan2(dot(in_plane, circle->y_axis), dot(in_plane, circle->x_axis));
+      double turns = std::round((angle - t0) / step);
+      turns = std::fmod(turns, count);
+      if (turns < 0.0) turns += count;
+      point = circle->eval(t0 + step * turns);
+    }
+  }
+  std::map<std::array<double, 3>, std::uint32_t> unique;
+  std::vector<std::uint32_t> remap(mesh.positions.size(), 0u);
+  std::vector<Point3d> positions;
+  positions.reserve(mesh.positions.size());
+  for (std::size_t i = 0; i < mesh.positions.size(); ++i) {
+    const Point3d& point = mesh.positions[i];
+    const std::array<double, 3> key{point[0], point[1], point[2]};
+    const auto [it, inserted] =
+        unique.emplace(key, static_cast<std::uint32_t>(positions.size()));
+    if (inserted) positions.push_back(point);
+    remap[i] = it->second;
+  }
+  for (std::array<std::uint32_t, 3>& triangle : mesh.triangles) {
+    for (std::uint32_t& index : triangle) index = remap[index];
+  }
+  mesh.positions = std::move(positions);
+  std::size_t kept = 0;
+  for (std::size_t i = 0; i < mesh.triangles.size(); ++i) {
+    const std::array<std::uint32_t, 3>& triangle = mesh.triangles[i];
+    if (triangle[0] == triangle[1] || triangle[1] == triangle[2] ||
+        triangle[0] == triangle[2]) {
+      continue;
+    }
+    mesh.triangles[kept] = triangle;
+    mesh.triangle_face[kept] = mesh.triangle_face[i];
+    ++kept;
+  }
+  mesh.triangles.resize(kept);
+  mesh.triangle_face.resize(kept);
+}
+
 }  // namespace detail
 
 // Triangulates the faces of `brep`. Planar faces are triangulated from their
@@ -2202,6 +2286,7 @@ inline Result<TriMesh> tessellate(const Brep& brep, const TessellationOptions& o
                                     : detail::sample_curved_face(state, brep, id, options);
     if (!status.has_value()) return status.error();
   }
+  detail::tessellate_snap_cone_rims(state.mesh, brep, options.deflection);
   return std::move(state.mesh);
 }
 
