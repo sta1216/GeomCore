@@ -726,8 +726,8 @@ TEST_CASE("tessellate: trimmed cone frusta are watertight") {
 // the two rims of the lower frustum are sampled independently (z=0.5 and z=1.5,
 // where the cut rim is coarser than the base rim), and a translated cone that
 // already tessellated must keep its exact mesh. Counts, volume, closure and a
-// bitwise repeat pin the whole matrix; the analytic volumes are the frustum
-// formula for r = 1 - z/2 over each height.
+// bitwise repeat pin the whole matrix; the pinned volumes are measured mesh
+// volumes, about 1.2e-3 below the frustum formula for r = 1 - z/2 over each height.
 TEST_CASE("tessellate: split cone heights stay watertight") {
   const double tolerance = 1e-9;
   const geom::TessellationOptions options{1e-3, 0.35};
