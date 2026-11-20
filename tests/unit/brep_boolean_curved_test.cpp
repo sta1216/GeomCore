@@ -645,7 +645,7 @@ TEST_CASE("QA-22: cone/plane booleans are closed and deterministic") {
 // above the parameter midpoint. A frustum's two rims are sampled independently,
 // so that point can sit far from the chord even when the chord hugs the surface,
 // and the refinement then burned its whole budget. Measuring the geometric
-// distance to the surface must let all five QA-22 results tessellate watertight;
+// distance to the surface must let all three QA-22 results tessellate watertight;
 // this test pins their counts, volume and determinism, and requires the small
 // cone to keep the canonical single-apex fan instead of entering the trimmed
 // path.

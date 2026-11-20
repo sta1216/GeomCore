@@ -1,8 +1,6 @@
 # M3c-3c-4b3a: cone tessellation
 
-Date: 2026-11-20. Measured at `75915ae` (the Task 2 test commit `0a2556a` is the
-matrix under test). Task 1 is `3d0801a`. The change is docs only; the binaries are
-the ones Task 1 and Task 2 built.
+Date: 2026-11-20. The matrix was measured at `75915ae` (Task 2 test commit `0a2556a`; Task 1 `3d0801a`). The full-suite counts were measured at `43218b4` after the split-solid rows left the matrix; the binaries are the Debug and Release builds of that commit.
 
 ## Scope
 
@@ -19,9 +17,9 @@ This note records the measured behavior of the cone chordal-sag change:
   counts.
 
 The matrix is pinned by `tests/unit/brep_boolean_curved_test.cpp`:
-`tessellate: trimmed cone frusta are watertight` (line 652, five QA-22 rows),
+`tessellate: trimmed cone frusta are watertight` (line 652, three QA-22 rows),
 `tessellate: translated cone booleans stay watertight` (one translated boolean)
-and `tessellate: canonical cone faces keep their apex` (three apex rows) and `tessellate: the cone sag helper is cone-only` (line 819). The
+`tessellate: canonical cone faces keep their apex` (three apex rows) and `tessellate: the cone sag helper is cone-only` (line 785). The
 shared census is `check_cone_tessellation` (line 439).
 
 ## Environment
@@ -63,7 +61,7 @@ relative error is `5.069e-3` at apex intersection `z = 1.5`, where the volume is
 original brief and plan text call `2.917e-3` the "maximum relative error"; the probe column is
 absolute and the plan was corrected to "maximum absolute", so this note keeps both
 numbers and labels the units. Task 1's
-five-row QA-22 census uses a `5e-3` relative band; the other eight rows use `1e-9`
+three-row QA-22 census uses a `5e-3` relative band; the other four rows use `1e-9`
 relative.
 
 ## Watertightness and determinism
@@ -98,7 +96,7 @@ The canonical whole cone is 72/140 and the QA-22 intersection is 51/98; both kee
 Non-cone behavior is unchanged. QA-13's cut cylinder is still 894/449 at
 `{2e-3, 0.35}`, the canonical box/cylinder/torus are still 12/8, 88/46 and 1152/576,
 and `tessellate_cone_radial_sag_square` returns `nullopt` for a real plane face and a
-real cylinder face (test line 819). A translated cone whose seam copies evaluate to
+real cylinder face (test line 801). A translated cone whose seam copies evaluate to
 the same doubles is still the documented refusal, not an internal error.
 
 ## Focused and full runs

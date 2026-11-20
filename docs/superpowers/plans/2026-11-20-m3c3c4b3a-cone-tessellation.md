@@ -194,7 +194,7 @@ Record: the parameter-vs-geometric sag discrepancy on cones (8.3x at the z=1 fru
 
 - [x] **Step 2: Write the benchmark note**
 
-`docs/benchmarks/m3c3c4b3a.md`: cases, V/T, mesh volumes, max absolute volume error `2.917e-3` (max relative `5.069e-3`), deflection/angle, determinism, platform.
+`docs/benchmarks/m3c3c4b3a.md`: cases, V/T, mesh volumes, max absolute volume error `2.733e-3` (max relative `5.069e-3`), deflection/angle, determinism, platform.
 
 - [x] **Step 3: Update architecture §16.3 and ADR-0035**
 
@@ -213,10 +213,10 @@ git commit -m "docs(m3c3c4b3a): record the cone tessellation metric"
 
 ## Exit Criteria
 
-- QA-22 difference/union and split z=1 both tessellate: boundary 0, nonmanifold 0, volume within `5e-3` of analytic, bitwise repeat.
+- QA-22 difference/union and the translated boolean tessellate: boundary 0, nonmanifold 0, volume within `5e-3` of analytic, bitwise repeat.
 - Cone frusta with 72/51 rim samples succeed; apex-bearing faces still produce exactly one apex vertex via the canonical path.
 - Non-cone counts unchanged: QA-13 cut cylinder 894/449; canonical box/cylinder/torus counts unchanged; all non-cone face hashes/positions bitwise identical.
-- Translated split/boolean that pass today are unchanged; the coincident-seam-copy refusal still fires at `y = -2`/`|y| >= 2.25`.
+- The translated boolean that passes today is unchanged; the coincident-seam-copy refusal still fires at `y = -2`/`|y| >= 2.25`.
 - Debug and Release full suites pass with zero warnings; ADR-0036, benchmark and §16.3 landed.
 
 ## Self-Review
