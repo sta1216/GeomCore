@@ -151,10 +151,10 @@ Add `TEST_CASE("tessellate: split cone heights stay watertight")` and `TEST_CASE
 - split z=1.5 lower: 124/244, volume `2.058752793525`.
 - translated split z=4 (cone at `(1,2,3)`): lower 134/264, volume `1.830287422577`; upper 51/98, volume `0.261110903259`.
 - translated boolean difference (same `(1,2,3)` cone): 134/264, volume `1.830287422577`.
-- apex intersection z=0.5: 62/120, volume `0.882011366069`, exactly one apex vertex within 1e-12 of `(0,0,0.5)`.
+- apex intersection z=0.5: 62/120, volume `0.882011366069`, exactly one apex vertex within 1e-12 of `(0,0,2)` (the analytic apex; the z=0.5 cap is an ear-clipped polygon).
 - apex intersection z=1.5: 37/70, volume `0.032559033313`, one apex vertex.
 - whole cone: 72/140, volume `2.091662475470`, one apex vertex.
-Every case also asserts boundary 0, nonmanifold 0, `triangle_face` size/id bounds, and bitwise repeat.
+Every case also asserts boundary 0, nonmanifold 0, `triangle_face` size/id bounds, and bitwise repeat. Compare volumes with `epsilon(1e-9)` against the 12-decimal literals below (stricter than the 5e-3 chordal bound).
 
 Add `TEST_CASE("tessellate: the cone sag helper is cone-only")` that builds a plane projection and a cylinder projection (reuse projections from existing trimmed tests) and asserts `detail::tessellate_cone_radial_sag_square(projection, point, 0.0)` is `nullopt` for both.
 
