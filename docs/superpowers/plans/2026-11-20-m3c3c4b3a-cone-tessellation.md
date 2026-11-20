@@ -188,19 +188,19 @@ git commit -m "test(m3c3c4b3a): pin the cone tessellation matrix"
 - Modify: `docs/architecture/geometry-library-architecture.md` (§16.3)
 - Modify: `docs/adr/0035-cone-boolean.md` (limitation: trimmed cone tessellation now supported for frusta; apex fan still canonical only)
 
-- [ ] **Step 1: Write the ADR**
+- [x] **Step 1: Write the ADR**
 
 Record: the parameter-vs-geometric sag discrepancy on cones (8.3x at the z=1 frustum, 1032 splits vs 13), the cone-only scoping that protects QA-13/canonical counts, why the strip zipper is sufficient for frusta, and why apex rings stay rejected until the fan slice. Include the measured table from Task 1/2.
 
-- [ ] **Step 2: Write the benchmark note**
+- [x] **Step 2: Write the benchmark note**
 
-`docs/benchmarks/m3c3c4b3a.md`: cases, V/T, mesh volumes, max relative error `2.917e-3`, deflection/angle, determinism, platform.
+`docs/benchmarks/m3c3c4b3a.md`: cases, V/T, mesh volumes, max absolute volume error `2.917e-3` (max relative `5.069e-3`), deflection/angle, determinism, platform.
 
-- [ ] **Step 3: Update architecture §16.3 and ADR-0035**
+- [x] **Step 3: Update architecture §16.3 and ADR-0035**
 
 Add the 4b3a paragraph and narrow the ADR-0035 limitation sentence: frusta now tessellate; apex faces remain canonical-only.
 
-- [ ] **Step 4: Verify docs and commit**
+- [x] **Step 4: Verify docs and commit**
 
 Run `git diff --check`; confirm no production files changed.
 
@@ -223,6 +223,7 @@ git commit -m "docs(m3c3c4b3a): record the cone tessellation metric"
 
 - Spec coverage: §8.10 watertight/deviation contract → Task 1/2 invariants; ADR-0035 cone scope → Task 3.
 - Each step names one action and its expected result; test values come from the probe report.
-- Names are consistent: `tessellate_nearest_sag_square`, `mesh_volume`, `boundary_edge_count`, `nonmanifold_edge_count`.
+- Names are consistent: `tessellate_cone_radial_sag_square`, `mesh_volume`, `boundary_edge_count`, `nonmanifold_edge_count`.
 - Review Focus: each line has a test in Task 1 or 2.
+- Final counts: Debug and Release each 1,013 cases / 673,296 assertions, 0 failed; zero warnings with `GEOM_WERROR=ON`.
 - Proportion: production change ~30 lines; tests and docs dominate, as expected for a metric fix.

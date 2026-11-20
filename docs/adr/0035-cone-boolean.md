@@ -1,6 +1,8 @@
 # ADR-0035: Cone operands in the curved boolean
 
-Status: accepted for M3c-3c-4b2 (2026-11-19)
+Status: accepted for M3c-3c-4b2 (2026-11-19); the trimmed-cone tessellation
+limitation is narrowed by ADR-0036 (frusta now tessellate; apex-bearing fragments
+keep the canonical fan).
 
 ## Context
 
@@ -179,19 +181,25 @@ a cone cut by a plane now assemble into one closed shell.
 | oblique or axis-containing plane that reaches the cone's bounding sphere | `unsupported "boolean_solid_curved: cone cutters must be perpendicular to the cone axis; oblique and axis-containing planes are deferred to M3c-3c-4b3"` |
 | trimmed cone fragment (not one loop over the full chart) | `unsupported "boolean_solid_curved: cone operands must be whole cones; trimmed cone fragments are not supported"` |
 | cone placement where the two seam copies of a cut-circle point round to the same double (observed with base centre `y = -2`, or `|y| >= 2.25`, and radius `0.5`; `y = +2` still passes) | `unsupported "boolean_solid_curved: cone seam copies coincide at this placement; cone booleans at this offset are deferred to M3c-3c-4b3"` |
-| trimmed cone tessellation | deferred to M3c-3c-4b3; `tessellate_cone_face` still fans the whole base ring to one apex vertex, which does not match a fragment's apex row |
+| apex-bearing trimmed ring that reaches the trimmed path | `unsupported "tessellate: trimmed curved face boundary is not rectilinear"`; frusta tessellate since M3c-3c-4b3a (ADR-0036), and apex-bearing fragments keep the canonical `tessellate_cone_face` fan |
 
 The first row covers every non-planar partner. The cone gate message therefore
 concerns the partner's face kind (for example `cone/cone` or `cone/torus`); it no
 longer fires for a `Cone3` operand of the expected shape. The perpendicular guard is
 separate and concerns only the cut plane's orientation.
 
+The whole-cone gate is about boolean operands: a frustum produced by a supported cut
+tessellates through the trimmed path (ADR-0036), while apex-bearing fragments keep the
+canonical fan.
+
 ### Deferred
 
-Trimmed cone fragments, cone/cone and cone/curved cutters, oblique and axis-containing
-planes (which need half-turn rim arcs or an exact ellipse), trimmed cone tessellation,
-and NURBS operands stay outside this slice. The whole-cone restriction is also why a
-cone that is one face of a larger B-rep is refused rather than re-charted.
+Trimmed cone fragments as boolean operands, cone/cone and cone/curved cutters, oblique
+and axis-containing planes (which need half-turn rim arcs or an exact ellipse), and
+NURBS operands stay outside this slice. Frusta produced by a supported cut now
+tessellate (ADR-0036), while apex-bearing fragments keep the canonical whole-ring fan.
+The whole-cone restriction is also why a cone that is one face of a larger B-rep is
+refused rather than re-charted.
 
 A translated whole cone subtracted from a provably disjoint box at `|y| >= 10` still
 fails inside the pre-existing base-rim heal (`assemble_curved_solid: shared edge curve
@@ -246,6 +254,9 @@ QA-22 renames the existing three-operation case, so it adds no case or assertion
 - The apex weld drops only zero-length straight pieces and keeps full-turn rims, so
   the seam-only chart's two uv apex copies still reach the pcurves while the
   assembled shell has one apex vertex.
-- Trimmed cone tessellation is still the 4b3 item: the whole-ring fan of
-  `tessellate_cone_face` is not the sampling of a split fragment. General
-  curved/curved cone booleans and oblique/axis-containing planes remain deferred.
+- Trimmed cone frusta now tessellate (M3c-3c-4b3a, ADR-0036): the existing strip
+  zipper joins the two independently sampled rims, and the sag metric now measures
+  the surface at the same azimuth and axial height. Apex-bearing fragments still use
+  the whole-ring fan of `tessellate_cone_face`; an apex ring that reached the trimmed
+  path is rejected. General curved/curved cone booleans and oblique/axis-containing
+  planes remain deferred.
