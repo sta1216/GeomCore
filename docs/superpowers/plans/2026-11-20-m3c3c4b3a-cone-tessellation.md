@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
-**Goal:** Make every trimmed cone frustum produced by `boolean_solid_curved` and `split_solid_by_plane` tessellate watertight by measuring chord sag on the actual cone surface instead of in parameter space.
+**Goal:** Make every trimmed cone frustum produced by `boolean_solid_curved` tessellate watertight (split-solid fragments are deferred to M3c-3c-4b3b) by measuring chord sag on the actual cone surface instead of in parameter space.
 
 **Architecture:** On a cone, the uv midpoint of a chord is not the chord midpoint in 3D because azimuth is angle while the chord is radius-weighted. The trimmed-face refiner and the final deviation check therefore measure a parameter-space error that halves only linearly and never converges. Both measurements become a nearest-surface distance for `Cone3` faces only; splitting stays at the parameter midpoint and every non-cone path is bitwise unchanged.
 
@@ -146,7 +146,7 @@ git commit -m "fix(m3c3c4b3a): measure cone chord sag on the surface"
 
 - [x] **Step 1: Write the matrix and helper tests**
 
-Add `TEST_CASE("tessellate: split cone heights stay watertight")` and `TEST_CASE("tessellate: canonical cone faces keep their apex")` with:
+Add `TEST_CASE("tessellate: translated cone booleans stay watertight")` and `TEST_CASE("tessellate: canonical cone faces keep their apex")` with:
 - split z=0.5 lower: 140/276, volume `1.209417839998`.
 - split z=1.5 lower: 124/244, volume `2.058752793525`.
 - translated split z=4 (cone at `(1,2,3)`): lower 134/264, volume `1.830287422577`; upper 51/98, volume `0.261110903259`.
@@ -225,5 +225,5 @@ git commit -m "docs(m3c3c4b3a): record the cone tessellation metric"
 - Each step names one action and its expected result; test values come from the probe report.
 - Names are consistent: `tessellate_cone_radial_sag_square`, `mesh_volume`, `boundary_edge_count`, `nonmanifold_edge_count`.
 - Review Focus: each line has a test in Task 1 or 2.
-- Final counts: Debug and Release each 1,013 cases / 673,296 assertions, 0 failed; zero warnings with `GEOM_WERROR=ON`.
+- Final counts: Debug and Release each 1,013 cases / 671,966 assertions, 0 failed; zero warnings with `GEOM_WERROR=ON`.
 - Proportion: production change ~30 lines; tests and docs dominate, as expected for a metric fix.

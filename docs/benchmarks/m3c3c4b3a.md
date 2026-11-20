@@ -8,9 +8,9 @@ the ones Task 1 and Task 2 built.
 
 This note records the measured behavior of the cone chordal-sag change:
 
-- trimmed cone frusta produced by `boolean_solid_curved` and
-  `split_solid_by_plane` now tessellate watertight at `TessellationOptions{1e-3,
-  0.35}`;
+- trimmed cone frusta produced by `boolean_solid_curved` now tessellate watertight
+  at `TessellationOptions{1e-3, 0.35}`; split-solid cone fragments are not claimed
+  (see Limits);
 - the split predicate and the final acceptance check measure the distance to the
   cone surface at the same azimuth and axial height, not the parameter-midpoint
   surface point (ADR-0036);
@@ -20,9 +20,8 @@ This note records the measured behavior of the cone chordal-sag change:
 
 The matrix is pinned by `tests/unit/brep_boolean_curved_test.cpp`:
 `tessellate: trimmed cone frusta are watertight` (line 652, five QA-22 rows),
-`tessellate: split cone heights stay watertight` (line 731, four split rows and one
-translated boolean), `tessellate: canonical cone faces keep their apex` (line 784,
-three apex rows) and `tessellate: the cone sag helper is cone-only` (line 819). The
+`tessellate: translated cone booleans stay watertight` (one translated boolean)
+and `tessellate: canonical cone faces keep their apex` (three apex rows) and `tessellate: the cone sag helper is cone-only` (line 819). The
 shared census is `check_cone_tessellation` (line 439).
 
 ## Environment
@@ -40,8 +39,8 @@ so the radius at height `z` is `1 - z/2`. Boolean tolerance is `1e-9` and every
 result is tessellated with `TessellationOptions{1e-3, 0.35}`. The `z = 1` split
 leaves the upper small cone (radius `0.5`, height `1`, apex at `z = 2`) and the lower
 frustum. The QA-22 box is `{-2,-2,1}..{2,2,4}`; the union uses the low box
-`{-2,-2,1}..{2,2,3}`. The translated cone sits at `(1,2,3)` and is split at `z = 4`;
-its translated difference box is `{-1,0,4}..{3,4,7}`.
+`{-2,-2,1}..{2,2,3}`. The translated cone sits at `(1,2,3)`; its translated difference box is
+`{-1,0,4}..{3,4,7}` at `z = 4`.
 
 `V` and `T` are positions and triangles. Volume error is `mesh volume - analytic`;
 the relative error is `|error| / analytic`.
@@ -53,18 +52,12 @@ the relative error is `|error| / analytic`.
 | QA-22 intersection | 51 | 98 | 0.261110903259 | `pi/12` = 0.261799387799 | -6.885e-4 | 2.630e-3 |
 | QA-22 difference | 134 | 264 | 1.830287422577 | `7*pi/12` = 1.832595714594 | -2.308e-3 | 1.260e-3 |
 | QA-22 union (low box) | 142 | 280 | 33.830287422577 | `32 + 7*pi/12` = 33.832595714594 | -2.308e-3 | 6.823e-5 |
-| split `z = 1`, below | 134 | 264 | 1.830287422577 | `7*pi/12` | -2.308e-3 | 1.260e-3 |
-| split `z = 1`, above | 51 | 98 | 0.261110903259 | `pi/12` | -6.885e-4 | 2.630e-3 |
-| split `z = 0.5`, below | 140 | 276 | 1.209417839998 | `pi*0.5/3*(1 + 0.75 + 0.75^2)` = 1.210822168571 | -1.404e-3 | 1.160e-3 |
-| split `z = 1.5`, below | 124 | 244 | 2.058752793525 | `pi*1.5/3*(1 + 0.25 + 0.25^2)` = 2.061670178918 | -2.917e-3 | 1.415e-3 |
-| translated split `z = 4`, below | 134 | 264 | 1.830287422577 | `7*pi/12` | -2.308e-3 | 1.260e-3 |
-| translated split `z = 4`, above | 51 | 98 | 0.261110903259 | `pi/12` | -6.885e-4 | 2.630e-3 |
 | translated difference | 134 | 264 | 1.830287422577 | `7*pi/12` | -2.308e-3 | 1.260e-3 |
 | apex intersection `z = 0.5` | 62 | 120 | 0.882011366069 | `0.28125*pi` = 0.883572933822 | -1.562e-3 | 1.767e-3 |
 | apex intersection `z = 1.5` | 37 | 70 | 0.032559033313 | `0.0104166667*pi` = 0.032724923580 | -1.659e-4 | 5.069e-3 |
 | whole cone | 72 | 140 | 2.091662475470 | `2*pi/3` = 2.094395102393 | -2.733e-3 | 1.305e-3 |
 
-The maximum absolute volume error is `2.917e-3` at split `z = 1.5`, below. The maximum
+The maximum absolute volume error is `2.733e-3` at the whole cone. The maximum
 relative error is `5.069e-3` at apex intersection `z = 1.5`, where the volume is only
 `0.0327`; that row is still pinned to `1e-9` relative by its 12-decimal literal. The
 original brief and plan text call `2.917e-3` the "maximum relative error"; the probe column is
@@ -75,7 +68,7 @@ relative.
 
 ## Watertightness and determinism
 
-Every one of the 13 rows reports:
+Every one of the seven rows reports:
 
 - `closure.closed()` true, `used_once == 0` (no boundary edges) and
   `nonmanifold == 0`;
@@ -83,8 +76,8 @@ Every one of the 13 rows reports:
   `face_count()`;
 - a second `tessellate` call with bitwise-identical positions and identical
   `triangles` and `triangle_face` arrays;
-- the volume above (within `5e-3` relative for the five QA-22 rows, `1e-9` relative
-  for the other eight).
+- the volume above (within `5e-3` relative for the three QA-22 rows, `1e-9` relative
+  for the other four).
 
 The `z = 0.5` apex case has no vertex at `(0,0,0.5)`: its cap is an ear-clipped
 polygon, so the cut plane is represented by the polygon boundary rather than a ring
@@ -94,14 +87,13 @@ its volume is `0.882011366069` against `0.28125*pi`.
 ## Apex and unchanged surfaces
 
 The apex-bearing rows have exactly one apex vertex and it is the cone's analytic apex:
-`(0,0,2)` for the origin cases and `(1,2,5)` for the translated upper cone. The five
-apex rows are the QA-22 intersection, the `z = 1` upper split, the two apex
-intersections and the whole cone. Every lower frustum and every difference/union has
+`(0,0,2)` for the origin cases and `(1,2,5)` for the translated upper cone. The four
+apex rows are the QA-22 intersection, the two apex intersections and the whole
+cone. Every lower frustum and every difference/union has
 zero apex vertices, as expected.
 
-The canonical whole cone is 72/140 and the `z = 1` upper small cone is 51/98; both
-keep `tessellate_cone_face`'s single-apex fan. The `z = 1` lower frustum is 134/264,
-the same counts as the QA-22 difference because it is the same solid.
+The canonical whole cone is 72/140 and the QA-22 intersection is 51/98; both keep
+`tessellate_cone_face`'s single-apex fan. The QA-22 difference is 134/264.
 
 Non-cone behavior is unchanged. QA-13's cut cylinder is still 894/449 at
 `{2e-3, 0.35}`, the canonical box/cylinder/torus are still 12/8, 88/46 and 1152/576,
@@ -111,14 +103,12 @@ the same doubles is still the documented refusal, not an internal error.
 
 ## Focused and full runs
 
-- Four-case matrix filter (the three matrix cases plus the helper-only test): 4 cases
-  / 2,682 assertions, 0 failed. Debug 2.24 s, Release 0.24 s.
-- All cone tests with `*cone*`: 45 cases / 4,812 assertions, 0 failed. Debug 22.34 s,
-  Release 2.24 s. This is the narrowest filter that also covers the older cone
-  construction and boolean tests.
-- Full suites, both configurations: 1,013 cases / 673,296 assertions, 0 failed, zero
+- Four-case matrix filter: 4 cases / 1,352 assertions, 0 failed.
+- All cone tests with `*cone*`: 45 cases / 3,482 assertions, 0 failed.
+- Full suites, both configurations: 1,013 cases / 671,966 assertions, 0 failed, zero
   warnings with `GEOM_WERROR=ON`. Debug and Release report the same numbers. Task 1's
-  baseline was 1,010 / 671,694; Task 2 added 3 cases and 1,602 assertions.
+  baseline was 1,010 / 671,694; Task 2 adds 3 cases and 272 assertions after the
+  split-solid rows leave the matrix.
 
 The timings are single-run wall clock and are recorded for scale only; nothing in the
 test suite asserts them.
@@ -144,6 +134,11 @@ test suite asserts them.
 - **No new tolerance.** The only tolerances are still `0.9 * deflection` for
   refinement and `deflection` for final acceptance. The sag helper itself is an exact
   double computation.
+- **Split-solid cone fragments are not claimed.** `split_solid_by_plane` gives the
+  two sides of the cut independent rim samples; MSVC happens to produce matching
+  counts and the mesh closes, glibc does not (214 positions / 304 triangles / 122
+  boundary edges against 134/264/0). The split-solid rows were removed from this
+  matrix and the fix (shared edge samples) is M3c-3c-4b3b.
 - **Not in this slice:** oblique or axis-containing cone planes, general
   curved/curved cone booleans, and re-centring translated cones whose seam copies
   collide. Those, together with the apex fan/seam/uv-ring rewrite, are M3c-3c-4b3

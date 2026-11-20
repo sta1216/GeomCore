@@ -98,7 +98,7 @@ Fixture: `make_cone({0,0,0}, {0,0,1}, 1, 2, 1e-9)`, boolean tolerance `1e-9`,
 `TessellationOptions{1e-3, 0.35}`. The `z = 1` case cuts the cone into the upper
 small cone (apex at `z = 2`) and the lower frustum; the box is
 `{-2,-2,1}..{2,2,4}`, and the union uses `{-2,-2,1}..{2,2,3}`. The translated cone
-sits at `(1,2,3)` and is split at `z = 4`. `V`/`T` are positions/triangles. Volume
+sits at `(1,2,3)`; its boolean difference at `z = 4` is covered. `V`/`T` are positions/triangles. Volume
 error is mesh volume minus the analytic value, in absolute units.
 
 | case | V | T | mesh volume | analytic | volume error | apex vertices |
@@ -106,12 +106,6 @@ error is mesh volume minus the analytic value, in absolute units.
 | QA-22 intersection | 51 | 98 | `0.261110903259` | `pi/12` | `-6.885e-4` | 1 |
 | QA-22 difference | 134 | 264 | `1.830287422577` | `7*pi/12` | `-2.308e-3` | 0 |
 | QA-22 union (low box) | 142 | 280 | `33.830287422577` | `32 + 7*pi/12` | `-2.308e-3` | 0 |
-| split `z = 1`, below | 134 | 264 | `1.830287422577` | `7*pi/12` | `-2.308e-3` | 0 |
-| split `z = 1`, above | 51 | 98 | `0.261110903259` | `pi/12` | `-6.885e-4` | 1 |
-| split `z = 0.5`, below | 140 | 276 | `1.209417839998` | `pi*0.5/3*(1 + 0.75 + 0.75^2)` | `-1.404e-3` | 0 |
-| split `z = 1.5`, below | 124 | 244 | `2.058752793525` | `pi*1.5/3*(1 + 0.25 + 0.25^2)` | `-2.917e-3` | 0 |
-| translated split `z = 4`, below | 134 | 264 | `1.830287422577` | `7*pi/12` | `-2.308e-3` | 0 |
-| translated split `z = 4`, above | 51 | 98 | `0.261110903259` | `pi/12` | `-6.885e-4` | 1 |
 | translated boolean difference | 134 | 264 | `1.830287422577` | `7*pi/12` | `-2.308e-3` | 0 |
 | apex intersection `z = 0.5` | 62 | 120 | `0.882011366069` | `0.28125*pi` | `-1.562e-3` | 1 |
 | apex intersection `z = 1.5` | 37 | 70 | `0.032559033313` | `0.0104166667*pi` | `-1.659e-4` | 1 |
@@ -125,7 +119,7 @@ the translated upper cone. The `z = 0.5` cap is an ear-clipped polygon with no v
 at `(0,0,0.5)`; that is the measured geometry, and the unique apex is the cone's
 analytic `(0,0,2)`.
 
-The maximum absolute volume error is `2.917e-3` (split `z = 1.5`, below). The
+The maximum absolute volume error is `2.733e-3` (whole cone). Split-solid cone fragments are not part of this matrix: their two rims are sampled independently, which happens to agree on MSVC but not with glibc, so their watertightness is deferred to M3c-3c-4b3b. The
 largest relative error is `5.07e-3` at apex intersection `z = 1.5`
 (`1.659e-4 / 0.0327249`), because that volume is small; the case is pinned by its
 12-decimal literal at `1e-9` relative, not by the `5e-3` band. Task 1's five-row
@@ -134,18 +128,21 @@ error is `2.63e-3` at the intersection. The original brief and plan text call `2
 "maximum relative error"; the measured probe column is absolute, so this ADR
 records both quantities rather than repeating the label.
 
-Focused matrix (four cases: the Task 1 trimmed-frusta case and the three Task 2
-cases): 2,682 assertions pass in Debug and Release. Full suites: Debug and Release
-each report 1013 cases / 673,296 assertions, 0 failed, zero warnings under
+Focused matrix (four cases: the Task 1 trimmed-frusta case, the Task 2 translated
+boolean, the apex case and the helper-only case): 1,352 assertions pass in Debug and
+Release. All cone tests (`*cone*`) are 45 cases / 3,482 assertions. Full suites: Debug
+and Release each report 1013 cases / 671,966 assertions, 0 failed, zero warnings under
 `/W4 /WX /utf-8` with `GEOM_WERROR=ON`. Task 1's baseline was 1010 / 671,694; Task 2
-added exactly 3 cases and 1,602 assertions.
+adds 3 cases and 272 assertions once the split-solid rows are out of the matrix.
 
 ## Consequences
 
-- Trimmed cone frusta produced by `boolean_solid_curved` and
-  `split_solid_by_plane` now tessellate watertight at the requested deflection, with
-  the counts and volumes in the table. The `72`/`51` rim pair is the ordinary case,
-  not a special case.
+- Trimmed cone frusta produced by `boolean_solid_curved` now tessellate watertight at
+  the requested deflection, with the counts and volumes in the table. The `72`/`51`
+  rim pair is the ordinary case, not a special case. Split-solid cone fragments keep
+  independent rim sampling on each side of the cut; that closes on MSVC but not with
+  glibc, so their watertightness is deferred to M3c-3c-4b3b and they are not claimed
+  here.
 - The cone is the only surface that takes the geometric sag path. The parameter
   metric remains for planes, cylinders, spheres, tori and every non-cone trimmed
   face, including its fallback when a cone projection fails, so those results stay
