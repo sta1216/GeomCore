@@ -63,7 +63,7 @@ Cases and expected values (measured at probe report §5):
 - QA-22 difference: 134/264, volume `1.830287422577` (`7π/12`).
 - QA-22 union: 142/280, volume `33.830287422577`.
 - `split_solid_by_plane` at z=1, lower part: 134/264, volume `1.830287422577`.
-- QA-22 intersection: 51/98, volume `0.261110903259`, zero apex vertices.
+- QA-22 intersection: 51/98, volume `0.261110903259`, exactly one apex vertex (the small cone keeps the analytic apex at z=2).
 - split z=1 upper part (canonical apex): 51/98, volume `0.261110903259`, exactly one apex vertex.
 
 Also assert `triangle_face.size() == triangles.size()` and every id `< brep.face_count()`.
