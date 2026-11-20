@@ -1482,7 +1482,10 @@ inline void tessellate_insert_wall_samples(
 // itself is the only reliable sag there. Only a cone takes this path; every
 // other surface keeps the parameter metric bitwise, and a failed projection
 // falls back to it as well.
-inline std::optional<double> tessellate_nearest_sag_square(
+// The projection keeps the point's azimuth and axial height, so the value is an
+// upper bound on the true nearest-surface distance; that is conservative for
+// both the split decision and the final check.
+inline std::optional<double> tessellate_cone_radial_sag_square(
     const FaceUvProjection& projection, const Point3d& point, double hint_u) {
   if (projection.surface == nullptr) return std::nullopt;
   if (!std::holds_alternative<Cone3>(*projection.surface)) return std::nullopt;
@@ -1597,7 +1600,7 @@ inline Result<void> tessellate_refine_trimmed_edges(
     // measure the geometric distance instead so a frustum whose rims were
     // sampled at different counts still refines to the requested deflection.
     if (const std::optional<double> geometric =
-            tessellate_nearest_sag_square(projection, chord_middle, middle_uv[0])) {
+            tessellate_cone_radial_sag_square(projection, chord_middle, middle_uv[0])) {
       sag_square = *geometric;
     }
     if (sag_square <= sag_limit * sag_limit) continue;
@@ -2034,7 +2037,7 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
     // centroid while the triangle itself still follows the surface; check the
     // geometric distance instead and keep the parameter metric elsewhere.
     if (const std::optional<double> geometric =
-            tessellate_nearest_sag_square(projection, centroid, centroid_uv[0])) {
+            tessellate_cone_radial_sag_square(projection, centroid, centroid_uv[0])) {
       sag_square = *geometric;
     }
     if (std::sqrt(sag_square) > deflection) {

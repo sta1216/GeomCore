@@ -431,6 +431,48 @@ bool positions_bitwise_equal(const geom::TriMesh& a, const geom::TriMesh& b) {
   return true;
 }
 
+// One census for the whole cone tessellation matrix: exact counts, the face-id
+// bounds of `triangle_face`, a closed manifold mesh, the volume, an apex-vertex
+// multiplicity and a bitwise-identical repeat. A failed tessellation is a CHECK
+// (not a REQUIRE) so a RED run reports every case instead of stopping at the
+// first budget error.
+void check_cone_tessellation(const char* name, const geom::Brep& brep,
+                             const geom::TessellationOptions& options, std::size_t positions,
+                             std::size_t triangles, double volume, const geom::Point3d& apex,
+                             std::size_t apex_vertices) {
+  INFO(std::string(name));
+  const geom::Result<geom::TriMesh> mesh = geom::tessellate(brep, options);
+  CHECK_MESSAGE(mesh.has_value(), name << ": " << message_of(mesh.error()));
+  if (!mesh.has_value()) return;
+  const geom::TriMesh& first = mesh.value();
+  CHECK_MESSAGE(first.positions.size() == positions,
+                name << ": positions " << first.positions.size());
+  CHECK_MESSAGE(first.triangles.size() == triangles,
+                name << ": triangles " << first.triangles.size());
+  CHECK_MESSAGE(first.triangle_face.size() == first.triangles.size(),
+                name << ": triangle_face covers " << first.triangle_face.size() << " of the "
+                     << first.triangles.size() << " triangles");
+  for (const std::uint32_t face : first.triangle_face) {
+    CHECK_MESSAGE(face < brep.face_count(), name << ": triangle_face id " << face);
+  }
+  const geom::detail::CurvedBooleanMeshClosure closure =
+      geom::detail::curved_boolean_mesh_closure(first);
+  CHECK_MESSAGE(closure.closed(), name << ": mesh is not closed");
+  CHECK_MESSAGE(closure.used_once == 0, name << ": mesh has boundary edges");
+  CHECK_MESSAGE(closure.nonmanifold == 0, name << ": mesh is non-manifold");
+  CHECK_MESSAGE(mesh_volume(first) == doctest::Approx(volume).epsilon(1e-9),
+                name << ": mesh volume " << mesh_volume(first) << " expected " << volume);
+  CHECK_MESSAGE(apex_vertex_count(first, apex) == apex_vertices,
+                name << ": apex vertices " << apex_vertex_count(first, apex));
+  const geom::Result<geom::TriMesh> again = geom::tessellate(brep, options);
+  CHECK_MESSAGE(again.has_value(), name << ": the repeated tessellation failed");
+  if (!again.has_value()) return;
+  CHECK_MESSAGE(positions_bitwise_equal(first, again.value()),
+                name << ": positions are not bitwise identical");
+  CHECK(again.value().triangles == first.triangles);
+  CHECK(again.value().triangle_face == first.triangle_face);
+}
+
 }  // namespace
 
 TEST_CASE("brep: boolean_solid_curved subtracts a box from a quarter cylinder") {
@@ -678,6 +720,133 @@ TEST_CASE("tessellate: trimmed cone frusta are watertight") {
   check("QA-22 union", united.value().brep, 142, 280, 32.0 + frustum, 0);
   check("split z=1 below", split.value().below, 134, 264, frustum, 0);
   check("split z=1 above", split.value().above, 51, 98, small_cone, 1);
+}
+
+// The trimmed cone refinement must hold at cut heights other than z=1 as well:
+// the two rims of the lower frustum are sampled independently (z=0.5 and z=1.5,
+// where the cut rim is coarser than the base rim), and a translated cone that
+// already tessellated must keep its exact mesh. Counts, volume, closure and a
+// bitwise repeat pin the whole matrix; the analytic volumes are the frustum
+// formula for r = 1 - z/2 over each height.
+TEST_CASE("tessellate: split cone heights stay watertight") {
+  const double tolerance = 1e-9;
+  const geom::TessellationOptions options{1e-3, 0.35};
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+
+  const auto split_at = [&](const geom::Brep& brep, double height) {
+    const geom::Result<geom::SplitSolidResult> split = geom::split_solid_by_plane(
+        brep, only_solid(brep), geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, height}, tolerance);
+    REQUIRE_MESSAGE(split.has_value(), "split at z=" << height << ": " << message_of(split.error()));
+    return split.value();
+  };
+  const geom::Point3d no_apex{0.0, 0.0, 0.0};
+
+  const geom::SplitSolidResult half = split_at(cone, 0.5);
+  check_cone_tessellation("split z=0.5 below", half.below, options, 140, 276, 1.209417839998,
+                          no_apex, 0);
+  const geom::SplitSolidResult three_halves = split_at(cone, 1.5);
+  check_cone_tessellation("split z=1.5 below", three_halves.below, options, 124, 244,
+                          2.058752793525, no_apex, 0);
+
+  // A cone translated off the origin: the axis and both cut rims move together,
+  // so the counts and volume are those of the z=1 split and QA-22 difference.
+  const geom::Brep translated =
+      geom::make_cone(geom::Point3d{1.0, 2.0, 3.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::SplitSolidResult translated_split = split_at(translated, 4.0);
+  check_cone_tessellation("translated split z=4 below", translated_split.below, options, 134, 264,
+                          1.830287422577, no_apex, 0);
+  check_cone_tessellation("translated split z=4 above", translated_split.above, options, 51, 98,
+                          0.261110903259, geom::Point3d{1.0, 2.0, 5.0}, 1);
+
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-1.0, 0.0, 4.0}, geom::Point3d{3.0, 4.0, 7.0}, tolerance)
+          .value();
+  const geom::Result<geom::CurvedBooleanResult> translated_difference =
+      geom::boolean_solid_curved(translated, only_solid(translated), box, only_solid(box),
+                                geom::SolidBooleanOp::difference,
+                                geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(translated_difference.has_value(),
+                  message_of(translated_difference.error()));
+  check_cone_tessellation("translated difference", translated_difference.value().brep, options,
+                          134, 264, 1.830287422577, no_apex, 0);
+}
+
+// An apex-bearing cone face must keep the canonical single-apex fan and must not
+// enter the trimmed path: cutting the cone below the apex leaves the small cone
+// with its apex, and the whole cone keeps it too. The apex vertex is the cone's
+// own analytic apex (0, 0, 2) in every case.
+TEST_CASE("tessellate: canonical cone faces keep their apex") {
+  const double tolerance = 1e-9;
+  const geom::TessellationOptions options{1e-3, 0.35};
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Point3d apex{0.0, 0.0, 2.0};
+
+  const auto cut_above = [&](double height) {
+    const geom::Brep box =
+        geom::make_box(geom::Point3d{-2.0, -2.0, height}, geom::Point3d{2.0, 2.0, 4.0},
+                       tolerance)
+            .value();
+    const geom::Result<geom::CurvedBooleanResult> intersection = geom::boolean_solid_curved(
+        cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::intersection,
+        geom::CurvedBooleanOptions{tolerance});
+    REQUIRE_MESSAGE(intersection.has_value(),
+                    "intersection above z=" << height << ": "
+                                            << message_of(intersection.error()));
+    return intersection.value().brep;
+  };
+
+  const geom::Brep half = cut_above(0.5);
+  check_cone_tessellation("apex intersection z=0.5", half, options, 62, 120, 0.882011366069,
+                          apex, 1);
+  check_cone_tessellation("apex intersection z=1.5", cut_above(1.5), options, 37, 70,
+                          0.032559033313, apex, 1);
+  check_cone_tessellation("whole cone", cone, options, 72, 140, 2.091662475470, apex, 1);
+}
+
+// The geometric sag override is cone-only: a plane or cylinder projection must
+// return nullopt so those surfaces keep the parameter metric bitwise. The
+// projections come from real faces of a box and a full cylinder, the same way
+// the trimmed tessellation reads them.
+TEST_CASE("tessellate: the cone sag helper is cone-only") {
+  const double tolerance = 1e-9;
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-1.0, -1.0, -1.0}, geom::Point3d{1.0, 1.0, 1.0}, tolerance)
+          .value();
+  const geom::Brep cylinder = make_test_cylinder(tolerance);
+
+  const auto face_on = [](const geom::Brep& brep, bool want_plane) {
+    for (const geom::FaceId id : brep.face_ids()) {
+      const bool is_plane = std::holds_alternative<geom::Plane3>(
+          brep.geometry().surfaces[brep.face(id).surface]);
+      if (is_plane == want_plane) return id;
+    }
+    return geom::FaceId::null();
+  };
+  const geom::FaceId plane_face = face_on(box, true);
+  const geom::FaceId cylinder_face = face_on(cylinder, false);
+  REQUIRE(!plane_face.is_null());
+  REQUIRE(!cylinder_face.is_null());
+  const geom::Result<geom::detail::FaceUvProjection> plane_projection =
+      geom::detail::face_uv_projection(box, box.face(plane_face), tolerance);
+  REQUIRE(plane_projection.has_value());
+  const geom::Result<geom::detail::FaceUvProjection> cylinder_projection =
+      geom::detail::face_uv_projection(cylinder, cylinder.face(cylinder_face), tolerance);
+  REQUIRE(cylinder_projection.has_value());
+
+  const geom::Point3d point{0.25, 0.25, 0.5};
+  CHECK_FALSE(geom::detail::tessellate_cone_radial_sag_square(plane_projection.value(), point, 0.0)
+                  .has_value());
+  CHECK_FALSE(
+      geom::detail::tessellate_cone_radial_sag_square(cylinder_projection.value(), point, 0.0)
+          .has_value());
 }
 
 // A cone far from the origin can evaluate both parameter copies of a cut-circle
