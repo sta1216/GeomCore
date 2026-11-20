@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <numbers>
 #include <optional>
 #include <random>
@@ -387,6 +388,51 @@ void check_cone_boolean(const char* name, const geom::Brep& a, const geom::Brep&
 
 }  // namespace
 
+namespace {
+
+// Mesh census for the trimmed cone tests: volume, apex multiplicity and a
+// bitwise repeat comparison. The closure census is the one the curved boolean
+// uses for its classification mesh, so both paths agree on watertightness.
+double mesh_volume(const geom::TriMesh& mesh) {
+  double volume = 0.0;
+  for (const std::array<std::uint32_t, 3>& triangle : mesh.triangles) {
+    const geom::Point3d& a = mesh.positions[triangle[0]];
+    const geom::Point3d& b = mesh.positions[triangle[1]];
+    const geom::Point3d& c = mesh.positions[triangle[2]];
+    volume += geom::dot(geom::Vec3d{a[0], a[1], a[2]},
+                        geom::cross(geom::Vec3d{b[0], b[1], b[2]},
+                                    geom::Vec3d{c[0], c[1], c[2]})) /
+              6.0;
+  }
+  return volume;
+}
+
+std::size_t apex_vertex_count(const geom::TriMesh& mesh, const geom::Point3d& apex) {
+  std::size_t count = 0;
+  for (const geom::Point3d& position : mesh.positions) {
+    if (std::fabs(position[0] - apex[0]) <= 1e-12 &&
+        std::fabs(position[1] - apex[1]) <= 1e-12 &&
+        std::fabs(position[2] - apex[2]) <= 1e-12) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+bool positions_bitwise_equal(const geom::TriMesh& a, const geom::TriMesh& b) {
+  if (a.positions.size() != b.positions.size()) return false;
+  for (std::size_t i = 0; i < a.positions.size(); ++i) {
+    for (int axis = 0; axis < 3; ++axis) {
+      if (std::memcmp(&a.positions[i][axis], &b.positions[i][axis], sizeof(double)) != 0) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
 TEST_CASE("brep: boolean_solid_curved subtracts a box from a quarter cylinder") {
   const double tolerance = 1e-9;
   const geom::Brep quarter = make_exact_quarter_cylinder(1.0, 2.0, tolerance);
@@ -551,6 +597,87 @@ TEST_CASE("QA-22: cone/plane booleans are closed and deterministic") {
                      small_cone);
   check_cone_boolean("QA-22 difference", cone, box, geom::SolidBooleanOp::difference, frustum);
   check_cone_boolean("QA-22 union", cone, low_box, geom::SolidBooleanOp::union_, 32.0 + frustum);
+}
+
+// The trimmed cone refinement used to measure chord sag at the surface point
+// above the parameter midpoint. A frustum's two rims are sampled independently,
+// so that point can sit far from the chord even when the chord hugs the surface,
+// and the refinement then burned its whole budget. Measuring the geometric
+// distance to the surface must let all five QA-22 results tessellate watertight;
+// this test pins their counts, volume and determinism, and requires the small
+// cone to keep the canonical single-apex fan instead of entering the trimmed
+// path.
+TEST_CASE("tessellate: trimmed cone frusta are watertight") {
+  const double tolerance = 1e-9;
+  const geom::TessellationOptions options{1e-3, 0.35};
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 1.0}, geom::Point3d{2.0, 2.0, 4.0}, tolerance)
+          .value();
+  const geom::Brep low_box =
+      geom::make_box(geom::Point3d{-2.0, -2.0, 1.0}, geom::Point3d{2.0, 2.0, 3.0}, tolerance)
+          .value();
+
+  const geom::Result<geom::CurvedBooleanResult> intersection = geom::boolean_solid_curved(
+      cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::intersection,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(intersection.has_value(), message_of(intersection.error()));
+  const geom::Result<geom::CurvedBooleanResult> difference = geom::boolean_solid_curved(
+      cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::difference,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(difference.has_value(), message_of(difference.error()));
+  const geom::Result<geom::CurvedBooleanResult> united = geom::boolean_solid_curved(
+      cone, only_solid(cone), low_box, only_solid(low_box), geom::SolidBooleanOp::union_,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_MESSAGE(united.has_value(), message_of(united.error()));
+  const geom::Result<geom::SplitSolidResult> split = geom::split_solid_by_plane(
+      cone, only_solid(cone), geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 1.0}, tolerance);
+  REQUIRE_MESSAGE(split.has_value(), message_of(split.error()));
+
+  const double small_cone = kPi / 12.0;
+  const double frustum = 7.0 * kPi / 12.0;
+  const geom::Point3d apex{0.0, 0.0, 2.0};
+  const auto check = [&](const char* name, const geom::Brep& brep, std::size_t positions,
+                         std::size_t triangles, double volume, std::size_t apex_vertices) {
+    INFO(std::string(name));
+    const geom::Result<geom::TriMesh> mesh = geom::tessellate(brep, options);
+    REQUIRE_MESSAGE(mesh.has_value(), name << ": " << message_of(mesh.error()));
+    const geom::TriMesh& first = mesh.value();
+    CHECK_MESSAGE(first.positions.size() == positions,
+                  name << ": positions " << first.positions.size());
+    CHECK_MESSAGE(first.triangles.size() == triangles,
+                  name << ": triangles " << first.triangles.size());
+    CHECK_MESSAGE(first.triangle_face.size() == first.triangles.size(),
+                  name << ": triangle_face covers " << first.triangle_face.size()
+                       << " of the triangles");
+    for (const std::uint32_t face : first.triangle_face) {
+      CHECK_MESSAGE(face < brep.face_count(), name << ": triangle_face id " << face);
+    }
+    const geom::detail::CurvedBooleanMeshClosure closure =
+        geom::detail::curved_boolean_mesh_closure(first);
+    CHECK_MESSAGE(closure.closed(), name << ": mesh is not closed");
+    CHECK_MESSAGE(closure.used_once == 0, name << ": mesh has boundary edges");
+    CHECK_MESSAGE(closure.nonmanifold == 0, name << ": mesh is non-manifold");
+    CHECK_MESSAGE(mesh_volume(first) == doctest::Approx(volume).epsilon(5e-3),
+                  name << ": mesh volume " << mesh_volume(first) << " expected " << volume);
+    CHECK_MESSAGE(apex_vertex_count(first, apex) == apex_vertices,
+                  name << ": apex vertices " << apex_vertex_count(first, apex));
+    const geom::Result<geom::TriMesh> again = geom::tessellate(brep, options);
+    REQUIRE_MESSAGE(again.has_value(), name << ": the repeated tessellation failed");
+    CHECK_MESSAGE(positions_bitwise_equal(first, again.value()),
+                  name << ": positions are not bitwise identical");
+    CHECK(again.value().triangles == first.triangles);
+    CHECK(again.value().triangle_face == first.triangle_face);
+  };
+
+  check("QA-22 intersection", intersection.value().brep, 51, 98, small_cone, 1);
+  check("QA-22 difference", difference.value().brep, 134, 264, frustum, 0);
+  check("QA-22 union", united.value().brep, 142, 280, 32.0 + frustum, 0);
+  check("split z=1 below", split.value().below, 134, 264, frustum, 0);
+  check("split z=1 above", split.value().above, 51, 98, small_cone, 1);
 }
 
 // A cone far from the origin can evaluate both parameter copies of a cut-circle

@@ -1474,6 +1474,27 @@ inline void tessellate_insert_wall_samples(
   ring.positions = std::move(positions);
 }
 
+// The trimmed refinement measures the chord error as the distance from the
+// chord midpoint to the surface point above its parameter midpoint. On a cone
+// that parameter point can sit far from the chord even when the chord hugs the
+// surface: the two rims of a frustum are sampled independently, so a chord may
+// join vertices with very different parameter rows. The distance to the surface
+// itself is the only reliable sag there. Only a cone takes this path; every
+// other surface keeps the parameter metric bitwise, and a failed projection
+// falls back to it as well.
+inline std::optional<double> tessellate_nearest_sag_square(
+    const FaceUvProjection& projection, const Point3d& point, double hint_u) {
+  if (projection.surface == nullptr) return std::nullopt;
+  if (!std::holds_alternative<Cone3>(*projection.surface)) return std::nullopt;
+  const Result<Point2d> uv = face_uv_project(projection, point, hint_u, false);
+  if (!uv.has_value()) return std::nullopt;
+  const Point3d nearest = face_uv_eval(projection, uv.value());
+  const double dx = point[0] - nearest[0];
+  const double dy = point[1] - nearest[1];
+  const double dz = point[2] - nearest[2];
+  return dx * dx + dy * dy + dz * dz;
+}
+
 // Splits interior edges of a trimmed-face triangulation that are longer than the
 // chord bound implied by `deflection`. Boundary edges (pairs of ring samples) are
 // never split: they carry the vertices a neighbouring face sampled and must weld
@@ -1571,6 +1592,13 @@ inline Result<void> tessellate_refine_trimmed_edges(
     for (int k = 0; k < 3; ++k) {
       const double d = chord_middle[k] - surface_middle[k];
       sag_square += d * d;
+    }
+    // The parameter midpoint of a cone chord is not its nearest surface point;
+    // measure the geometric distance instead so a frustum whose rims were
+    // sampled at different counts still refines to the requested deflection.
+    if (const std::optional<double> geometric =
+            tessellate_nearest_sag_square(projection, chord_middle, middle_uv[0])) {
+      sag_square = *geometric;
     }
     if (sag_square <= sag_limit * sag_limit) continue;
     const Result<std::uint32_t> appended = tessellate_append_point(state, surface_middle);
@@ -1997,10 +2025,19 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
     const Point3d surface = face_uv_eval(projection, centroid_uv);
     const Point3d centroid{(p0[0] + p1[0] + p2[0]) / 3.0, (p0[1] + p1[1] + p2[1]) / 3.0,
                            (p0[2] + p1[2] + p2[2]) / 3.0};
-    const double dx = surface[0] - centroid[0];
-    const double dy = surface[1] - centroid[1];
-    const double dz = surface[2] - centroid[2];
-    if (std::sqrt(dx * dx + dy * dy + dz * dz) > deflection) {
+    double sag_square = 0.0;
+    for (int k = 0; k < 3; ++k) {
+      const double d = surface[k] - centroid[k];
+      sag_square += d * d;
+    }
+    // A cone centroid can be far from the surface point above its parameter
+    // centroid while the triangle itself still follows the surface; check the
+    // geometric distance instead and keep the parameter metric elsewhere.
+    if (const std::optional<double> geometric =
+            tessellate_nearest_sag_square(projection, centroid, centroid_uv[0])) {
+      sag_square = *geometric;
+    }
+    if (std::sqrt(sag_square) > deflection) {
       return Error{Errc::unsupported,
                    "tessellate: trimmed face does not follow the surface", id.index(), 0u};
     }
