@@ -742,14 +742,15 @@ TEST_CASE("tessellate: split cone heights stay watertight") {
     REQUIRE_MESSAGE(split.has_value(), "split at z=" << height << ": " << message_of(split.error()));
     return split.value();
   };
-  const geom::Point3d no_apex{0.0, 0.0, 0.0};
+  const geom::Point3d apex{0.0, 0.0, 2.0};
+  const geom::Point3d translated_apex{1.0, 2.0, 5.0};
 
   const geom::SplitSolidResult half = split_at(cone, 0.5);
   check_cone_tessellation("split z=0.5 below", half.below, options, 140, 276, 1.209417839998,
-                          no_apex, 0);
+                          apex, 0);
   const geom::SplitSolidResult three_halves = split_at(cone, 1.5);
   check_cone_tessellation("split z=1.5 below", three_halves.below, options, 124, 244,
-                          2.058752793525, no_apex, 0);
+                          2.058752793525, apex, 0);
 
   // A cone translated off the origin: the axis and both cut rims move together,
   // so the counts and volume are those of the z=1 split and QA-22 difference.
@@ -759,7 +760,7 @@ TEST_CASE("tessellate: split cone heights stay watertight") {
           .value();
   const geom::SplitSolidResult translated_split = split_at(translated, 4.0);
   check_cone_tessellation("translated split z=4 below", translated_split.below, options, 134, 264,
-                          1.830287422577, no_apex, 0);
+                          1.830287422577, translated_apex, 0);
   check_cone_tessellation("translated split z=4 above", translated_split.above, options, 51, 98,
                           0.261110903259, geom::Point3d{1.0, 2.0, 5.0}, 1);
 
@@ -773,7 +774,7 @@ TEST_CASE("tessellate: split cone heights stay watertight") {
   REQUIRE_MESSAGE(translated_difference.has_value(),
                   message_of(translated_difference.error()));
   check_cone_tessellation("translated difference", translated_difference.value().brep, options,
-                          134, 264, 1.830287422577, no_apex, 0);
+                          134, 264, 1.830287422577, translated_apex, 0);
 }
 
 // An apex-bearing cone face must keep the canonical single-apex fan and must not
