@@ -84,11 +84,10 @@ and "chord midpoint".
   analytic builder first; a cone face goes to `tessellate_cone_face`
   (`tessellate.hpp:717`), which fans the base ring to one apex vertex. That path
   still handles the whole cone and every boolean fragment that retains the apex, and
-  the measured matrix shows exactly one apex vertex for those cases. If an apex ring
-  ever reached the trimmed path, it is not rectilinear and the existing gate rejects
-  it with `"tessellate: trimmed curved face boundary is not rectilinear"`
-  (`tessellate.hpp:1771-1774`). This slice does not rewrite the fan, the seam or the
-  uv ring; that work stays deferred to M3c-3c-4b3.
+  the measured matrix shows exactly one apex vertex for those cases. No supported
+boolean or split path produces an apex ring in the trimmed path; the rectilinear
+gate alone would not classify one as non-rectilinear. This slice does not rewrite
+the fan, the seam or the uv ring; that work stays deferred to M3c-3c-4b3.
 - **No new tolerance.** The metric is an exact double computation, not an epsilon.
   The deflection budget is still the only tolerance: `0.9 * deflection` for
   refinement and `deflection` for final acceptance.

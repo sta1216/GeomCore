@@ -257,6 +257,6 @@ QA-22 renames the existing three-operation case, so it adds no case or assertion
 - Trimmed cone frusta now tessellate (M3c-3c-4b3a, ADR-0036): the existing strip
   zipper joins the two independently sampled rims, and the sag metric now measures
   the surface at the same azimuth and axial height. Apex-bearing fragments still use
-  the whole-ring fan of `tessellate_cone_face`; an apex ring that reached the trimmed
-  path is rejected. General curved/curved cone booleans and oblique/axis-containing
+  the whole-ring fan of `tessellate_cone_face`; no supported path produces an apex
+ring in the trimmed path. General curved/curved cone booleans and oblique/axis-containing
   planes remain deferred.

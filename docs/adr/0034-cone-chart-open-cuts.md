@@ -128,8 +128,9 @@ exit 0; QA-21 adds 1 case / 32 assertions over the 1000 / 670,351 baseline.
   handle cone loops, including the collapsed apex row (ADR-0035).
 - **Apex fan volume is implemented; apex tessellation is still mismatched.**
   `curved_solid_volume` inserts the missing chart corners at the apex row, so a whole
-  cone and its plane-cut fragments measure exactly. `tessellate_cone_face` still fans
-  the whole base ring to one apex vertex, so trimmed-cone tessellation remains
-  deferred to M3c-3c-4b3.
+  cone and its plane-cut fragments measure exactly. `tessellate_cone_face` still fans the whole base ring to one apex vertex, so
+trimmed-cone tessellation was deferred at this milestone. (Superseded by
+M3c-3c-4b3a/ADR-0036: trimmed cone frusta now tessellate; apex-bearing fragments
+still use the fan.)
 - General twisted seam crossings, other nappes, NURBS operands and trimmed cone
   meshing remain outside this milestone.
