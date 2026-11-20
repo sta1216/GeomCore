@@ -137,12 +137,14 @@ git commit -m "fix(m3c3c4b3a): measure cone chord sag on the surface"
 ### Task 2: Extended cone tessellation matrix
 
 **Files:**
-- Test only: `tests/unit/brep_boolean_curved_test.cpp` (new `TEST_CASE`s after Task 1)
+- Modify: `include/geom/brep/tessellate.hpp` (rename the Task 1 helper and document its conservative metric)
+- Test: `tests/unit/brep_boolean_curved_test.cpp` (new `TEST_CASE`s after Task 1)
 
 **Interfaces:**
 - Consumes: Task 1 helper behavior; existing split/boolean builders and `mesh_volume`/edge-count helpers from Task 1.
+- Produces: `std::optional<double> tessellate_cone_radial_sag_square(...)` — the renamed helper; its value is the squared distance from the point to the cone point at the same azimuth and axial height, an upper bound on the true nearest-surface distance.
 
-- [ ] **Step 1: Write the tests**
+- [ ] **Step 1: Write the matrix and helper tests**
 
 Add `TEST_CASE("tessellate: split cone heights stay watertight")` and `TEST_CASE("tessellate: canonical cone faces keep their apex")` with:
 - split z=0.5 lower: 140/276, volume `1.209417839998`.
@@ -154,16 +156,22 @@ Add `TEST_CASE("tessellate: split cone heights stay watertight")` and `TEST_CASE
 - whole cone: 72/140, volume `2.091662475470`, one apex vertex.
 Every case also asserts boundary 0, nonmanifold 0, `triangle_face` size/id bounds, and bitwise repeat.
 
-- [ ] **Step 2: Prove the RED is real**
+Add `TEST_CASE("tessellate: the cone sag helper is cone-only")` that builds a plane projection and a cylinder projection (reuse projections from existing trimmed tests) and asserts `detail::tessellate_cone_radial_sag_square(projection, point, 0.0)` is `nullopt` for both.
+
+- [ ] **Step 2: Rename and document the helper**
+
+Rename `tessellate_nearest_sag_square` to `tessellate_cone_radial_sag_square` at its definition and both call sites. Add a comment: the projection keeps the point's azimuth and axial height, so the value is an upper bound on the true nearest-surface distance — conservative for both the split decision and the final check.
+
+- [ ] **Step 3: Prove the RED is real**
 
 Temporarily restore the pre-Task-1 header: `git checkout dcb5979 -- include/geom/brep/tessellate.hpp`, rebuild, run the new cases.
 Expected: the split/translated/union cases fail with the refinement-budget error; the apex/canonical cases pass. Restore with `git checkout HEAD -- include/geom/brep/tessellate.hpp` and rebuild.
 
-- [ ] **Step 3: Run the full suites**
+- [ ] **Step 4: Run the full suites**
 
 Debug and Release, zero warnings; record exact counts.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add tests/unit/brep_boolean_curved_test.cpp
