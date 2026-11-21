@@ -1801,6 +1801,31 @@ TEST_CASE("curved boolean: torus cut by a tilted plane is re-charted") {
       }
     }
     if (entry.op != geom::SolidBooleanOp::union_) half_volumes[index] = *first_volume;
+    // Reversed operand order: the slab goes first and the torus second. The
+    // re-chart pass must accept the oblique cut from either side. Reversed
+    // difference is skipped because the driver already refuses a difference
+    // whose curved fragments flip against their surface ("flipped curved
+    // fragments are not supported yet"), for axis-aligned tori as well; that
+    // limitation predates the re-chart and is out of scope here.
+    if (entry.op != geom::SolidBooleanOp::difference) {
+      const double reversed_expected = entry.expected;
+      geom::CurvedBooleanReport reversed_report;
+      const geom::Result<geom::CurvedBooleanResult> reversed = geom::boolean_solid_curved(
+          slab, only_solid(slab), torus.value(), only_solid(torus.value()), entry.op,
+          geom::CurvedBooleanOptions{tolerance}, &reversed_report);
+      REQUIRE_MESSAGE(reversed.has_value(), entry.name << " (reversed): "
+                                                        << message_of(reversed.error()));
+      const geom::Brep& reversed_brep = reversed.value().brep;
+      CHECK(geom::validate_topology(reversed_brep).ok());
+      const auto reversed_shells = reversed_brep.solid_shells(only_solid(reversed_brep));
+      REQUIRE(reversed_shells.size() == 1);
+      CHECK(geom::detail::heal_detail::shell_is_closed_by_uses(reversed_brep,
+                                                               reversed_shells.front()));
+      const double reversed_volume = volume_of(reversed_brep);
+      CHECK(std::abs(reversed_volume - reversed_expected) <=
+            5e-3 * std::abs(reversed_expected));
+      CHECK(reversed.value().report.face_pairs > 0);
+    }
   }
   CHECK(std::abs(half_volumes[0] + half_volumes[1] - kTorus) <= 1e-2);
 }
@@ -1899,6 +1924,71 @@ TEST_CASE("curved boolean: a tilted plane that misses the torus is rejected") {
   // farthest point reaches 1.2071), but the 8 x 8 face still overlaps the torus
   // bounds, so the pair reaches the cut-plane guard and no re-chart is possible.
   const geom::Brep slab = make_plane_slab(geom::Vec3d{1.0, 0.0, 1.0}, 1.5, tolerance);
+  REQUIRE(geom::validate_topology(slab).ok());
+  geom::CurvedBooleanReport report;
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), slab, only_solid(slab),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) ==
+        "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
+        "axis");
+  CHECK(report.face_pairs == 0);
+}
+
+TEST_CASE("curved boolean: a user-charted torus keeps the tilted-plane refusal") {
+  const double tolerance = 1e-9;
+  // `make_torus` exposes the chart origin, so a caller can hand the driver a
+  // torus whose seam is already moved. The guard must not infer permission from
+  // the chart: only the re-chart pass itself may accept an oblique plane.
+  const geom::Result<geom::Brep> torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance, 4.0);
+  REQUIRE(torus.has_value());
+  const geom::Brep tilted = make_tilted_slab(tolerance);
+  REQUIRE(geom::validate_topology(tilted).ok());
+  const geom::SolidBooleanOp ops[2] = {geom::SolidBooleanOp::intersection,
+                                       geom::SolidBooleanOp::difference};
+  for (const geom::SolidBooleanOp op : ops) {
+    geom::CurvedBooleanReport report;
+    const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+        torus.value(), only_solid(torus.value()), tilted, only_solid(tilted), op,
+        geom::CurvedBooleanOptions{tolerance}, &report);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == geom::Errc::unsupported);
+    CHECK(message_of(result.error()) ==
+          "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
+          "axis");
+    CHECK(report.face_pairs == 0);
+  }
+  // A near-axis plane on the same user chart must not be pulled in by the
+  // re-chart either.
+  const geom::Brep near_axis = make_plane_slab(geom::Vec3d{1.0, 0.0, 1e-10}, 0.0, tolerance);
+  REQUIRE(geom::validate_topology(near_axis).ok());
+  geom::CurvedBooleanReport near_report;
+  const geom::Result<geom::CurvedBooleanResult> near_result = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), near_axis, only_solid(near_axis),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &near_report);
+  REQUIRE_FALSE(near_result.has_value());
+  CHECK(near_result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(near_result.error()) ==
+        "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
+        "axis");
+  CHECK(near_report.face_pairs == 0);
+}
+
+TEST_CASE("curved boolean: a re-chart-origin torus with a near-axis plane is rejected") {
+  const double tolerance = 1e-9;
+  // The origin the engine's re-chart picks for the tilted-slab fixture is not a
+  // public permission either: a torus already sitting on that chart, cut by a
+  // near-axis plane, must keep the exact-family refusal. The helper returns
+  // nullopt for every nonzero origin, so no re-chart pass is opened.
+  const geom::Result<geom::Brep> torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance, 1.8620149558509749);
+  REQUIRE(torus.has_value());
+  const geom::Brep slab = make_plane_slab(geom::Vec3d{1.0, 0.0, 1e-10}, 0.0, tolerance);
   REQUIRE(geom::validate_topology(slab).ok());
   geom::CurvedBooleanReport report;
   const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
