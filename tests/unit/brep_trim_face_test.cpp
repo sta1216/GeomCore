@@ -2904,7 +2904,7 @@ TEST_CASE("trim_face: an island straddling the v seam is a twisted crossing") {
   CHECK(fragments.error().code == Errc::unsupported);
   CHECK(std::string_view(fragments.error().message) ==
         "split_face_curved: closed cut crosses the seam at different transverse "
-        "coordinates; twisted seam crossings are deferred to M3c-3c-4");
+        "coordinates; twisted seam crossings are deferred to M3c-3c-4b3c");
 }
 
 TEST_CASE("trim_face: a closed cut crossing the u seam at two different v "
@@ -2933,7 +2933,7 @@ TEST_CASE("trim_face: a closed cut crossing the u seam at two different v "
   CHECK(fragments.error().code == Errc::unsupported);
   CHECK(std::string_view(fragments.error().message) ==
         "split_face_curved: closed cut crosses the seam at different transverse "
-        "coordinates; twisted seam crossings are deferred to M3c-3c-4");
+        "coordinates; twisted seam crossings are deferred to M3c-3c-4b3c");
   CHECK(fragments.error().context_a == tf.index());
   CHECK(fragments.error().context_b == 0u);
 }
@@ -2986,7 +2986,7 @@ TEST_CASE("trim_face: an island crossing the seam is a twisted crossing") {
   CHECK(std::string_view(fragments.error().message) ==
         "split_face_curved: closed cut crosses the seam at different "
         "transverse coordinates; twisted seam crossings are deferred to "
-        "M3c-3c-4");
+        "M3c-3c-4b3c");
 }
 
 TEST_CASE("trim_face: overlapping islands do not partition the chart") {
@@ -3046,7 +3046,75 @@ TEST_CASE("trim_face: a ring closing on the seam copies is a twisted crossing") 
   CHECK(std::string_view(fragments.error().message) ==
         "split_face_curved: closed cut crosses the seam at different "
         "transverse coordinates; twisted seam crossings are deferred to "
-        "M3c-3c-4");
+        "M3c-3c-4b3c");
+}
+
+TEST_CASE("trim_face: the periodic free midpoint picks the widest free band") {
+  constexpr double kPeriod = 2.0 * kPi;
+  constexpr double kMargin = 1e-3;
+  // The twisted torus fixture: two cut bands cover the circle and leave a wider
+  // free band at [0.90369, 2.82082] and a narrower one at [3.46237, 5.37949].
+  const std::array<std::array<double, 2>, 2> covered = {
+      std::array<double, 2>{2.82082, 3.46237},
+      std::array<double, 2>{5.37949, 0.90369}};
+  const std::optional<double> midpoint =
+      detail::trim_face_periodic_free_midpoint(covered, kPeriod, kMargin);
+  REQUIRE(midpoint.has_value());
+  CHECK(*midpoint == doctest::Approx(1.862255).epsilon(1e-6));
+  CHECK(*midpoint >= 0.0);
+  CHECK(*midpoint < kPeriod);
+  // The chosen point keeps at least the margin from every band edge, so it is
+  // strictly inside the free band and never on a cut.
+  const auto circular_distance = [kPeriod](double a, double b) {
+    double distance = std::fabs(a - b);
+    if (distance > 0.5 * kPeriod) distance = kPeriod - distance;
+    return distance;
+  };
+  for (const std::array<double, 2>& interval : covered) {
+    CHECK(circular_distance(*midpoint, interval[0]) >= kMargin);
+    CHECK(circular_distance(*midpoint, interval[1]) >= kMargin);
+  }
+}
+
+TEST_CASE("trim_face: a free-band tie picks the lower midpoint") {
+  // Two free bands of equal length 2: (1, 3) and (6, 8). Their midpoints are 2
+  // and 7, so the tie resolves to the lower midpoint.
+  const std::array<std::array<double, 2>, 2> covered = {
+      std::array<double, 2>{0.0, 1.0}, std::array<double, 2>{3.0, 6.0}};
+  const std::optional<double> midpoint =
+      detail::trim_face_periodic_free_midpoint(covered, 8.0, 1e-3);
+  REQUIRE(midpoint.has_value());
+  CHECK(*midpoint == doctest::Approx(2.0));
+}
+
+TEST_CASE("trim_face: full periodic coverage leaves no free midpoint") {
+  const double period = 2.0 * kPi;
+  const std::array<std::array<double, 2>, 1> covered = {
+      std::array<double, 2>{0.0, period}};
+  CHECK_FALSE(
+      detail::trim_face_periodic_free_midpoint(covered, period, 1e-3)
+          .has_value());
+}
+
+TEST_CASE("trim_face: a free gap narrower than twice the margin is refused") {
+  const double period = 2.0 * kPi;
+  // One cut covers all but 1e-4 of the circle: the only free band is narrower
+  // than 2*margin = 2e-3, so no point is safely away from the cut.
+  const std::array<std::array<double, 2>, 1> covered = {
+      std::array<double, 2>{0.0, period - 1e-4}};
+  CHECK_FALSE(
+      detail::trim_face_periodic_free_midpoint(covered, period, 1e-3)
+          .has_value());
+}
+
+TEST_CASE("trim_face: more covered intervals than the maximum are refused") {
+  const std::array<std::array<double, 2>, 5> covered = {
+      std::array<double, 2>{0.0, 0.1}, std::array<double, 2>{0.2, 0.3},
+      std::array<double, 2>{0.4, 0.5}, std::array<double, 2>{0.6, 0.7},
+      std::array<double, 2>{0.8, 0.9}};
+  CHECK_FALSE(detail::trim_face_periodic_free_midpoint(covered, 2.0 * kPi, 1e-3,
+                                                       4)
+                  .has_value());
 }
 
 TEST_CASE("trim_face: stored holes are refused") {

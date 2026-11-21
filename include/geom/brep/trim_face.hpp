@@ -1276,6 +1276,78 @@ inline bool trim_face_closed_cut_twisted(const std::vector<Point2d>& points,
   return false;
 }
 
+// Chooses the midpoint of the widest free band on a periodic axis. `covered`
+// lists the intervals already occupied by cuts as {lo, hi}; an interval with
+// hi < lo wraps through the period. Overlaps are merged, the midpoint of the
+// widest remaining band is normalized into [0, period), and an exact tie goes to
+// the lower midpoint. std::nullopt means the axis is fully covered, the widest
+// free band is narrower than 2*`margin` (so no point keeps the requested
+// clearance from the cuts), the arguments are not finite, or more than
+// `max_intervals` intervals were supplied.
+inline std::optional<double> trim_face_periodic_free_midpoint(
+    std::span<const std::array<double, 2>> covered, double period,
+    double margin, std::size_t max_intervals = 4) {
+  if (!std::isfinite(period) || !(period > 0.0) || !std::isfinite(margin) ||
+      !(margin >= 0.0)) {
+    return std::nullopt;
+  }
+  if (covered.size() > max_intervals) return std::nullopt;
+  std::vector<std::array<double, 2>> bands;
+  bands.reserve(2 * covered.size());
+  for (const std::array<double, 2>& interval : covered) {
+    if (!std::isfinite(interval[0]) || !std::isfinite(interval[1])) {
+      return std::nullopt;
+    }
+    double width = interval[1] - interval[0];
+    if (width >= period) return std::nullopt;  // nothing is left free
+    if (width == 0.0) continue;               // a point blocks no band
+    if (width < 0.0) width += period;         // wrapped interval
+    double lo = interval[0] - period * std::floor(interval[0] / period);
+    if (lo < 0.0 || lo >= period) lo = 0.0;  // guard against rounding
+    const double hi = lo + width;
+    if (hi <= period) {
+      bands.push_back(std::array<double, 2>{lo, hi});
+    } else {
+      bands.push_back(std::array<double, 2>{lo, period});
+      bands.push_back(std::array<double, 2>{0.0, hi - period});
+    }
+  }
+  std::sort(bands.begin(), bands.end());
+  std::vector<std::array<double, 2>> merged;
+  merged.reserve(bands.size());
+  for (const std::array<double, 2>& band : bands) {
+    if (!merged.empty() && band[0] <= merged.back()[1]) {
+      merged.back()[1] = std::max(merged.back()[1], band[1]);
+    } else {
+      merged.push_back(band);
+    }
+  }
+  double best_length = -1.0;
+  double best_midpoint = 0.0;
+  const auto consider = [&](double gap_start, double gap_end) {
+    const double length = gap_end - gap_start;
+    if (!(length > 0.0)) return;
+    if (length > best_length) {
+      best_length = length;
+      best_midpoint = 0.5 * (gap_start + gap_end);
+    }
+  };
+  if (merged.empty()) {
+    consider(0.0, period);  // the whole circle is free
+  } else {
+    for (std::size_t i = 0; i < merged.size(); ++i) {
+      const double gap_start = merged[i][1];
+      const double gap_end =
+          i + 1 < merged.size() ? merged[i + 1][0] : merged[0][0] + period;
+      consider(gap_start, gap_end);
+    }
+  }
+  if (best_length < 2.0 * margin) return std::nullopt;
+  double midpoint = best_midpoint - period * std::floor(best_midpoint / period);
+  if (midpoint < 0.0 || midpoint >= period) midpoint = 0.0;
+  return midpoint;
+}
+
 // Splits a synthetic parameter rectangle along cut chains. The rectangle sides
 // are synthetic: a seam copy is dropped (the ring closes across the seam), a
 // collapsed side becomes the single pole point, and a real boundary side stays
@@ -1318,7 +1390,7 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
       return Error{Errc::unsupported,
                    "split_face_curved: closed cut crosses the seam at "
                    "different transverse coordinates; twisted seam crossings "
-                   "are deferred to M3c-3c-4",
+                   "are deferred to M3c-3c-4b3c",
                    face.index(), static_cast<std::uint32_t>(c)};
     }
   }
