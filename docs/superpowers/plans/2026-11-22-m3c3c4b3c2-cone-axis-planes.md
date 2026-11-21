@@ -27,6 +27,7 @@
 3. **过轴平面同时包含一条缝射线**（如 `y >= 0`）：环自触，应报 `"boolean_solid_curved: result touches itself along an edge"`。Task 3 用例钉住。
 4. **旋转/平移的锥**：方位角与 apex 必须用 `Cone3::axis/x_axis/y_axis`，不能用世界 z；Task 3 用 +x 轴与 `(0,5,0)` 平移各跑一次差集。
 5. **apex 参数副本 vs 真正的缝重合**：前者必须焊接后成功；后者（平移锥）仍拒绝。Task 3 保留既有拒绝用例并新增 apex 用例。
+6. **球面极点环不得被改动**：Task 1 的 `collapsed_row_is_linear_apex` 门控是硬约束；定向 `*sphere*`/`*trim_face*` 必须原样通过。
 
 ---
 
@@ -48,10 +49,11 @@
 
 **Files:**
 - Modify: `include/geom/brep/trim_face.hpp:1774-1785`
+- Modify: `include/geom/brep/trim_domain.hpp`（`TrimFaceDomain` 增加 `bool collapsed_row_is_linear_apex = false;`；`trim_face_domain` 的 Cone3 分支置 true）
 - Test: `tests/unit/brep_trim_face_test.cpp:776-824`（cap）、`:826-935`（meridian）、`:1064`（QA-21）
 
 **Interfaces:**
-- Consumes: `detail::trim_face_seam_only_near_side(double value, double side) -> bool`（`trim_face.hpp:767-769`，1e-12 相对）。
+- Consumes: `detail::trim_face_seam_only_near_side(double value, double side) -> bool`（`trim_face.hpp:767-769`，1e-12 相对）；`TrimFaceDomain::collapsed_row_is_linear_apex`（只有锥面 chart 为 true）。
 - Produces: pole-touching run 的环在起点位于底边（`v == v_lo`）时，末尾依次出现 `(u_back, v_apex)`、`(u_front, v_apex)`、再重复首点；环的所有显式边轴对齐，uv 面积恰好是扇形面积。
 
 - [ ] **Step 1: 更新 3 个失效 pin 并新增扇形用例**
@@ -110,7 +112,17 @@ Run: `.\build\tests\Debug\geom_tests.exe -tc=*cone*`
 
 Expected: 5 个用例失败——上面 3 个被改的 pin、新扇形用例，以及 cap 用例；失败值为 `0.7`/`π/2` 与 `1.4`/`π` 的差。
 
-- [ ] **Step 3: 在 `touches_pole` 分支补 front 的 apex 副本**
+- [ ] **Step 3: 给 `TrimFaceDomain` 加锥标志，并在 `touches_pole` 分支补 front 的 apex 副本**
+
+先在 `include/geom/brep/trim_domain.hpp` 的结构体末尾加：
+
+```cpp
+  // A cone's top row is a single 3D apex: its uv row may be closed linearly,
+  // unlike a sphere pole row whose ring is a closed curve at constant v.
+  bool collapsed_row_is_linear_apex = false;
+```
+
+在 `trim_face_domain` 的 `Cone3` 分支构造 `TrimFaceDomain` 时置 `domain.collapsed_row_is_linear_apex = true;`（Sphere3/Torus3/Plane3/Cylinder3 保持 false）。这个标志是必需的：无门版本会重写球面极点环并破坏 5 个既有测试（环 66→67、`poles 1→2`、QA-15 `a face outline could not be triangulated`）。
 
 `include/geom/brep/trim_face.hpp` 的
 
@@ -122,7 +134,8 @@ Expected: 5 个用例失败——上面 3 个被改的 pin、新扇形用例，�
 之间插入：
 
 ```cpp
-        if (!trim_face_seam_only_near_side(points.front()[1], pole_v)) {
+        if (domain.collapsed_row_is_linear_apex &&
+            !trim_face_seam_only_near_side(points.front()[1], pole_v)) {
           // The run started on the opposite side row, so the ring must still
           // travel the whole collapsed row to the front's meridian: the row is
           // one 3D point, and its copy at the front's u carries that travel.
@@ -135,13 +148,14 @@ Expected: 5 个用例失败——上面 3 个被改的 pin、新扇形用例，�
 
 - [ ] **Step 4: 运行确认 GREEN（定向 + 两配置全量）**
 
-Run: `.\build\tests\Debug\geom_tests.exe -tc=*cone*` → 46 用例全过。
-Run: Debug 与 Release 全量 → 记录实际用例/断言数（基线 1031/674,604）。
+Run: `.\build\tests\Debug\geom_tests.exe -tc=*cone*` → 46 用例全过（探针实测 4,955 断言）。
+Run: `-tc=*sphere*` 与 `-tc=*trim_face*` → 必须原样全过（标志门控的回归证据）。
+Run: Debug 与 Release 全量 → 记录实际用例/断言数（基线 1031/674,604；探针参考 1031/674,618）。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add include/geom/brep/trim_face.hpp tests/unit/brep_trim_face_test.cpp
+git add include/geom/brep/trim_face.hpp include/geom/brep/trim_domain.hpp         tests/unit/brep_trim_face_test.cpp
 git commit -m "fix(trim_face): close the apex ring along the collapsed row"
 ```
 
