@@ -561,31 +561,35 @@ inline Result<Brep> make_sphere(Point3d center, double radius, double tol) {
 }
 
 // Torus with major radius R and minor radius r around the unit `axis` through
-// `center`, cut along the u = 0 and v = 0 seam circles. Both seams meet at the
-// single vertex p = center + (R + r)*x: the u seam is the outer equator
-// CircleCurve3{center, x, y, R + r} (parameter around the axis), the v seam is
-// the tube circle CircleCurve3{center + R*x, x, axis, r}. Both are closed edges
-// owning p, and the single Torus3 face's loop uses each once in each direction:
+// `center`, cut along the u = 0 and v = v_origin seam circles. Both seams meet
+// at the single vertex p = center + (R + r*cos(v_origin))*x + r*sin(v_origin)*axis:
+// the u seam is the outer circle CircleCurve3{center + r*sin(v_origin)*axis, x, y,
+// R + r*cos(v_origin)} (parameter around the axis), the v seam is the tube circle
+// CircleCurve3{center + R*x, x, axis, r} with parameter interval
+// [v_origin, v_origin + 2*pi]. Both are closed edges owning p, and the single
+// Torus3 face's loop uses each once in each direction:
 // u(false) -> v(false) -> u(true) -> v(true). V = 1, E = 2, F = 1, L = 1
 // (chi = 0) and the shell is closed.
 //
 // Frame: x is the unit perpendicular to axis chosen by the candidate rule used
 // by the other primitives, y = cross(axis, x), so (x, y, axis) is right handed
-// and Torus3::eval(u, v) reproduces the two seam circles at v = 0 and u = 0.
+// and Torus3::eval(u, v) reproduces the two seam circles at chart v = 0 and u = 0.
+// A zero v_origin keeps the canonical seam circles and their parameters exactly.
 //
 // Validation:
-//   - non-finite center, axis or radius  -> Errc::non_finite
+//   - non-finite center, axis, radius or v_origin -> Errc::non_finite
 //   - non-finite or negative tolerance   -> Errc::tolerance_violation
 //   - axis not unit length               -> Errc::degenerate
 //   - R <= 0, r <= 0 or r >= R           -> Errc::degenerate
-//   - a degenerate frame, or R + r / a seam circle centre that is not
-//     representable                      -> Errc::degenerate
+//   - a degenerate frame, or R + r*cos(v_origin) / a seam circle centre that is
+//     not representable                  -> Errc::degenerate
 // Any error from a SolidEditor add_* call is propagated unchanged; commit()
 // performs the final validation.
 inline Result<Brep> make_torus(Point3d center, Vec3d axis, double major_radius,
-                               double minor_radius, double tol) {
+                               double minor_radius, double tol, double v_origin = 0.0) {
   if (!detail::primitive_point_finite(center) || !detail::primitive_vec_finite(axis) ||
-      !std::isfinite(major_radius) || !std::isfinite(minor_radius)) {
+      !std::isfinite(major_radius) || !std::isfinite(minor_radius) ||
+      !std::isfinite(v_origin)) {
     return Error{Errc::non_finite, "make_torus: input is not finite", 0u, 0u};
   }
   if (!std::isfinite(tol) || tol < 0.0) {
@@ -621,14 +625,23 @@ inline Result<Brep> make_torus(Point3d center, Vec3d axis, double major_radius,
                      perpendicular[2] / perpendicular_length};
   const Vec3d y_axis = cross(axis, x_axis);
 
-  const double outer_radius = major_radius + minor_radius;
-  if (!std::isfinite(outer_radius)) {
+  const double cos_origin = std::cos(v_origin);
+  const double sin_origin = std::sin(v_origin);
+  const double seam_radius = major_radius + minor_radius * cos_origin;
+  if (!std::isfinite(seam_radius)) {
     return Error{Errc::degenerate, "make_torus: seam circle radius is not representable", 0u,
                  0u};
   }
-  const Point3d seam_point{center[0] + outer_radius * x_axis[0],
-                           center[1] + outer_radius * x_axis[1],
-                           center[2] + outer_radius * x_axis[2]};
+  const Point3d seam_center{center[0] + axis[0] * (minor_radius * sin_origin),
+                            center[1] + axis[1] * (minor_radius * sin_origin),
+                            center[2] + axis[2] * (minor_radius * sin_origin)};
+  if (!detail::primitive_point_finite(seam_center)) {
+    return Error{Errc::degenerate, "make_torus: seam circle centre is not representable", 0u,
+                 0u};
+  }
+  const Point3d seam_point{seam_center[0] + seam_radius * x_axis[0],
+                           seam_center[1] + seam_radius * x_axis[1],
+                           seam_center[2] + seam_radius * x_axis[2]};
   if (!detail::primitive_point_finite(seam_point)) {
     return Error{Errc::degenerate, "make_torus: seam point is not representable", 0u, 0u};
   }
@@ -647,7 +660,7 @@ inline Result<Brep> make_torus(Point3d center, Vec3d axis, double major_radius,
   if (!seam_vertex.has_value()) return seam_vertex.error();
 
   const std::uint32_t u_curve =
-      editor.add_curve(CircleCurve3{center, x_axis, y_axis, outer_radius});
+      editor.add_curve(CircleCurve3{seam_center, x_axis, y_axis, seam_radius});
   const Result<EdgeId> u_edge = editor.add_edge(
       seam_vertex.value(), seam_vertex.value(), u_curve, 0.0, kTwoPi, tol);
   if (!u_edge.has_value()) return u_edge.error();
@@ -655,11 +668,11 @@ inline Result<Brep> make_torus(Point3d center, Vec3d axis, double major_radius,
   const std::uint32_t v_curve =
       editor.add_curve(CircleCurve3{tube_center, x_axis, axis, minor_radius});
   const Result<EdgeId> v_edge = editor.add_edge(
-      seam_vertex.value(), seam_vertex.value(), v_curve, 0.0, kTwoPi, tol);
+      seam_vertex.value(), seam_vertex.value(), v_curve, v_origin, v_origin + kTwoPi, tol);
   if (!v_edge.has_value()) return v_edge.error();
 
-  const std::uint32_t torus_surface =
-      editor.add_surface(Torus3{center, axis, x_axis, major_radius, minor_radius});
+  const std::uint32_t torus_surface = editor.add_surface(
+      Torus3{center, axis, x_axis, major_radius, minor_radius, v_origin});
   const Result<FaceId> face = editor.add_face(torus_surface, false, tol);
   if (!face.has_value()) return face.error();
   const std::array<CoedgeSpec, 4> loop{

@@ -221,6 +221,98 @@ TEST_CASE("torus derivatives, evaluation and normals") {
   CHECK(n_mid[2] == doctest::Approx(0.0).epsilon(1e-12));
 }
 
+// A zero v-origin must be indistinguishable from the surface without the field:
+// the closed forms are written out here exactly as the old implementation
+// evaluated them, so an accidental extra rounding step in eval/du/dv/normal
+// fails a coordinate comparison.
+TEST_CASE("torus with a zero v-origin is the written closed form, coordinate for coordinate") {
+  constexpr double kPi = 3.14159265358979323846;
+  const geom::Point3d center{0.5, -1.5, 2.0};
+  const geom::Torus3 t{center, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, 2.0, 0.5};
+  CHECK(t.v_origin == 0.0);
+  CHECK(geom::Torus3{}.v_origin == 0.0);
+  CHECK(geom::Torus3{}.is_valid());
+
+  for (const double u : {0.0, 0.3, kPi / 2.0, 2.1, -1.7}) {
+    for (const double v : {0.0, 0.4, kPi / 2.0, -0.9, 2.6}) {
+      const double c = std::cos(v);
+      const double s = std::sin(v);
+      const double w = 2.0 + 0.5 * c;
+      // axis = +y, x_axis = +x, so y_axis = cross(axis, x_axis) = -z and
+      // radial(u) = cos(u) * x_axis - sin(u) * z.
+      const geom::Point3d expected{center[0] + std::cos(u) * w, center[1] + 0.5 * s,
+                                   center[2] - std::sin(u) * w};
+      const geom::Point3d actual = t.eval(u, v);
+      CHECK(actual[0] == expected[0]);
+      CHECK(actual[1] == expected[1]);
+      CHECK(actual[2] == expected[2]);
+
+      const geom::Vec3d expected_du{-std::sin(u) * w, 0.0, -std::cos(u) * w};
+      const geom::Vec3d actual_du = t.du(u, v);
+      CHECK(actual_du[0] == expected_du[0]);
+      CHECK(actual_du[1] == expected_du[1]);
+      CHECK(actual_du[2] == expected_du[2]);
+
+      const geom::Vec3d expected_dv{-std::cos(u) * (0.5 * s), 0.5 * c, std::sin(u) * (0.5 * s)};
+      const geom::Vec3d actual_dv = t.dv(u, v);
+      CHECK(actual_dv[0] == expected_dv[0]);
+      CHECK(actual_dv[1] == expected_dv[1]);
+      CHECK(actual_dv[2] == expected_dv[2]);
+
+      const geom::Vec3d expected_normal{std::cos(u) * c, s, -std::sin(u) * c};
+      const geom::Vec3d actual_normal = t.normal(u, v);
+      CHECK(actual_normal[0] == expected_normal[0]);
+      CHECK(actual_normal[1] == expected_normal[1]);
+      CHECK(actual_normal[2] == expected_normal[2]);
+    }
+  }
+}
+
+// eval(u, v) on the shifted chart is the base surface at v + v_origin, with the
+// same identity for the partials and the normal. The comparisons are exact:
+// shifting the parameter by an exact addition must not add a rounding step.
+TEST_CASE("torus v-origin shifts the parameter chart") {
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr double kOrigin = 0.7;
+  const geom::Torus3 base{{0.5, -1.5, 2.0}, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, 2.0, 0.5};
+  geom::Torus3 shifted = base;
+  shifted.v_origin = kOrigin;
+  CHECK(shifted.is_valid());
+
+  const double inf = std::numeric_limits<double>::infinity();
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  CHECK_FALSE((geom::Torus3{base.center, base.axis, base.x_axis, 2.0, 0.5, inf}.is_valid()));
+  CHECK_FALSE((geom::Torus3{base.center, base.axis, base.x_axis, 2.0, 0.5, nan}.is_valid()));
+
+  for (const double u : {0.0, 0.35, 1.2, kPi, 4.9, -2.2}) {
+    for (const double v : {0.0, 0.1, kPi / 2.0, 3.0, 5.5, -1.4}) {
+      const geom::Point3d moved = shifted.eval(u, v);
+      const geom::Point3d reference = base.eval(u, v + kOrigin);
+      CHECK(moved[0] == reference[0]);
+      CHECK(moved[1] == reference[1]);
+      CHECK(moved[2] == reference[2]);
+
+      const geom::Vec3d moved_du = shifted.du(u, v);
+      const geom::Vec3d reference_du = base.du(u, v + kOrigin);
+      CHECK(moved_du[0] == reference_du[0]);
+      CHECK(moved_du[1] == reference_du[1]);
+      CHECK(moved_du[2] == reference_du[2]);
+
+      const geom::Vec3d moved_dv = shifted.dv(u, v);
+      const geom::Vec3d reference_dv = base.dv(u, v + kOrigin);
+      CHECK(moved_dv[0] == reference_dv[0]);
+      CHECK(moved_dv[1] == reference_dv[1]);
+      CHECK(moved_dv[2] == reference_dv[2]);
+
+      const geom::Vec3d moved_normal = shifted.normal(u, v);
+      const geom::Vec3d reference_normal = base.normal(u, v + kOrigin);
+      CHECK(moved_normal[0] == reference_normal[0]);
+      CHECK(moved_normal[1] == reference_normal[1]);
+      CHECK(moved_normal[2] == reference_normal[2]);
+    }
+  }
+}
+
 TEST_CASE("cone normal is unit and perpendicular to the slant") {
   const geom::Cone3 cone{{0, 0, 0}, {0, 0, 1}, {1, 0, 0}, 1.0, 0.25};
   CHECK(cone.is_valid());

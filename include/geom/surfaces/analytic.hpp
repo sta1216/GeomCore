@@ -212,38 +212,47 @@ struct Torus3 {
   Vec3d x_axis{1.0, 0.0, 0.0};
   double major_radius = 2.0;
   double minor_radius = 0.5;
+  // Chart v = 0 is the surface curve v = v_origin. The zero default leaves the
+  // canonical chart untouched.
+  double v_origin = 0.0;
 
   bool is_valid() const noexcept {
     return detail::analytic_surface_point_finite(center) &&
            detail::analytic_surface_frame_valid(axis, x_axis) &&
            std::isfinite(major_radius) && std::isfinite(minor_radius) && minor_radius > 0.0 &&
-           minor_radius < major_radius;
+           minor_radius < major_radius && std::isfinite(v_origin);
   }
 
+  // The surface parameter is chart v + v_origin. For v_origin == 0 the chart is
+  // passed through unchanged, so the canonical entity stays bit-identical.
   Point3d eval(double u, double v) const noexcept {
-    const double c = std::cos(v);
-    const double s = std::sin(v);
+    const double vv = v_origin == 0.0 ? v : v + v_origin;
+    const double c = std::cos(vv);
+    const double s = std::sin(vv);
     const Vec3d radial = detail::analytic_surface_radial(u, axis, x_axis);
     return center + radial * (major_radius + minor_radius * c) + axis * (minor_radius * s);
   }
 
   Vec3d du(double u, double v) const noexcept {
+    const double vv = v_origin == 0.0 ? v : v + v_origin;
     return detail::analytic_surface_tangent(u, axis, x_axis) *
-           (major_radius + minor_radius * std::cos(v));
+           (major_radius + minor_radius * std::cos(vv));
   }
 
   Vec3d dv(double u, double v) const noexcept {
-    const double c = std::cos(v);
-    const double s = std::sin(v);
+    const double vv = v_origin == 0.0 ? v : v + v_origin;
+    const double c = std::cos(vv);
+    const double s = std::sin(vv);
     return axis * (minor_radius * c) -
            detail::analytic_surface_radial(u, axis, x_axis) * (minor_radius * s);
   }
 
-  // cos(v)*radial + sin(v)*axis; unit for a valid entity and never degenerate
-  // because R + r*cos(v) > 0 when 0 < r < R.
+  // cos(vv)*radial + sin(vv)*axis; unit for a valid entity and never degenerate
+  // because R + r*cos(vv) > 0 when 0 < r < R.
   Vec3d normal(double u, double v) const noexcept {
-    const double c = std::cos(v);
-    const double s = std::sin(v);
+    const double vv = v_origin == 0.0 ? v : v + v_origin;
+    const double c = std::cos(vv);
+    const double s = std::sin(vv);
     return detail::analytic_surface_radial(u, axis, x_axis) * c + axis * s;
   }
 };

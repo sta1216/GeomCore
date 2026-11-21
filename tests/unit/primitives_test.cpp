@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <numbers>
 #include <string>
@@ -8,7 +9,10 @@
 #include <vector>
 
 #include <geom/brep/detail/curved_volume.hpp>
+#include <geom/brep/face_uv.hpp>
 #include <geom/brep/primitives.hpp>
+#include <geom/brep/tessellate.hpp>
+#include <geom/brep/validate.hpp>
 #include <geom/core/error.hpp>
 #include <geom/core/result.hpp>
 #include <geom/primitives/box.hpp>
@@ -459,4 +463,211 @@ TEST_CASE("make_sphere rejects an invalid chart") {
   // The canonical overload delegates, so it must reject with the same contract.
   check_sphere_error(geom::make_sphere(geom::Point3d{inf, 0.0, 0.0}, 1.0, 1e-9),
                      geom::Errc::non_finite, "make_sphere: input is not finite");
+}
+
+namespace {
+
+double point_distance(const geom::Point3d& a, const geom::Point3d& b) {
+  return std::hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+// FNV-1a over the mesh arrays, the same hash the tessellation stability test
+// pins for the canonical primitive builders.
+std::uint64_t hash_mesh(const geom::TriMesh& mesh) {
+  std::uint64_t hash = 1469598103934665603ull;
+  const auto mix = [&](const void* data, std::size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+      hash ^= bytes[i];
+      hash *= 1099511628211ull;
+    }
+  };
+  for (const geom::Point3d& point : mesh.positions) {
+    const double values[3] = {point[0], point[1], point[2]};
+    mix(values, sizeof(values));
+  }
+  for (const auto& triangle : mesh.triangles) mix(triangle.data(), sizeof(triangle));
+  for (const std::uint32_t face : mesh.triangle_face) mix(&face, sizeof(face));
+  return hash;
+}
+
+}  // namespace
+
+// A shifted chart moves the u seam onto the surface curve with old v = v_origin,
+// so the face's chart seam never crosses a cut that avoids that circle. The u
+// seam circle must lie on the shifted surface and the v seam must still be the
+// tube circle at u = 0.
+TEST_CASE("make_torus with a v-origin re-seats the u seam on the shifted chart seam") {
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr double kTwoPi = 2.0 * kPi;
+  constexpr double kOrigin = 0.7;
+  constexpr double kTolerance = 1e-9;
+  constexpr double kMajor = 1.0;
+  constexpr double kMinor = 0.5;
+  const geom::Point3d center{0.25, -0.5, 1.5};
+  const geom::Vec3d axis{0.0, 0.0, 1.0};
+
+  const auto result = geom::make_torus(center, axis, kMajor, kMinor, kTolerance, kOrigin);
+  REQUIRE(result.has_value());
+  const geom::Brep& brep = result.value();
+  CHECK(brep.vertex_count() == 1);
+  CHECK(brep.edge_count() == 2);
+  CHECK(brep.face_count() == 1);
+  CHECK(brep.coedge_count() == 4);
+  CHECK(geom::validate_topology(brep).ok());
+
+  const geom::Face& face = brep.face(brep.face_ids().front());
+  const geom::Torus3* torus = std::get_if<geom::Torus3>(&brep.geometry().surfaces[face.surface]);
+  REQUIRE(torus != nullptr);
+  CHECK(torus->v_origin == kOrigin);
+  CHECK(torus->is_valid());
+
+  const double cos_origin = std::cos(kOrigin);
+  const double sin_origin = std::sin(kOrigin);
+  const double seam_radius = kMajor + kMinor * cos_origin;
+  const geom::Point3d seam_center{center[0], center[1], center[2] + kMinor * sin_origin};
+
+  // The single vertex is the chart origin: old (u, v) = (0, v_origin).
+  const geom::VertexId vertex_id = brep.vertex_ids().front();
+  const geom::Point3d vertex = brep.vertex(vertex_id).point;
+  CHECK(vertex[0] == doctest::Approx(center[0] + seam_radius).epsilon(1e-12));
+  CHECK(vertex[1] == doctest::Approx(center[1]).epsilon(1e-12));
+  CHECK(vertex[2] == doctest::Approx(seam_center[2]).epsilon(1e-12));
+
+  // Every vertex is on the shifted surface: project it, evaluate back.
+  const auto uv = geom::detail::face_uv_project_torus(*torus, vertex);
+  REQUIRE(uv.has_value());
+  CHECK(point_distance(torus->eval(uv.value()[0], uv.value()[1]), vertex) <= 1e-12);
+
+  geom::EdgeId u_edge{};
+  geom::EdgeId v_edge{};
+  for (const geom::EdgeId id : brep.edge_ids()) {
+    const auto& circle = std::get<geom::CircleCurve3>(brep.geometry().curves[brep.edge(id).curve]);
+    if (std::fabs(circle.radius - kMinor) < 1e-12) {
+      v_edge = id;
+    } else {
+      u_edge = id;
+    }
+  }
+  REQUIRE_FALSE(u_edge.is_null());
+  REQUIRE_FALSE(v_edge.is_null());
+
+  const geom::Edge& u = brep.edge(u_edge);
+  const auto& u_circle = std::get<geom::CircleCurve3>(brep.geometry().curves[u.curve]);
+  CHECK(u.v0 == vertex_id);
+  CHECK(u.v1 == vertex_id);
+  CHECK(u.t0 == 0.0);
+  CHECK(u.t1 == doctest::Approx(kTwoPi).epsilon(1e-12));
+  CHECK(u_circle.radius == doctest::Approx(seam_radius).epsilon(1e-12));
+  for (int i = 0; i < 3; ++i) {
+    CHECK(u_circle.center[i] == doctest::Approx(seam_center[i]).epsilon(1e-12));
+    CHECK(u_circle.x_axis[i] == doctest::Approx(i == 0 ? 1.0 : 0.0).epsilon(1e-12));
+    CHECK(u_circle.y_axis[i] == doctest::Approx(i == 1 ? 1.0 : 0.0).epsilon(1e-12));
+  }
+  for (const double t : {0.0, 0.4, kPi / 2.0, 2.5, 4.0}) {
+    const geom::Point3d on_circle = u_circle.eval(t);
+    CHECK(point_distance(on_circle, torus->eval(t, 0.0)) <= 1e-12);
+    const auto seam_uv = geom::detail::face_uv_project_torus(*torus, on_circle);
+    REQUIRE(seam_uv.has_value());
+    // The u seam is the chart curve v = 0.
+    CHECK(std::fabs(seam_uv.value()[1]) <= 1e-12);
+  }
+
+  const geom::Edge& v = brep.edge(v_edge);
+  const auto& v_circle = std::get<geom::CircleCurve3>(brep.geometry().curves[v.curve]);
+  CHECK(v.v0 == vertex_id);
+  CHECK(v.v1 == vertex_id);
+  // The tube circle stays at u = 0; the interval starts at the origin angle so
+  // that t0 maps to the shared vertex.
+  CHECK(v.t0 == kOrigin);
+  CHECK(v.t1 == doctest::Approx(kOrigin + kTwoPi).epsilon(1e-12));
+  CHECK(v_circle.radius == kMinor);
+  const geom::Point3d tube_center{center[0] + kMajor, center[1], center[2]};
+  for (int i = 0; i < 3; ++i) {
+    CHECK(v_circle.center[i] == doctest::Approx(tube_center[i]).epsilon(1e-12));
+    CHECK(v_circle.x_axis[i] == doctest::Approx(i == 0 ? 1.0 : 0.0).epsilon(1e-12));
+    CHECK(v_circle.y_axis[i] == doctest::Approx(axis[i]).epsilon(1e-12));
+  }
+  CHECK(point_distance(u_circle.eval(u.t0), v_circle.eval(v.t0)) <= 1e-12);
+  for (const double w : {0.0, 0.3, 1.1, 1.9}) {
+    const geom::Point3d on_circle = v_circle.eval(v.t0 + w);
+    CHECK(point_distance(on_circle, torus->eval(0.0, w)) <= 1e-12);
+    const auto tube_uv = geom::detail::face_uv_project_torus(*torus, on_circle);
+    REQUIRE(tube_uv.has_value());
+    CHECK(std::fabs(tube_uv.value()[0]) <= 1e-12);
+    CHECK(tube_uv.value()[1] == doctest::Approx(w).epsilon(1e-12));
+  }
+
+  // The projection subtracts v_origin without wrapping: the far side of the
+  // chart lands below zero instead of being folded back into [0, 2*pi).
+  const geom::Point3d past = torus->eval(0.4, 3.6);
+  const auto past_uv = geom::detail::face_uv_project_torus(*torus, past);
+  REQUIRE(past_uv.has_value());
+  CHECK(past_uv.value()[0] == doctest::Approx(0.4).epsilon(1e-12));
+  CHECK(past_uv.value()[1] == doctest::Approx(3.6 - kTwoPi).epsilon(1e-12));
+
+  // The enclosed volume is origin-independent: pi^2 / 2 for R = 1, r = 1/2.
+  const geom::Result<double> volume =
+      geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), kTolerance);
+  REQUIRE(volume.has_value());
+  CHECK(std::fabs(volume.value() - 4.934802200544679) <= 1e-9);
+
+  const double inf = std::numeric_limits<double>::infinity();
+  const auto infinite_origin = geom::make_torus(center, axis, kMajor, kMinor, kTolerance, inf);
+  REQUIRE_FALSE(infinite_origin.has_value());
+  CHECK(infinite_origin.error().code == geom::Errc::non_finite);
+  CHECK(std::string(infinite_origin.error().message) == "make_torus: input is not finite");
+  CHECK_FALSE(geom::make_torus(center, axis, kMajor, kMinor, kTolerance,
+                               std::numeric_limits<double>::quiet_NaN())
+                  .has_value());
+}
+
+// An explicit zero v-origin must leave the canonical primitive untouched: same
+// topology, same two full-turn seam circles, byte-identical tessellation.
+TEST_CASE("make_torus with a zero v-origin keeps the canonical output") {
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr double kTwoPi = 2.0 * kPi;
+  const geom::Point3d center{0.0, 0.0, 0.0};
+  const geom::Vec3d axis{0.0, 0.0, 1.0};
+  const auto implicit_origin = geom::make_torus(center, axis, 2.0, 0.5, 1e-9);
+  const auto explicit_origin = geom::make_torus(center, axis, 2.0, 0.5, 1e-9, 0.0);
+  REQUIRE(implicit_origin.has_value());
+  REQUIRE(explicit_origin.has_value());
+  const geom::Brep& brep = explicit_origin.value();
+  CHECK(brep.vertex_count() == 1);
+  CHECK(brep.edge_count() == 2);
+  CHECK(brep.face_count() == 1);
+  CHECK(brep.coedge_count() == 4);
+  CHECK(brep.shell_count() == 1);
+  CHECK(brep.solid_count() == 1);
+
+  const geom::Face& face = brep.face(brep.face_ids().front());
+  const geom::Torus3* torus = std::get_if<geom::Torus3>(&brep.geometry().surfaces[face.surface]);
+  REQUIRE(torus != nullptr);
+  CHECK(torus->v_origin == 0.0);
+
+  bool saw_outer = false;
+  bool saw_tube = false;
+  for (const geom::EdgeId id : brep.edge_ids()) {
+    const geom::Edge& edge = brep.edge(id);
+    const auto& circle = std::get<geom::CircleCurve3>(brep.geometry().curves[edge.curve]);
+    CHECK(edge.t0 == 0.0);
+    CHECK(edge.t1 == doctest::Approx(kTwoPi).epsilon(1e-12));
+    if (circle.radius == 2.5) saw_outer = true;
+    if (circle.radius == 0.5) saw_tube = true;
+  }
+  CHECK(saw_outer);
+  CHECK(saw_tube);
+
+  const geom::TessellationOptions options{1e-2, 0.35};
+  const auto implicit_mesh = geom::tessellate(implicit_origin.value(), options);
+  const auto explicit_mesh = geom::tessellate(explicit_origin.value(), options);
+  REQUIRE(implicit_mesh.has_value());
+  REQUIRE(explicit_mesh.has_value());
+  CHECK(explicit_mesh.value().triangles.size() == 1152u);
+  CHECK(explicit_mesh.value().positions.size() == 576u);
+  CHECK(hash_mesh(explicit_mesh.value()) == hash_mesh(implicit_mesh.value()));
+#if defined(_MSC_VER)
+  CHECK(hash_mesh(explicit_mesh.value()) == 0xc808f6ee4d9c72dbull);
+#endif
 }

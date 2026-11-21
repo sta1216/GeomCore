@@ -220,7 +220,10 @@ inline Result<Point2d> face_uv_project_torus(const Torus3& surface, const Point3
   // which is non-negative because the tube radius is smaller than the major
   // radius; axial = minor_radius * sin(v).
   const double q = std::hypot(x, y);
-  const double v = std::atan2(axial, q - surface.major_radius);
+  const double surface_v = std::atan2(axial, q - surface.major_radius);
+  // Shift the surface parameter back onto the chart; the result is deliberately
+  // not wrapped, so the chart seam v = 0 follows the surface curve v = v_origin.
+  const double v = surface_v - surface.v_origin;
   if (!face_uv_finite(u) || !face_uv_finite(v)) {
     return Error{Errc::non_finite, "face_loops_uv: torus inverse is not finite", 0u, 0u};
   }
