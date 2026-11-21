@@ -68,9 +68,9 @@ face whose chart seam does not cross the cut.
    current message is reworded from "M3c-3c-4" to "M3c-3c-4b3c".
 3. **Direct twisted calls still fail.** `split_face_curved` on a raw twisted chain
    keeps the twisted refusal; only the boolean driver re-charts.
-4. **Oblique volume tolerance 1e-6.** The re-charted SSI chain is polygonal, so
-   the tilted fixture asserts 1e-6 relative, while the axis-aligned suite keeps
-   1e-9.
+4. **Oblique volume tolerance 5e-3.** The re-charted SSI chain is polygonal with
+   a fixed chord budget (`ssi.hpp`), so the tilted fixture asserts 5e-3 relative
+   and 1e-2 on the sum, while the axis-aligned suite keeps 1e-9.
 5. **Cone is out of scope.** Axis-containing planes and the apex ring closure are
    4b3c-2.
 
@@ -86,7 +86,7 @@ face whose chart seam does not cross the cut.
 4. The re-chart runs at most once, before face pairing, and leaves every
    non-torus case bit-identical.
 5. The tilted fixture's `intersection + difference` equals the torus volume within
-   1e-9, and `union` equals that sum; no orientation flip.
+   1e-9, and `union` equals the slab plus that half; no orientation flip.
 6. Refusal messages and `CurvedBooleanReport` counters are explicit; no silent
    empty solid.
 
@@ -237,10 +237,11 @@ remains the current torus guard message.
 
 ```cpp
 constexpr double kHalfTorus = 2.4674011002723395;  // pi^2 / 4
+constexpr double kSlab = 256.0;                    // 8 x 8 x 4 tilted slab
 constexpr double kTorus = 4.934802200544679;       // pi^2 / 2
-// intersection, difference: kHalfTorus (epsilon 1e-6)
-// union: kTorus (epsilon 1e-6)
-// intersection + difference == kTorus within 1e-9
+// intersection, difference: kHalfTorus (5e-3 relative)
+// union: kSlab + kHalfTorus (5e-3 relative)
+// intersection + difference == kTorus within 1e-2
 ```
 
    Each result: `validate_topology(...).ok()`, one shell, `closed`, two runs
@@ -280,8 +281,8 @@ cuts, multiple twists, or cone.
 
 - Debug and Release: all tests pass, zero warnings under `GEOM_WERROR=ON`.
 - Tilted torus intersection and difference are `2.4674011002723395`, union is
-  `4.934802200544679`, each within 1e-6; `intersection + difference` equals the
-  torus volume within 1e-9.
+  `258.46740110027233`, each within 5e-3 relative; `intersection + difference`
+  equals the torus volume within 1e-2.
 - `v_origin = 0` is bit-identical across the surface, projection, primitive and
   all existing booleans.
 - The offset-parallel and miss/tangent refusals are unchanged in code and message.
@@ -292,7 +293,7 @@ cuts, multiple twists, or cone.
 
 - [ ] Every task has files, interfaces, five TDD steps and acceptance.
 - [ ] No task depends on an interface introduced later.
-- [ ] Tolerance choices are justified (1e-6 for the oblique SSI chain, 1e-9 for
+- [ ] Tolerance choices are justified (5e-3/1e-2 for the oblique SSI chain, 1e-9 for
       exact invariants).
 - [ ] Refusals are explicit; no test weakens an assertion to pass.
 - [ ] Scope deviations are listed for approval.
