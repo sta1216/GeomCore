@@ -78,12 +78,12 @@ applies unchanged.
 - **Re-chart once, on an internal pass.** The driver calls the helper with each
   operand first and, on success, recurses into `boolean_solid_curved` with the last
   parameter `allow_recharted_torus = true` (`boolean_solid_curved.hpp:2110-2147`).
-  The parameter defaults to `false` (`:1997-2002`) and only those two recursion sites
+  The parameter defaults to `false` (`:2013`) and only those two recursion sites
   pass `true`; the guard is `supported ||
   (allow_recharted_torus && plane_cut_recharted(...))`, and
   `plane_cut_recharted` re-applies the `1e-3` near-aligned bands, so a re-chart
   raised by one oblique face cannot admit a near-perpendicular or near-axis plane
-  in the same pass (`:2178-2190`). A
+  in the same pass (`:2190-2193`). A
   second re-chart is impossible by construction: the helper requires
   `v_origin == 0`, and the re-charted torus has a nonzero origin. Any failure after
   the helper's re-chart decision (a tracing error, a rebuilt torus with the wrong
@@ -120,12 +120,17 @@ applies unchanged.
   success:
 
   - Whole torus against an all-planar partner, but the plane is near-perpendicular
-    (`||dot| - 1| <= 1e-3`), near-axis (`|dot| <= 1e-3`), tangent, missed, or leaves
-    no usable free `v` band; or the torus is not whole (multiple faces, several
-    loops, holes, loop area not equal to the chart area); or the operand chart
-    already has a nonzero `v_origin`: `unsupported`
+    (`||dot| - 1| <= 1e-3`), near-axis (`|dot| <= 1e-3`), missed, or leaves no usable
+    free `v` band; or the torus is not whole (multiple faces, several loops, holes,
+    loop area not equal to the chart area); or the operand chart already has a
+    nonzero `v_origin`: `unsupported`
     `"boolean_solid_curved: torus cut plane must be perpendicular to or contain the
     torus axis"`, before `report.face_pairs` is incremented.
+  - A tangent plane is refused by the generic contact diagnostic
+    (`"boolean_solid_curved: tangent face contact is not supported yet"`) after
+    pairing, so `report.face_pairs` may be `1`; some tangent variants instead reach
+    the splitter and are refused as open cuts. Both are explicit errors with no
+    solid, but they are not part of the zero-count guard class.
   - Torus against a non-plane operand: `unsupported`
     `"boolean_solid_curved: torus operands only support plane cuts; torus/torus and
     torus/curved pairs are deferred to M3c-3"`.

@@ -135,9 +135,10 @@ bit-identical, and no existing axis-aligned case changes.
 - Full suites, Debug and Release: 1031 cases / 674,604 assertions, all passing,
   with `/W4 /WX /utf-8` and no warnings.
 - The Task 2 baseline was 1023 cases / 674,283 assertions; Task 3 and its guard
-  fix add 7 cases and 157 assertions (the re-chart matrix, the miss and regression
-  refusals, and the reversed-order runs). Against the whole-milestone baseline
-  (1014 cases / 673,425 assertions) the delta is 16 cases / 1,015 assertions.
+  fixes add 8 cases and 321 assertions (the re-chart matrix, the miss and regression
+  refusals, the reversed-order runs, and the near-aligned guard regression). Against
+  the whole-milestone baseline (1014 cases / 673,425 assertions) the delta is
+  17 cases / 1,179 assertions.
 
 ## Limits
 
