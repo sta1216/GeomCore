@@ -1300,6 +1300,10 @@ inline std::optional<double> trim_face_periodic_free_midpoint(
     }
     double width = interval[1] - interval[0];
     if (width >= period) return std::nullopt;  // nothing is left free
+    // A wrapped interval of a full turn or more covers the circle as well.
+    // Without this check width += period turns exactly -period into a
+    // zero-width point, which would incorrectly leave the whole circle free.
+    if (width <= -period) return std::nullopt;
     if (width == 0.0) continue;               // a point blocks no band
     if (width < 0.0) width += period;         // wrapped interval
     double lo = interval[0] - period * std::floor(interval[0] / period);

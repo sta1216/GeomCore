@@ -3117,6 +3117,51 @@ TEST_CASE("trim_face: more covered intervals than the maximum are refused") {
                   .has_value());
 }
 
+TEST_CASE("trim_face: the widest free band wins over the first one") {
+  // Bands are sorted by position, so the first gap is not the widest: the gaps
+  // are 0.2, 0.2, 0.3 and the last one must provide the midpoint 0.85.
+  const std::array<std::array<double, 2>, 3> covered = {
+      std::array<double, 2>{0.0, 0.1}, std::array<double, 2>{0.3, 0.4},
+      std::array<double, 2>{0.6, 0.7}};
+  const std::optional<double> midpoint =
+      detail::trim_face_periodic_free_midpoint(covered, 1.0, 0.01);
+  REQUIRE(midpoint.has_value());
+  CHECK(*midpoint == doctest::Approx(0.85));
+}
+
+TEST_CASE("trim_face: a free gap exactly twice the margin is acceptable") {
+  // The only free gap is (0.25, 0.75), exactly 2*margin wide. Both endpoints
+  // and the width are exact binary fractions, so this pins the <= boundary.
+  const std::array<std::array<double, 2>, 2> covered = {
+      std::array<double, 2>{0.0, 0.25}, std::array<double, 2>{0.75, 1.0}};
+  const std::optional<double> midpoint =
+      detail::trim_face_periodic_free_midpoint(covered, 1.0, 0.25);
+  REQUIRE(midpoint.has_value());
+  CHECK(*midpoint == doctest::Approx(0.5));
+}
+
+TEST_CASE("trim_face: a wrapped free midpoint is normalized into the period") {
+  // The only free band wraps around the period: [2.9, 3 + 2.5]. Its raw
+  // midpoint is 4.2, which must be reported as 1.2 in [0, 3).
+  const std::array<std::array<double, 2>, 1> covered = {
+      std::array<double, 2>{2.5, 2.9}};
+  const std::optional<double> midpoint =
+      detail::trim_face_periodic_free_midpoint(covered, 3.0, 0.01);
+  REQUIRE(midpoint.has_value());
+  CHECK(*midpoint == doctest::Approx(1.2));
+}
+
+TEST_CASE("trim_face: a full wrapped turn leaves no free midpoint") {
+  // {0.5, 0.5 - 2*pi} is the whole circle traversed backwards; it covers
+  // everything just like {0, 2*pi}.
+  const double period = 2.0 * kPi;
+  const std::array<std::array<double, 2>, 1> covered = {
+      std::array<double, 2>{0.5, 0.5 - period}};
+  CHECK_FALSE(
+      detail::trim_face_periodic_free_midpoint(covered, period, 1e-3)
+          .has_value());
+}
+
 TEST_CASE("trim_face: stored holes are refused") {
   const geom::Brep sphere =
       geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, 1e-12).value();
