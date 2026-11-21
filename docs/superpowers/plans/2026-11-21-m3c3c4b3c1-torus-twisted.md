@@ -277,6 +277,11 @@ bit-identical; non-whole torus operands still refuse explicitly.
 **Acceptance:** documents match the tests; no over-claim for torus/torus, tangent
 cuts, multiple twists, or cone.
 
+**Recorded:** Debug and Release each 1030 cases / 674,440 assertions; focused torus
+54 cases / 10,574 assertions. Documents: `docs/adr/0037-torus-twisted-cuts.md`,
+`docs/benchmarks/m3c3c4b3c.md`, `docs/architecture/geometry-library-architecture.md`
+§16.3.
+
 ## Exit criteria
 
 - Debug and Release: all tests pass, zero warnings under `GEOM_WERROR=ON`.
@@ -291,10 +296,10 @@ cuts, multiple twists, or cone.
 
 ## Self-review
 
-- [ ] Every task has files, interfaces, five TDD steps and acceptance.
-- [ ] No task depends on an interface introduced later.
-- [ ] Tolerance choices are justified (5e-3/1e-2 for the oblique SSI chain, 1e-9 for
+- [x] Every task has files, interfaces, five TDD steps and acceptance.
+- [x] No task depends on an interface introduced later.
+- [x] Tolerance choices are justified (5e-3/1e-2 for the oblique SSI chain, 1e-9 for
       exact invariants).
-- [ ] Refusals are explicit; no test weakens an assertion to pass.
-- [ ] Scope deviations are listed for approval.
-- [ ] No placeholder or self-correction note remains in this plan.
+- [x] Refusals are explicit; no test weakens an assertion to pass.
+- [x] Scope deviations are listed for approval.
+- [x] No placeholder or self-correction note remains in this plan.
