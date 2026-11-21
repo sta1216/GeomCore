@@ -62,7 +62,10 @@ operand. Volume error is `measured - analytic`; the relative error is
 
 The intersection and difference are complementary halves: their sum is `6.996e-3`
 below the torus volume, inside the `1e-2` sum check. The reversed difference is not
-measured because it is refused (see Refusals).
+measured because it is refused (see Refusals). The reversed rows were measured on
+the development probe's slab, whose torus side sits about `3e-6` relative away from
+the committed `make_tilted_slab` fixture; the forward rows reproduce on that fixture
+to better than `1e-9`, so the `5e-3` budget is unaffected.
 
 ## Tolerances
 
@@ -117,7 +120,8 @@ bit-identical, and no existing axis-aligned case changes.
   torus axis"` and `report.face_pairs == 0`.
 - Near-axis and near-perpendicular planes (`1e-3` alignment bands, including normals
   tilted from the axis by `5e-10`, `5e-13` and `1e-12`) are refused by the same
-  guard; a tilted plane that misses the torus is refused there as well.
+  guard; a tilted plane that misses the torus is refused there as well when the
+  operand pair overlaps (a fully disjoint pair reports an empty result instead).
 - Reversed difference is refused by the pre-existing
   `"boolean_solid_curved: flipped curved fragments are not supported yet"`; the
   limitation predates the re-chart and is out of scope for 4b3c-1.
@@ -130,9 +134,10 @@ bit-identical, and no existing axis-aligned case changes.
 - Focused torus cases: 54 cases / 10,574 assertions, all passing.
 - Full suites, Debug and Release: 1030 cases / 674,440 assertions, all passing,
   with `/W4 /WX /utf-8` and no warnings.
-- The pre-change baseline was 1027 cases / 674,290 assertions; the delta is the
-  re-chart matrix (including the miss and regression refusals) and the
-  reversed-order runs.
+- The Task 2 baseline was 1023 cases / 674,283 assertions; Task 3 and its guard
+  fix add 7 cases and 157 assertions (the re-chart matrix, the miss and regression
+  refusals, and the reversed-order runs). Against the whole-milestone baseline
+  (1014 cases / 673,425 assertions) the delta is 16 cases / 1,015 assertions.
 
 ## Limits
 
