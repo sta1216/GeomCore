@@ -3065,7 +3065,7 @@ TEST_CASE("trim_face: the periodic free midpoint picks the widest free band") {
   CHECK(*midpoint < kPeriod);
   // The chosen point keeps at least the margin from every band edge, so it is
   // strictly inside the free band and never on a cut.
-  const auto circular_distance = [kPeriod](double a, double b) {
+  const auto circular_distance = [](double a, double b) {
     double distance = std::fabs(a - b);
     if (distance > 0.5 * kPeriod) distance = kPeriod - distance;
     return distance;
