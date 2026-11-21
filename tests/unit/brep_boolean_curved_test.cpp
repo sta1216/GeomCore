@@ -1739,32 +1739,78 @@ TEST_CASE("curved boolean: torus cut by an offset parallel plane is rejected") {
   CHECK(report.face_pairs == 0);
 }
 
-TEST_CASE("curved boolean: torus cut by a tilted plane is rejected") {
+TEST_CASE("curved boolean: torus cut by a tilted plane is re-charted") {
   const double tolerance = 1e-9;
+  constexpr double kHalfTorus = 2.4674011002723395;  // pi^2 / 4
+  constexpr double kSlab = 256.0;                    // 8 x 8 x 4 slab
+  constexpr double kTorus = 4.934802200544679;       // pi^2 / 2
   const geom::Result<geom::Brep> torus =
       geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
                        tolerance);
   REQUIRE(torus.has_value());
   const geom::Brep slab = make_tilted_slab(tolerance);
   REQUIRE(geom::validate_topology(slab).ok());
-  geom::CurvedBooleanReport report;
-  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
-      torus.value(), only_solid(torus.value()), slab, only_solid(slab),
-      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
-  REQUIRE_FALSE(result.has_value());
-  CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
-        "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
-        "axis");
-  CHECK(report.face_pairs == 0);
+
+  struct Case {
+    const char* name;
+    geom::SolidBooleanOp op;
+    double expected;
+  };
+  const Case cases[3] = {
+      {"intersection", geom::SolidBooleanOp::intersection, kHalfTorus},
+      {"difference", geom::SolidBooleanOp::difference, kHalfTorus},
+      {"union", geom::SolidBooleanOp::union_, kSlab + kHalfTorus},
+  };
+  double half_volumes[2] = {0.0, 0.0};
+  for (std::size_t index = 0; index < 3; ++index) {
+    const Case& entry = cases[index];
+    INFO(std::string(entry.name));
+    std::optional<double> first_volume;
+    std::uint64_t first_bits = 0;
+    std::array<std::size_t, 3> first_counts{};
+    for (int run = 0; run < 2; ++run) {
+      geom::CurvedBooleanReport report;
+      const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+          torus.value(), only_solid(torus.value()), slab, only_solid(slab), entry.op,
+          geom::CurvedBooleanOptions{tolerance}, &report);
+      REQUIRE_MESSAGE(result.has_value(), entry.name << ": " << message_of(result.error()));
+      const geom::Brep& brep = result.value().brep;
+      CHECK(geom::validate_topology(brep).ok());
+      const auto shells = brep.solid_shells(only_solid(brep));
+      REQUIRE(shells.size() == 1);
+      CHECK(geom::detail::heal_detail::shell_is_closed_by_uses(brep, shells.front()));
+      // The intersector samples an oblique cut only to its fixed chord budget
+      // (1e-3 of the patch diagonal), so the polygonal cut fixes the volume
+      // accuracy at about 5e-3 relative. The re-chart moves the seam without
+      // changing that budget.
+      const double volume = volume_of(brep);
+      CHECK(std::abs(volume - entry.expected) <= 5e-3 * std::abs(entry.expected));
+      // `report` is the failure report and stays zeroed on success; the
+      // returned report carries the work counters of the recursive run.
+      CHECK(result.value().report.face_pairs > 0);
+      const std::array<std::size_t, 3> counts{brep.face_ids().size(),
+                                              brep.edge_ids().size(),
+                                              brep.vertex_ids().size()};
+      if (run == 0) {
+        first_volume = volume;
+        first_bits = std::bit_cast<std::uint64_t>(volume);
+        first_counts = counts;
+      } else {
+        CHECK(std::bit_cast<std::uint64_t>(volume) == first_bits);
+        CHECK(counts == first_counts);
+      }
+    }
+    if (entry.op != geom::SolidBooleanOp::union_) half_volumes[index] = *first_volume;
+  }
+  CHECK(std::abs(half_volumes[0] + half_volumes[1] - kTorus) <= 1e-2);
 }
 
-// A closed slab whose bottom face is the plane through the origin with the given
-// normal, extending four units along that normal. Only the bottom face reaches
-// the torus bounds (|x|,|y|,|z| <= 1.5), so one torus/plane pair decides the
-// cut-plane guard. The corner ring and coedge pattern follow make_tilted_slab;
-// each face plane is derived from the corner sequence its loop traverses.
-geom::Brep make_plane_slab(const geom::Vec3d& normal, double tolerance) {
+// A closed slab whose bottom face is the plane n . x = `offset`, extending four
+// units along that normal. Only the bottom face reaches the torus bounds
+// (|x|,|y|,|z| <= 1.5), so one torus/plane pair decides the cut-plane guard. The
+// corner ring and coedge pattern follow make_tilted_slab; each face plane is
+// derived from the corner sequence its loop traverses.
+geom::Brep make_plane_slab(const geom::Vec3d& normal, double offset, double tolerance) {
   const double length = std::sqrt(geom::dot(normal, normal));
   REQUIRE(length > 0.0);
   const geom::Vec3d n{normal[0] / length, normal[1] / length, normal[2] / length};
@@ -1776,9 +1822,9 @@ geom::Brep make_plane_slab(const geom::Vec3d& normal, double tolerance) {
   const geom::Vec3d u{raw_u[0] / u_length, raw_u[1] / u_length, raw_u[2] / u_length};
   const geom::Vec3d v = geom::cross(n, u);
   const auto corner = [&](double su, double sv, double sn) {
-    return geom::Point3d{su * u[0] + sv * v[0] + sn * n[0],
-                         su * u[1] + sv * v[1] + sn * n[1],
-                         su * u[2] + sv * v[2] + sn * n[2]};
+    return geom::Point3d{su * u[0] + sv * v[0] + (offset + sn) * n[0],
+                         su * u[1] + sv * v[1] + (offset + sn) * n[1],
+                         su * u[2] + sv * v[2] + (offset + sn) * n[2]};
   };
   const geom::Point3d corners[8] = {
       corner(-4.0, -4.0, 0.0), corner(4.0, -4.0, 0.0), corner(4.0, 4.0, 0.0),
@@ -1843,6 +1889,29 @@ geom::Brep make_plane_slab(const geom::Vec3d& normal, double tolerance) {
   return editor.commit().value();
 }
 
+TEST_CASE("curved boolean: a tilted plane that misses the torus is rejected") {
+  const double tolerance = 1e-9;
+  const geom::Result<geom::Brep> torus =
+      geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
+                       tolerance);
+  REQUIRE(torus.has_value());
+  // (x + z) / sqrt(2) = 1.5 lies beyond the torus support in that direction (the
+  // farthest point reaches 1.2071), but the 8 x 8 face still overlaps the torus
+  // bounds, so the pair reaches the cut-plane guard and no re-chart is possible.
+  const geom::Brep slab = make_plane_slab(geom::Vec3d{1.0, 0.0, 1.0}, 1.5, tolerance);
+  REQUIRE(geom::validate_topology(slab).ok());
+  geom::CurvedBooleanReport report;
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), slab, only_solid(slab),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(message_of(result.error()) ==
+        "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
+        "axis");
+  CHECK(report.face_pairs == 0);
+}
+
 TEST_CASE("curved boolean: torus cut by a near-axis plane is rejected quickly") {
   const double tolerance = 1e-9;
   // The cutting plane normal is (1, 0, 1e-10): it contains the torus axis only up
@@ -1852,7 +1921,7 @@ TEST_CASE("curved boolean: torus cut by a near-axis plane is rejected quickly") 
       geom::make_torus(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 0.5,
                        tolerance);
   REQUIRE(torus.has_value());
-  const geom::Brep slab = make_plane_slab(geom::Vec3d{1.0, 0.0, 1e-10}, tolerance);
+  const geom::Brep slab = make_plane_slab(geom::Vec3d{1.0, 0.0, 1e-10}, 0.0, tolerance);
   REQUIRE(geom::validate_topology(slab).ok());
   geom::CurvedBooleanReport report;
   const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
@@ -1966,7 +2035,7 @@ TEST_CASE("curved boolean: rounded unit axis still cuts the torus in half") {
   REQUIRE(torus.has_value());
   // The slab's bottom face is the plane through the origin with the same normal,
   // so it cuts the torus into two equal halves.
-  const geom::Brep slab = make_plane_slab(axis, tolerance);
+  const geom::Brep slab = make_plane_slab(axis, 0.0, tolerance);
   REQUIRE(geom::validate_topology(slab).ok());
   geom::CurvedBooleanReport report;
   const geom::Result<geom::CurvedBooleanResult> half = geom::boolean_solid_curved(

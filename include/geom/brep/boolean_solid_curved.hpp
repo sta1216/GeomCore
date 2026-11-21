@@ -924,6 +924,48 @@ inline bool curved_boolean_rebase_closed_chain(std::vector<Point2d>& chain, cons
   return true;
 }
 
+// A closed cut re-expressed by `curved_boolean_cut_chains` starts at a seam
+// crossing that is interpolated in uv between the two samples straddling the
+// seam. The cut is sampled to the intersector's chord budget, so on an oblique
+// torus/plane cut that interpolation can miss the plane by a chord sag. Re-basing
+// the partner chain onto it then welds two different rims and the assembly
+// rejects the result as touching itself along an edge. Both surfaces are
+// analytic, so the crossing is solved on the seam meridian `u = seam[0]`: the
+// plane has an isolated root there, and Newton iteration from the interpolated v
+// finds it to `tolerance`. The crossing that is already on the plane is left
+// bit-identical (exact families keep their exact behaviour), the iteration is
+// capped at 32 steps, and a non-converged or out-of-tolerance result is reported
+// as a failure instead of being snapped.
+inline bool curved_boolean_refine_torus_seam(Point2d& seam, const Torus3& torus,
+                                             const Plane3& plane, double tolerance) {
+  const double u = seam[0];
+  double v = seam[1];
+  if (!std::isfinite(u) || !std::isfinite(v)) return false;
+  const double normal_length = std::sqrt(dot(plane.normal, plane.normal));
+  if (!(normal_length > 0.0) || !std::isfinite(normal_length)) return false;
+  const auto residual = [&torus, &plane, u](double value) {
+    return plane.signed_distance(torus.eval(u, value));
+  };
+  double offset = residual(v);
+  if (!(std::abs(offset) > 1e-12 * (1.0 + std::abs(v)))) return false;
+  bool converged = false;
+  for (int iteration = 0; iteration < 32; ++iteration) {
+    const double slope = dot(plane.normal, torus.dv(u, v)) / normal_length;
+    if (!(std::abs(slope) > 1e-12)) return false;
+    const double step = offset / slope;
+    v -= step;
+    if (!std::isfinite(v)) return false;
+    offset = residual(v);
+    if (std::abs(step) <= 1e-15 * (1.0 + std::abs(v))) {
+      converged = true;
+      break;
+    }
+  }
+  if (!converged || !(std::abs(offset) <= tolerance)) return false;
+  seam[1] = v;
+  return true;
+}
+
 // Finds the point where the 3D segment p0 -> p1 leaves the trimmed region of a
 // face: a boundary arc contributes its exact circle crossing, a straight
 // boundary edge a segment-to-segment contact. When the cut lies on a known
@@ -1762,6 +1804,174 @@ inline Result<std::optional<CurvedBooleanRebasedSpheres>> curved_boolean_rechart
   return std::optional<CurvedBooleanRebasedSpheres>{std::move(rebased)};
 }
 
+// A whole torus rebuilt with its seam circle moved into a free v band: `brep`
+// is a new single-solid document and `solid` names its solid.
+struct CurvedBooleanRebasedTorus {
+  Brep brep;
+  SolidId solid{};
+};
+
+// Planes whose normal is within this slack of the torus axis (the equatorial
+// family) or of the plane perpendicular to it (the meridian family) keep the
+// existing guard. The exact families are supported analytically; a near miss is
+// a different limitation that must keep its current refusal. Only a genuine
+// tilt is re-charted. The slack sits far above the guard's 8-ulp band and far
+// below the oblique angles this path exists for.
+inline constexpr double kCurvedBooleanTorusRechartAlignmentSlack = 1e-3;
+
+// Re-charts a whole torus so that an oblique plane cut does not cross its seam.
+//
+// A plane that is neither perpendicular to the torus axis nor contains it cuts
+// the tube in loops that wind around u and cross the v seam at two different
+// transverse coordinates. `trim_face_split_domain` refuses those as a twisted
+// seam crossing, and the cut cannot be trimmed. The seam circle of a torus is
+// just the meridian v = v_origin of its chart, so `make_torus` can put it
+// anywhere: rebuilding the torus with the seam in a v band that no cut crosses
+// turns the same cut into an ordinary periodic one, while the solid is
+// unchanged.
+//
+// The v bands are read from the cuts the driver itself would trace: for the
+// torus face and each planar face whose bounds overlap, the intersector is run
+// exactly as the driver runs it, every returned curve is converted with
+// `curved_boolean_cut_chains` on the torus side, and each chain's v range is
+// one covered band. The bands are merged within 1e-9 and the midpoint of the
+// widest free band becomes the new `v_origin`.
+//
+// The result is nullopt whenever the pair should take the existing path:
+//
+//   * the operand is not a single whole-torus face (one loop whose uv area is
+//     the full 4*pi^2 chart, so a trimmed torus patch never qualifies);
+//   * the torus already has a nonzero `v_origin`: this is the recursion's fixed
+//     point, so a re-charted pair is never re-charted again;
+//   * the other operand has any non-planar face, or no plane tilted relative to
+//     the axis overlaps the torus;
+//   * no intersector curve survives (a miss or a tangency) or no free v band is
+//     wide enough; the guard then reports the pair as before.
+//
+// Any failure after the re-chart decision (a tracing error, a rebuilt torus with
+// the wrong solid count) is an Error, not a silent fallback: the pair was
+// identified as re-chartable and the driver must not mask that with the old
+// diagnostic.
+inline Result<std::optional<CurvedBooleanRebasedTorus>> curved_boolean_rechart_twisted_torus(
+    const Brep& torus_brep, SolidId torus_solid, const Brep& other, SolidId other_solid,
+    double tolerance) {
+  const std::optional<CurvedBooleanRebasedTorus> not_a_rechart{};
+  const Result<std::vector<FaceId>> torus_faces =
+      curved_boolean_operand_faces(torus_brep, torus_solid);
+  if (!torus_faces.has_value()) return torus_faces.error();
+  if (torus_faces.value().size() != 1) return not_a_rechart;
+  const Result<CurvedBooleanFaceInfo> torus_info =
+      curved_boolean_face_info(torus_brep, torus_faces.value().front(), tolerance);
+  if (!torus_info.has_value()) return torus_info.error();
+  const CurvedBooleanFaceInfo& torus_face = torus_info.value();
+  const Torus3* torus = std::get_if<Torus3>(torus_face.surface);
+  if (torus == nullptr) return not_a_rechart;
+  if (torus->v_origin != 0.0) return not_a_rechart;
+  if (torus_face.loops.size() != 1) return not_a_rechart;
+  const double chart_area =
+      (torus_face.u[1] - torus_face.u[0]) * (torus_face.v[1] - torus_face.v[0]);
+  const double loop_area = std::abs(curved_boolean_uv_area(torus_face.loops.front().points));
+  if (!(chart_area > 0.0) || !(std::abs(loop_area - chart_area) <= 1e-9 * chart_area)) {
+    return not_a_rechart;
+  }
+
+  const Result<std::vector<FaceId>> other_faces =
+      curved_boolean_operand_faces(other, other_solid);
+  if (!other_faces.has_value()) return other_faces.error();
+  std::vector<CurvedBooleanFaceInfo> plane_faces;
+  plane_faces.reserve(other_faces.value().size());
+  for (const FaceId id : other_faces.value()) {
+    Result<CurvedBooleanFaceInfo> info = curved_boolean_face_info(other, id, tolerance);
+    if (!info.has_value()) return info.error();
+    if (std::get_if<Plane3>(info.value().surface) == nullptr) return not_a_rechart;
+    plane_faces.push_back(std::move(info.value()));
+  }
+
+  const double axis_norm = std::sqrt(dot(torus->axis, torus->axis));
+  if (!(axis_norm > 0.0) || !std::isfinite(axis_norm)) return not_a_rechart;
+  const Vec3d axis{torus->axis[0] / axis_norm, torus->axis[1] / axis_norm,
+                   torus->axis[2] / axis_norm};
+  std::vector<const CurvedBooleanFaceInfo*> overlapping;
+  bool tilted = false;
+  for (const CurvedBooleanFaceInfo& face : plane_faces) {
+    if (!curved_boolean_bounds_overlap(torus_face.bounds, face.bounds, tolerance)) continue;
+    overlapping.push_back(&face);
+    const Plane3& plane = *std::get_if<Plane3>(face.surface);
+    const double normal_norm = std::sqrt(dot(plane.normal, plane.normal));
+    if (!(normal_norm > 0.0) || !std::isfinite(normal_norm)) continue;
+    const Vec3d normal{plane.normal[0] / normal_norm, plane.normal[1] / normal_norm,
+                       plane.normal[2] / normal_norm};
+    const double alignment = std::abs(dot(normal, axis));
+    if (alignment > kCurvedBooleanTorusRechartAlignmentSlack &&
+        1.0 - alignment > kCurvedBooleanTorusRechartAlignmentSlack) {
+      tilted = true;
+    }
+  }
+  if (!tilted) return not_a_rechart;
+
+  SsiOptions options;
+  options.tolerance = tolerance;
+  std::vector<std::array<double, 2>> bands;
+  for (const CurvedBooleanFaceInfo* face : overlapping) {
+    SsiPatch torus_patch;
+    torus_patch.surface = *torus_face.surface;
+    torus_patch.u = torus_face.u;
+    torus_patch.v = torus_face.v;
+    SsiPatch plane_patch;
+    plane_patch.surface = *face->surface;
+    plane_patch.u = face->u;
+    plane_patch.v = face->v;
+    const Result<SsiResult> cut = ssi(torus_patch, plane_patch, options);
+    if (!cut.has_value() || !cut.value().issues.empty()) continue;
+    for (const SsiCurve& curve : cut.value().curves) {
+      for (const std::vector<Point2d>& chain :
+           curved_boolean_cut_chains(curve, true, torus_face, tolerance)) {
+        if (chain.empty()) continue;
+        double lo = chain.front()[1];
+        double hi = lo;
+        for (const Point2d& point : chain) {
+          lo = std::min(lo, point[1]);
+          hi = std::max(hi, point[1]);
+        }
+        bands.push_back({lo, hi});
+      }
+    }
+  }
+  if (bands.empty()) return not_a_rechart;
+
+  std::sort(bands.begin(), bands.end());
+  std::vector<std::array<double, 2>> merged;
+  merged.reserve(bands.size());
+  for (const std::array<double, 2>& band : bands) {
+    if (!merged.empty() && band[0] <= merged.back()[1] + 1e-9) {
+      merged.back()[1] = std::max(merged.back()[1], band[1]);
+    } else {
+      merged.push_back(band);
+    }
+  }
+  double margin = 0.0;
+  for (const std::array<double, 2>& band : merged) {
+    margin = std::max(margin, std::max(std::abs(band[0]), std::abs(band[1])));
+  }
+  const std::optional<double> midpoint = trim_face_periodic_free_midpoint(
+      merged, kCurvedBooleanTwoPi, 1e-9 * (1.0 + margin), 4);
+  if (!midpoint.has_value() || !(*midpoint > 0.0)) return not_a_rechart;
+
+  const Result<Brep> rebuilt = make_torus(torus->center, torus->axis, torus->major_radius,
+                                          torus->minor_radius, tolerance, *midpoint);
+  if (!rebuilt.has_value()) return rebuilt.error();
+  const std::vector<SolidId> solids = rebuilt.value().solid_ids();
+  if (solids.size() != 1) {
+    return Error{Errc::invalid_topology,
+                 "boolean_solid_curved: re-charted torus must have exactly one solid",
+                 torus_solid.index(), 0u};
+  }
+  CurvedBooleanRebasedTorus rebased;
+  rebased.brep = rebuilt.value();
+  rebased.solid = solids.front();
+  return std::optional<CurvedBooleanRebasedTorus>{std::move(rebased)};
+}
+
 }  // namespace detail
 
 // Boolean combination of two analytic B-rep solids.
@@ -1896,6 +2106,32 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
                                 failure_report);
   }
 
+  // An oblique plane cuts a whole torus in loops that cross the v seam at
+  // different transverse coordinates, which the splitter refuses. The seam of a
+  // torus can sit anywhere, so re-chart the torus onto a free band before the
+  // torus gate below; the rebuilt pair then takes the ordinary periodic path.
+  // The helper returns nullopt for every pair that must keep the existing
+  // refusal (not whole, not all-planar, near-aligned planes, misses), so the
+  // gate below is unchanged for those.
+  if (const auto rebased =
+          detail::curved_boolean_rechart_twisted_torus(a, a_solid, b, b_solid, tolerance);
+      !rebased.has_value()) {
+    record_failure();
+    return rebased.error();
+  } else if (rebased.value().has_value()) {
+    const detail::CurvedBooleanRebasedTorus& pair = *rebased.value();
+    return boolean_solid_curved(pair.brep, pair.solid, b, b_solid, op, options, failure_report);
+  }
+  if (const auto rebased =
+          detail::curved_boolean_rechart_twisted_torus(b, b_solid, a, a_solid, tolerance);
+      !rebased.has_value()) {
+    record_failure();
+    return rebased.error();
+  } else if (rebased.value().has_value()) {
+    const detail::CurvedBooleanRebasedTorus& pair = *rebased.value();
+    return boolean_solid_curved(a, a_solid, pair.brep, pair.solid, op, options, failure_report);
+  }
+
   // A torus is only cut by a plane; overlapping torus/torus and torus/cylinder pairs have no
   // supported cut loops here. Reject them before the flipped-fragment pre-check
   // so the caller gets this diagnostic instead of a later trim failure.
@@ -1921,7 +2157,16 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
                      "torus/torus and torus/curved pairs are deferred to M3c-3",
                      face_a.id.index(), face_b.id.index()};
       }
-      if (detail::curved_boolean_torus_plane_cut_supported(*plane, *torus, tolerance)) continue;
+      // A re-charted torus has its seam in a band no cut crosses, so the
+      // splitter can follow the oblique cut. The nonzero `v_origin` is only
+      // produced by `curved_boolean_rechart_twisted_torus`, which is called
+      // above before this gate, so this branch is reachable only through the
+      // re-chart. A torus still on the original seam keeps the exact family
+      // requirement.
+      if (detail::curved_boolean_torus_plane_cut_supported(*plane, *torus, tolerance) ||
+          torus->v_origin != 0.0) {
+        continue;
+      }
       record_failure();
       return Error{Errc::unsupported,
                    "boolean_solid_curved: torus cut plane must be perpendicular to or contain "
@@ -2103,10 +2348,25 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
           const bool periodic_a = face_a.projection.periodic_u();
           const auto& seam_face = periodic_a ? face_a : face_b;
           const auto& plain_face = periodic_a ? face_b : face_a;
+          std::vector<Point2d>& seam_chain = periodic_a ? chains_a.front() : chains_b.front();
           std::vector<Point2d>& other_chain = periodic_a ? chains_b.front() : chains_a.front();
-          const Result<Point3d> rim_start = detail::face_uv_eval(
-              seam_face.projection,
-              periodic_a ? chains_a.front().front() : chains_b.front().front());
+          // The seam crossing recorded in uv is an interpolation between the
+          // two samples next to the seam. On an oblique cut that interpolation
+          // misses the plane by a chord sag, so solve the crossing on the seam
+          // meridian first; an exact crossing keeps its exact value.
+          const Torus3* seam_torus = std::get_if<Torus3>(seam_face.surface);
+          const Plane3* plain_plane = std::get_if<Plane3>(plain_face.surface);
+          if (seam_torus != nullptr && plain_plane != nullptr &&
+              std::abs(seam_chain.front()[1] - seam_chain.back()[1]) <= tolerance) {
+            Point2d refined = seam_chain.front();
+            if (detail::curved_boolean_refine_torus_seam(refined, *seam_torus, *plain_plane,
+                                                         tolerance)) {
+              seam_chain.front()[1] = refined[1];
+              seam_chain.back()[1] = refined[1];
+            }
+          }
+          const Result<Point3d> rim_start =
+              detail::face_uv_eval(seam_face.projection, seam_chain.front());
           if (rim_start.has_value()) {
             (void)detail::curved_boolean_rebase_closed_chain(other_chain, rim_start.value(),
                                                              plain_face.projection, tolerance);
@@ -2208,7 +2468,12 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
         assembled.loops_uv = std::move(fragment.loops_uv);
         assembled.arc_spans = std::move(fragment.arc_spans);
         assembled.reversed = false;
-        if (assembled.arc_spans.size() != assembled.loops.size()) {
+        // The synthetic-domain splitter emits no arc provenance at all; an
+        // empty vector means "no arcs", while one ring per loop with empty
+        // rings would mean "arcs are missing" to the assembler. Resize only a
+        // partially filled vector.
+        if (!assembled.arc_spans.empty() &&
+            assembled.arc_spans.size() != assembled.loops.size()) {
           assembled.arc_spans.resize(assembled.loops.size());
         }
         if (assembled.loops_uv.size() != assembled.loops.size()) {
