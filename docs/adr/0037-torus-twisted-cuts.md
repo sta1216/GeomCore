@@ -79,7 +79,11 @@ applies unchanged.
   operand first and, on success, recurses into `boolean_solid_curved` with the last
   parameter `allow_recharted_torus = true` (`boolean_solid_curved.hpp:2110-2147`).
   The parameter defaults to `false` (`:1997-2002`) and only those two recursion sites
-  pass `true`; the guard is `supported || allow_recharted_torus` (`:2178-2186`). A
+  pass `true`; the guard is `supported ||
+  (allow_recharted_torus && plane_cut_recharted(...))`, and
+  `plane_cut_recharted` re-applies the `1e-3` near-aligned bands, so a re-chart
+  raised by one oblique face cannot admit a near-perpendicular or near-axis plane
+  in the same pass (`:2178-2190`). A
   second re-chart is impossible by construction: the helper requires
   `v_origin == 0`, and the re-charted torus has a nonzero origin. Any failure after
   the helper's re-chart decision (a tracing error, a rebuilt torus with the wrong
@@ -87,9 +91,10 @@ applies unchanged.
   `Errc::invalid_topology` with
   `"boolean_solid_curved: re-charted torus must have exactly one solid"`. Residual
   risk: because the flag is a defaulted argument on a public function, a caller that
-  deliberately passes `true` bypasses the exact-family guard without a re-chart. It
-  is an opt-in escape hatch, not a supported mode; the driver, the public tests and
-  the documented API keep it false.
+  deliberately passes `true` bypasses the exact-family guard without a re-chart for
+  genuinely oblique planes. It is an opt-in escape hatch, not a supported mode, and
+  it still cannot admit the near-aligned bands; the driver, the public tests and the
+  documented API keep it false.
 
 - **Refine the seam crossing, then rebase the partner chain.** The seam point is
   interpolated between SSI samples and can miss the plane by the chord sag (about
@@ -171,7 +176,7 @@ the midpoint, so the test pins the engine value.
 
 Each case validates with `validate_topology`, one shell and
 `shell_is_closed_by_uses`; two runs are bit-identical in volume and counts, and
-`report.face_pairs > 0`. Full suites are 1030 cases / 674,440 assertions in both
+`report.face_pairs > 0`. Full suites are 1031 cases / 674,604 assertions in both
 Debug and Release with `/W4 /WX /utf-8` and no warnings; the focused torus tests are
 54 cases / 10,574 assertions.
 

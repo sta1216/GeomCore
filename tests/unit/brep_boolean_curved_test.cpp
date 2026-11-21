@@ -3230,3 +3230,135 @@ TEST_CASE("curved boolean: sphere lenses accept rotated placements") {
     check_rotated_lens(degrees, distance, geom::SolidBooleanOp::intersection, 1e-9);
   }
 }
+
+namespace {
+
+geom::Brep b1_box_from_corners(const std::array<geom::Point3d, 8>& corners, double tolerance) {
+  geom::SolidEditor editor;
+  std::array<geom::VertexId, 8> vertices{};
+  for (int i = 0; i < 8; ++i) {
+    auto v = editor.add_vertex(corners[static_cast<std::size_t>(i)], tolerance);
+    REQUIRE(v.has_value());
+    vertices[static_cast<std::size_t>(i)] = v.value();
+  }
+  const int edge_specs[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6},
+                                 {6, 7}, {7, 4}, {1, 5}, {2, 6}, {3, 7}, {0, 4}};
+  std::array<geom::EdgeId, 12> edges{};
+  for (int i = 0; i < 12; ++i) {
+    const geom::Point3d from = corners[static_cast<std::size_t>(edge_specs[i][0])];
+    const geom::Point3d to = corners[static_cast<std::size_t>(edge_specs[i][1])];
+    const geom::Vec3d delta = to - from;
+    const double length = std::hypot(delta[0], delta[1], delta[2]);
+    const geom::Vec3d direction{delta[0] / length, delta[1] / length, delta[2] / length};
+    const std::uint32_t curve = editor.add_curve(geom::LineCurve3{from, direction});
+    auto e = editor.add_edge(vertices[static_cast<std::size_t>(edge_specs[i][0])],
+                             vertices[static_cast<std::size_t>(edge_specs[i][1])], curve, 0.0,
+                             length, tolerance);
+    REQUIRE(e.has_value());
+    edges[static_cast<std::size_t>(i)] = e.value();
+  }
+  const int loop_edges[6][4] = {{3, 2, 1, 0}, {4, 5, 6, 7}, {0, 8, 4, 11},
+                                {2, 10, 6, 9}, {11, 7, 10, 3}, {1, 9, 5, 8}};
+  const bool loop_reversed[6][4] = {{true, true, true, true},   {false, false, false, false},
+                                    {false, false, true, true}, {false, false, true, true},
+                                    {false, true, true, false}, {false, false, true, true}};
+  const int loop_corners[6][4] = {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
+                                  {2, 3, 7, 6}, {0, 4, 7, 3}, {1, 2, 6, 5}};
+  std::array<geom::FaceId, 6> faces{};
+  for (int f = 0; f < 6; ++f) {
+    const geom::Point3d a = corners[static_cast<std::size_t>(loop_corners[f][0])];
+    const geom::Point3d b = corners[static_cast<std::size_t>(loop_corners[f][1])];
+    const geom::Point3d c = corners[static_cast<std::size_t>(loop_corners[f][2])];
+    const geom::Vec3d ab{b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    const geom::Vec3d ac{c[0] - a[0], c[1] - a[1], c[2] - a[2]};
+    const geom::Vec3d raw = geom::cross(ab, ac);
+    const double normal_length = std::sqrt(geom::dot(raw, raw));
+    const geom::Vec3d n{raw[0] / normal_length, raw[1] / normal_length, raw[2] / normal_length};
+    const std::uint32_t surface =
+        editor.add_surface(geom::Plane3{n, geom::dot(n, geom::Vec3d{a[0], a[1], a[2]})});
+    auto face = editor.add_face(surface, false, tolerance);
+    REQUIRE(face.has_value());
+    std::array<geom::CoedgeSpec, 4> coedges{};
+    for (int i = 0; i < 4; ++i) {
+      coedges[static_cast<std::size_t>(i)] =
+          geom::CoedgeSpec{edges[static_cast<std::size_t>(loop_edges[f][i])],
+                           loop_reversed[f][i]};
+    }
+    auto loop_result = editor.add_loop(face.value(), coedges, true);
+    REQUIRE(loop_result.has_value());
+    faces[static_cast<std::size_t>(f)] = face.value();
+  }
+  auto shell = editor.add_shell(faces, true);
+  REQUIRE(shell.has_value());
+  const std::array<geom::ShellId, 1> shells{shell.value()};
+  REQUIRE(editor.add_solid(shells, tolerance).has_value());
+  auto committed = editor.commit();
+  REQUIRE(committed.has_value());
+  return committed.value();
+}
+
+geom::Brep b1_wedge() {
+  const double top = 0.4, tilt = 0.01, xo = 1.9;
+  const double ytop = top + tilt * 1.6;
+  const double ybot = top - tilt * 1.6;
+  std::array<geom::Point3d, 8> c{};
+  c[0] = geom::Point3d{-1.6, -1.6, -0.6};
+  c[1] = geom::Point3d{xo, -1.6, -0.6};
+  c[2] = geom::Point3d{xo, 1.6, -0.6};
+  c[3] = geom::Point3d{-1.6, 1.6, -0.6};
+  c[4] = geom::Point3d{-1.6, -1.6, ybot};
+  c[5] = geom::Point3d{xo - ybot, -1.6, ybot};
+  c[6] = geom::Point3d{xo - ytop, 1.6, ytop};
+  c[7] = geom::Point3d{-1.6, 1.6, ytop};
+  return b1_box_from_corners(c, 1e-9);
+}
+
+geom::Brep b1_rotated_box(double half, double angle, double tolerance) {
+  const double c = std::cos(angle), s = std::sin(angle);
+  std::array<geom::Point3d, 8> corners{};
+  const double sx[8] = {-1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0};
+  const double sy[8] = {-1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0};
+  const double sz[8] = {-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0};
+  for (int k = 0; k < 8; ++k) {
+    const double x = sx[k] * half;
+    const double y = sy[k] * half;
+    const double z = sz[k] * half;
+    corners[static_cast<std::size_t>(k)] = geom::Point3d{x, c * y - s * z, s * y + c * z};
+  }
+  return b1_box_from_corners(corners, tolerance);
+}
+
+}  // namespace
+
+TEST_CASE("curved boolean: a re-charted pass keeps the near-aligned guard") {
+  constexpr const char* kGuard =
+      "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus axis";
+  const auto torus = geom::make_torus(geom::Point3d{0, 0, 0}, geom::Vec3d{0, 0, 1}, 1.0, 0.5,
+                                      1e-9, 0.0);
+  REQUIRE(torus.has_value());
+
+  // A near-perpendicular cap plus a genuinely oblique face in the same solid:
+  // the oblique face triggers a re-chart, but the cap must stay refused.
+  const geom::Brep wedge = b1_wedge();
+  geom::CurvedBooleanReport failure{};
+  const auto refused = geom::boolean_solid_curved(
+      torus.value(), only_solid(torus.value()), wedge, only_solid(wedge),
+      geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{1e-9}, &failure);
+  REQUIRE_FALSE(refused.has_value());
+  CHECK(std::string(refused.error().message) == kGuard);
+  CHECK(failure.face_pairs == 0);
+
+  // A rotated box has near-axis x faces and tilted y faces; the re-chart the
+  // tilted faces need must not admit the near-axis ones.
+  for (const double angle : {0.0, 0.01, 0.02}) {
+    const geom::Brep box = b1_rotated_box(1.4, angle, 1e-9);
+    REQUIRE(geom::validate_topology(box).ok());
+    geom::CurvedBooleanReport report{};
+    const auto result = geom::boolean_solid_curved(
+        torus.value(), only_solid(torus.value()), box, only_solid(box),
+        geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{1e-9}, &report);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(std::string(result.error().message) == kGuard);
+    CHECK(report.face_pairs == 0);
+  }
+}

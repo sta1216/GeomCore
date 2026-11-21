@@ -277,7 +277,7 @@ bit-identical; non-whole torus operands still refuse explicitly.
 **Acceptance:** documents match the tests; no over-claim for torus/torus, tangent
 cuts, multiple twists, or cone.
 
-**Recorded:** Debug and Release each 1030 cases / 674,440 assertions; focused torus
+**Recorded:** Debug and Release each 1031 cases / 674,604 assertions; focused torus
 54 cases / 10,574 assertions. Documents: `docs/adr/0037-torus-twisted-cuts.md`,
 `docs/benchmarks/m3c3c4b3c.md`, `docs/architecture/geometry-library-architecture.md`
 §16.3.

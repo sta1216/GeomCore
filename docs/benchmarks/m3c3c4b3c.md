@@ -132,7 +132,7 @@ bit-identical, and no existing axis-aligned case changes.
 ## Focused and full runs
 
 - Focused torus cases: 54 cases / 10,574 assertions, all passing.
-- Full suites, Debug and Release: 1030 cases / 674,440 assertions, all passing,
+- Full suites, Debug and Release: 1031 cases / 674,604 assertions, all passing,
   with `/W4 /WX /utf-8` and no warnings.
 - The Task 2 baseline was 1023 cases / 674,283 assertions; Task 3 and its guard
   fix add 7 cases and 157 assertions (the re-chart matrix, the miss and regression
@@ -144,6 +144,9 @@ bit-identical, and no existing axis-aligned case changes.
 - Only a whole torus (one shell, one torus face, no holes) against an all-planar
   operand is supported. Torus/torus, torus/cylinder and curved/curved pairs still
   return the plane-cuts-only message.
+- The re-chart allowance is per pair and re-applies the `1e-3` near-aligned bands, so
+  an oblique face that triggers a re-chart cannot widen the refusal of a
+  near-perpendicular or near-axis plane in the same solid.
 - The plane must be outside the `1e-3` near-aligned bands, must not be tangent, and
   must leave a free `v` band at least `2*margin` wide with at most four covered
   intervals. Cuts with more than two seam crossings are not supported.

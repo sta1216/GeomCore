@@ -1826,6 +1826,27 @@ struct CurvedBooleanRebasedTorus {
 // below the oblique angles this path exists for.
 inline constexpr double kCurvedBooleanTorusRechartAlignmentSlack = 1e-3;
 
+// A re-charted torus may take a genuinely oblique plane, but the pass-scoped
+// allowance must not admit the near-aligned bands the exact path refuses:
+// otherwise one re-chart would silently widen every torus/plane pair in the
+// same pass. Keep this test next to the re-chart trigger, which uses it too.
+inline bool curved_boolean_torus_plane_cut_recharted(const Plane3& plane,
+                                                     const Torus3& torus) noexcept {
+  const double length = std::sqrt(plane.normal[0] * plane.normal[0] +
+                                  plane.normal[1] * plane.normal[1] +
+                                  plane.normal[2] * plane.normal[2]);
+  if (!(length > 0.0) || !std::isfinite(length)) return false;
+  const Vec3d unit{plane.normal[0] / length, plane.normal[1] / length,
+                   plane.normal[2] / length};
+  const double axis_norm = std::sqrt(dot(torus.axis, torus.axis));
+  if (!(axis_norm > 0.0) || !std::isfinite(axis_norm)) return false;
+  const Vec3d axis{torus.axis[0] / axis_norm, torus.axis[1] / axis_norm,
+                   torus.axis[2] / axis_norm};
+  const double alignment = std::abs(dot(unit, axis));
+  return alignment > kCurvedBooleanTorusRechartAlignmentSlack &&
+         1.0 - alignment > kCurvedBooleanTorusRechartAlignmentSlack;
+}
+
 // Re-charts a whole torus so that an oblique plane cut does not cross its seam.
 //
 // A plane that is neither perpendicular to the torus axis nor contains it cuts
@@ -1894,23 +1915,13 @@ inline Result<std::optional<CurvedBooleanRebasedTorus>> curved_boolean_rechart_t
     plane_faces.push_back(std::move(info.value()));
   }
 
-  const double axis_norm = std::sqrt(dot(torus->axis, torus->axis));
-  if (!(axis_norm > 0.0) || !std::isfinite(axis_norm)) return not_a_rechart;
-  const Vec3d axis{torus->axis[0] / axis_norm, torus->axis[1] / axis_norm,
-                   torus->axis[2] / axis_norm};
   std::vector<const CurvedBooleanFaceInfo*> overlapping;
   bool tilted = false;
   for (const CurvedBooleanFaceInfo& face : plane_faces) {
     if (!curved_boolean_bounds_overlap(torus_face.bounds, face.bounds, tolerance)) continue;
     overlapping.push_back(&face);
     const Plane3& plane = *std::get_if<Plane3>(face.surface);
-    const double normal_norm = std::sqrt(dot(plane.normal, plane.normal));
-    if (!(normal_norm > 0.0) || !std::isfinite(normal_norm)) continue;
-    const Vec3d normal{plane.normal[0] / normal_norm, plane.normal[1] / normal_norm,
-                       plane.normal[2] / normal_norm};
-    const double alignment = std::abs(dot(normal, axis));
-    if (alignment > kCurvedBooleanTorusRechartAlignmentSlack &&
-        1.0 - alignment > kCurvedBooleanTorusRechartAlignmentSlack) {
+    if (curved_boolean_torus_plane_cut_recharted(plane, *torus)) {
       tilted = true;
     }
   }
@@ -2173,10 +2184,12 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
       }
       // `allow_recharted_torus` is set only by the two re-chart recursion sites
       // above: a torus whose seam was moved onto a free band can take an
-      // oblique cut even though the plane is in neither exact family. No public
-      // call sets the flag, so a user-built chart keeps the exact requirement.
+      // oblique cut even though the plane is in neither exact family. The
+      // allowance is per pair and still excludes the near-aligned bands, so one
+      // re-chart cannot widen the contract for the other planes in the pass.
       if (detail::curved_boolean_torus_plane_cut_supported(*plane, *torus, tolerance) ||
-          allow_recharted_torus) {
+          (allow_recharted_torus &&
+           detail::curved_boolean_torus_plane_cut_recharted(*plane, *torus))) {
         continue;
       }
       record_failure();
