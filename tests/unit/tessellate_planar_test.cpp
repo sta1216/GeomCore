@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <numbers>
@@ -620,4 +621,96 @@ TEST_CASE("faces without surface geometry are rejected") {
   const auto r = geom::tessellate(b.value(), {});
   REQUIRE_FALSE(r.has_value());
   CHECK(r.error().code == geom::Errc::unsupported);
+}
+
+namespace {
+
+bool same_bits(double a, double b) { return std::memcmp(&a, &b, sizeof(double)) == 0; }
+
+// The box fast path may only skip work, never change the mesh: every coordinate
+// has to match the generic face loop bit for bit, not just numerically.
+bool same_mesh(const geom::TriMesh& a, const geom::TriMesh& b) {
+  if (a.positions.size() != b.positions.size() || a.triangles != b.triangles ||
+      a.triangle_face != b.triangle_face) {
+    return false;
+  }
+  for (std::size_t i = 0; i < a.positions.size(); ++i) {
+    for (int k = 0; k < 3; ++k) {
+      if (!same_bits(a.positions[i][k], b.positions[i][k])) return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+TEST_CASE("box fast path matches the generic face loop bit for bit") {
+  const Point3d boxes[4][2] = {
+      {{0, 0, 0}, {2, 3, 4}},
+      {{-1, -1, -1}, {1, 1, 1}},
+      {{-5.0, 2.0, -3.0}, {-4.5, 2.5, -2.5}},
+      {{1e-3, -2e-3, 3e-3}, {1.001, 0.998, 1.003}},
+  };
+  const double deflections[2] = {1e-2, 1e-3};
+  for (const auto& box : boxes) {
+    const auto b = geom::make_box(box[0], box[1], 0.0);
+    REQUIRE(b.has_value());
+    for (const double deflection : deflections) {
+      const geom::TessellationOptions options{deflection, 0.35};
+      const auto fast = geom::tessellate(b.value(), options);
+      const auto generic = geom::detail::tessellate_impl(b.value(), options, false);
+      REQUIRE(fast.has_value());
+      REQUIRE(generic.has_value());
+      CHECK(fast.value().positions.size() == 8);
+      CHECK(fast.value().triangles.size() == 12);
+      CHECK(fast.value().triangle_face.size() == 12);
+      CHECK(same_mesh(fast.value(), generic.value()));
+    }
+  }
+}
+
+TEST_CASE("forced-generic loop still meshes a box") {
+  // Reference build used by the parity test above: without the fast path the box
+  // must still produce eight positions and twelve triangles.
+  const auto b = geom::make_box({0, 0, 0}, {1, 2, 3}, 0.0);
+  REQUIRE(b.has_value());
+  const auto generic = geom::detail::tessellate_impl(b.value(), {}, false);
+  REQUIRE(generic.has_value());
+  CHECK(generic.value().positions.size() == 8);
+  CHECK(generic.value().triangles.size() == 12);
+}
+
+TEST_CASE("curved and holed faces keep the generic path output") {
+  const geom::TessellationOptions options{1e-2, 0.35};
+  {
+    const auto cylinder = geom::make_cylinder({0, 0, 0}, {0, 0, 1}, 1.0, 2.0, 1e-9);
+    REQUIRE(cylinder.has_value());
+    const auto fast = geom::tessellate(cylinder.value(), options);
+    const auto generic = geom::detail::tessellate_impl(cylinder.value(), options, false);
+    REQUIRE(fast.has_value());
+    REQUIRE(generic.has_value());
+    CHECK(same_mesh(fast.value(), generic.value()));
+  }
+  {
+    const auto torus = geom::make_torus({0, 0, 0}, {0, 0, 1}, 2.0, 0.5, 1e-9);
+    REQUIRE(torus.has_value());
+    const auto fast = geom::tessellate(torus.value(), options);
+    const auto generic = geom::detail::tessellate_impl(torus.value(), options, false);
+    REQUIRE(fast.has_value());
+    REQUIRE(generic.has_value());
+    CHECK(same_mesh(fast.value(), generic.value()));
+  }
+  {
+    // A planar face with an inner loop is not a box face; it must still be
+    // triangulated through the ring pipeline (the annulus needs eight triangles).
+    HoleFace h = make_hole_face();
+    const auto b = h.editor.commit();
+    REQUIRE(b.has_value());
+    const auto fast = geom::tessellate(b.value(), options);
+    const auto generic = geom::detail::tessellate_impl(b.value(), options, false);
+    REQUIRE(fast.has_value());
+    REQUIRE(generic.has_value());
+    CHECK(fast.value().triangles.size() == 8);
+    CHECK(same_mesh(fast.value(), generic.value()));
+  }
 }

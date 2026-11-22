@@ -79,11 +79,39 @@ struct TessellateEdgeSamples {
   bool sampled = false;
 };
 
+// One loop of a planar face after projection into the face frame.
+struct TessellateRing {
+  std::vector<Point2d> points;
+  std::vector<std::uint32_t> positions;
+  bool outer = false;
+};
+
+// Point layout of the concatenated boundary rings of a face.
+struct TessellateTrimmedRingLayout {
+  std::vector<std::uint32_t> ring_of;
+  std::vector<std::uint32_t> ring_begin;
+  std::vector<std::uint32_t> ring_count;
+};
+
+// Per-call buffers of the planar face builder. These used to be locals of
+// `tessellate_planar_face`, so a six-faced solid allocated and freed a fresh set
+// for every face even though the shape of the next face is usually identical.
+// Keeping them in the state lets the capacities survive from face to face.
+struct TessellatePlanarScratch {
+  std::vector<TessellateRing> rings;
+  std::vector<Point2d> projected;
+  std::vector<std::uint32_t> projected_positions;
+  Polygon2d polygon;
+  TessellateTrimmedRingLayout layout;
+  std::vector<std::uint32_t> polygon_positions;
+};
+
 struct TessellateState {
   TriMesh mesh;
   std::vector<TessellateEdgeSamples> edges;
   std::vector<std::uint32_t> vertices;
   std::vector<char> vertex_sampled;
+  TessellatePlanarScratch planar;
 };
 
 inline Result<std::uint32_t> tessellate_append_point(TessellateState& state,
@@ -237,9 +265,11 @@ inline Result<std::vector<Point3d>> tessellate_sample_edge(const Brep& brep, Edg
 
 // Position indices of one edge in edge-parameter order, sampled at most once per
 // edge. Endpoints are welded by vertex, interior samples by (edge slot, index).
-inline Result<std::vector<std::uint32_t>> tessellate_edge_positions(TessellateState& state,
-                                                                    const Brep& brep, EdgeId id,
-                                                                    double deflection) {
+// The samples live in the per-edge cache for the rest of the call, so this
+// returns a view of them instead of copying the vector for every coedge.
+inline Result<std::span<const std::uint32_t>> tessellate_edge_positions(TessellateState& state,
+                                                                       const Brep& brep, EdgeId id,
+                                                                       double deflection) {
   if (id.index() >= state.edges.size()) {
     return Error{Errc::index_out_of_range, "tessellate: edge index is out of range", id.index(),
                  0u};
@@ -273,15 +303,8 @@ inline Result<std::vector<std::uint32_t>> tessellate_edge_positions(TessellateSt
     }
     slot.sampled = true;
   }
-  return slot.positions;
+  return std::span<const std::uint32_t>(slot.positions);
 }
-
-// Point layout of the concatenated boundary rings of a face.
-struct TessellateTrimmedRingLayout {
-  std::vector<std::uint32_t> ring_of;
-  std::vector<std::uint32_t> ring_begin;
-  std::vector<std::uint32_t> ring_count;
-};
 
 // Returns the ring points strictly between `from` and `to` when every one of
 // them is exactly collinear with the chord and strictly inside it. `std::nullopt`
@@ -376,13 +399,6 @@ inline Result<std::vector<std::array<std::uint32_t, 3>>> tessellate_expand_trimm
   return expanded;
 }
 
-// One loop of a planar face after projection into the face frame.
-struct TessellateRing {
-  std::vector<Point2d> points;
-  std::vector<std::uint32_t> positions;
-  bool outer = false;
-};
-
 inline Result<void> tessellate_planar_face(TessellateState& state, const Brep& brep, FaceId id,
                                        const TessellationOptions& options) {
   const Face& face = brep.face(id);
@@ -421,7 +437,8 @@ inline Result<void> tessellate_planar_face(TessellateState& state, const Brep& b
   const double offset = plane->offset / normal_length;
   const Point3d origin{unit[0] * offset, unit[1] * offset, unit[2] * offset};
 
-  std::vector<TessellateRing> rings;
+  std::vector<TessellateRing>& rings = state.planar.rings;
+  std::size_t ring_total = 0;
   const std::size_t loop_limit = brep.loops().size();
   const std::size_t coedge_limit = brep.coedges().size();
   LoopId loop_id = face.first_loop;
@@ -432,7 +449,10 @@ inline Result<void> tessellate_planar_face(TessellateState& state, const Brep& b
     }
     const Loop& loop = brep.loop(loop_id);
 
-    TessellateRing ring;
+    if (ring_total == rings.size()) rings.emplace_back();
+    TessellateRing& ring = rings[ring_total];
+    ring.points.clear();
+    ring.positions.clear();
     ring.outer = loop.outer;
     CoedgeId coedge_id = loop.start;
     std::size_t coedge_count = 0;
@@ -444,10 +464,10 @@ inline Result<void> tessellate_planar_face(TessellateState& state, const Brep& b
         return Error{Errc::invalid_topology, "tessellate: coedge cycle is cyclic", id.index(), 0u};
       }
       const Coedge& coedge = brep.coedge(coedge_id);
-      const Result<std::vector<std::uint32_t>> samples =
+      const Result<std::span<const std::uint32_t>> samples =
           tessellate_edge_positions(state, brep, coedge.edge, options.deflection);
       if (!samples.has_value()) return samples.error();
-      const std::vector<std::uint32_t>& order = samples.value();
+      const std::span<const std::uint32_t> order = samples.value();
       if (coedge.reversed) {
         for (std::size_t k = order.size(); k > 0; --k) {
           const std::uint32_t index = order[k - 1];
@@ -474,9 +494,10 @@ inline Result<void> tessellate_planar_face(TessellateState& state, const Brep& b
       return Error{Errc::degenerate, "tessellate: loop has fewer than three samples",
                    id.index(), 0u};
     }
-    rings.push_back(std::move(ring));
+    ++ring_total;
     loop_id = loop.next;
   }
+  rings.resize(ring_total);
 
   const TessellateRing* outer_ring = nullptr;
   for (const TessellateRing& ring : rings) {
@@ -491,13 +512,21 @@ inline Result<void> tessellate_planar_face(TessellateState& state, const Brep& b
     return Error{Errc::degenerate, "tessellate: face has no outer loop", id.index(), 0u};
   }
 
-  Polygon2d polygon;
+  Polygon2d& polygon = state.planar.polygon;
+  polygon.vertices.clear();
+  polygon.ring_starts.clear();
   polygon.ring_starts.push_back(0u);
-  TessellateTrimmedRingLayout layout;
-  std::vector<std::uint32_t> polygon_positions;
+  TessellateTrimmedRingLayout& layout = state.planar.layout;
+  layout.ring_of.clear();
+  layout.ring_begin.clear();
+  layout.ring_count.clear();
+  std::vector<std::uint32_t>& polygon_positions = state.planar.polygon_positions;
+  polygon_positions.clear();
   const auto append_ring = [&](const TessellateRing& ring, bool want_outer) -> Errc {
-    std::vector<Point2d> points;
-    std::vector<std::uint32_t> positions = ring.positions;
+    std::vector<Point2d>& points = state.planar.projected;
+    std::vector<std::uint32_t>& positions = state.planar.projected_positions;
+    points.clear();
+    positions.assign(ring.positions.begin(), ring.positions.end());
     points.reserve(positions.size());
     for (const std::uint32_t index : positions) {
       const Vec3d relative = state.mesh.positions[index] - origin;
@@ -608,12 +637,12 @@ inline Result<std::vector<TessellateBoundaryEdge>> tessellate_boundary_edges(
         }
       }
       if (!known) {
-        const Result<std::vector<std::uint32_t>> samples =
+        const Result<std::span<const std::uint32_t>> samples =
             tessellate_edge_positions(state, brep, coedge.edge, deflection);
         if (!samples.has_value()) return samples.error();
         TessellateBoundaryEdge boundary;
         boundary.edge = coedge.edge;
-        boundary.positions = samples.value();
+        boundary.positions.assign(samples.value().begin(), samples.value().end());
         edges.push_back(std::move(boundary));
       }
       coedge_id = coedge.next;
@@ -1701,10 +1730,10 @@ inline Result<void> tessellate_trimmed_face(TessellateState& state, const Brep& 
         return Error{Errc::invalid_topology, "tessellate: coedge cycle is cyclic", id.index(), 0u};
       }
       const Coedge& coedge = brep.coedge(coedge_id);
-      const Result<std::vector<std::uint32_t>> samples =
+      const Result<std::span<const std::uint32_t>> samples =
           tessellate_edge_positions(state, brep, coedge.edge, deflection);
       if (!samples.has_value()) return samples.error();
-      const std::vector<std::uint32_t>& order = samples.value();
+      const std::span<const std::uint32_t> order = samples.value();
       for (std::size_t k = 0; k < order.size(); ++k) {
         const std::uint32_t index = coedge.reversed ? order[order.size() - 1 - k] : order[k];
         if (!ring.positions.empty() && ring.positions.back() == index) continue;
@@ -2153,6 +2182,176 @@ inline bool tessellate_supported_surface(const SurfaceGeometry& surface) {
          std::holds_alternative<Sphere3>(surface) || std::holds_alternative<Torus3>(surface);
 }
 
+// Fast path for the canonical box: six planar faces, each a single outer loop of
+// four line edges. The generic face loop would sample twelve edges, project six
+// rings and ear-clip six convex quadrilaterals; for such a ring the clipper always
+// emits the same two triangles, so the box writes them directly from the same
+// welded vertex indices and in the same order. Every precondition that the
+// generic path would exercise differently (an interior sample on an edge, a
+// collinear or non-convex corner, an edge not shared by exactly two coedges)
+// makes this return false so the caller falls back to the face loop unchanged.
+inline bool tessellate_box_fast_path(TessellateState& state, const Brep& brep,
+                                     const std::vector<FaceId>& faces) {
+  if (faces.size() != 6u || brep.face_count() != 6u || brep.loop_count() != 6u ||
+      brep.coedge_count() != 24u || brep.edge_count() != 12u || brep.vertex_count() != 8u) {
+    return false;
+  }
+  const std::size_t vertex_slots = brep.vertices().size();
+
+  struct FacePlan {
+    std::array<std::uint32_t, 4> ring{};  // vertex slots in normalized ring order
+    bool reversed = false;
+  };
+  std::array<FacePlan, 6> plans{};
+
+  // Edge-use census without allocating: at most twelve distinct edges, each of
+  // which has to be traversed by exactly two coedges for the solid to be closed.
+  std::array<std::uint32_t, 12> used_edges{};
+  std::array<std::uint32_t, 12> used_count{};
+  std::size_t used_size = 0;
+
+  const auto fail = [&state]() {
+    state.mesh.positions.clear();
+    state.mesh.triangles.clear();
+    state.mesh.triangle_face.clear();
+    std::fill(state.vertices.begin(), state.vertices.end(), 0u);
+    std::fill(state.vertex_sampled.begin(), state.vertex_sampled.end(), char{0});
+    return false;
+  };
+
+  for (std::size_t face_index = 0; face_index < 6u; ++face_index) {
+    const FaceId id = faces[face_index];
+    const Face& face = brep.face(id);
+    if (face.surface >= brep.geometry().surfaces.size()) return fail();
+    const Plane3* plane = std::get_if<Plane3>(&brep.geometry().surfaces[face.surface]);
+    if (plane == nullptr) return fail();
+    if (!std::isfinite(plane->offset) || !tessellate_vec_finite(plane->normal)) return fail();
+    const double normal_length = std::hypot(plane->normal[0], plane->normal[1], plane->normal[2]);
+    if (!(normal_length > 0.0)) return fail();
+    const Vec3d unit{plane->normal[0] / normal_length, plane->normal[1] / normal_length,
+                     plane->normal[2] / normal_length};
+    const Vec3d reference =
+        std::fabs(unit[0]) < 0.9 ? Vec3d{1.0, 0.0, 0.0} : Vec3d{0.0, 1.0, 0.0};
+    const Vec3d raw_u = cross(reference, unit);
+    const double u_length = std::hypot(raw_u[0], raw_u[1], raw_u[2]);
+    if (!(u_length > 0.0)) return fail();
+    const Vec3d u_axis{raw_u[0] / u_length, raw_u[1] / u_length, raw_u[2] / u_length};
+    const Vec3d v_axis = cross(unit, u_axis);
+    const double offset = plane->offset / normal_length;
+    const Point3d origin{unit[0] * offset, unit[1] * offset, unit[2] * offset};
+
+    if (face.first_loop.is_null() || !brep.loop_alive(face.first_loop)) return fail();
+    const Loop& loop = brep.loop(face.first_loop);
+    if (!loop.outer || !loop.next.is_null() || loop.face != id || loop.start.is_null()) {
+      return fail();
+    }
+
+    std::array<std::uint32_t, 8> ring{};  // four coedges of two endpoints each
+    std::size_t ring_size = 0;
+    CoedgeId coedge_id = loop.start;
+    for (std::size_t step = 0; step < 4u; ++step) {
+      if (coedge_id.is_null() || !brep.coedge_alive(coedge_id)) return fail();
+      const Coedge& coedge = brep.coedge(coedge_id);
+      if (coedge.face != id || !brep.edge_alive(coedge.edge)) return fail();
+      const Edge& edge = brep.edge(coedge.edge);
+      if (edge.v0 == edge.v1 || !brep.vertex_alive(edge.v0) || !brep.vertex_alive(edge.v1)) {
+        return fail();
+      }
+      if (edge.v0.index() >= vertex_slots || edge.v1.index() >= vertex_slots) return fail();
+      // A no-geometry or line edge samples to exactly its two endpoints; a circle
+      // or spline edge would add interior samples and change the ring.
+      if (edge.curve != kNoGeometry && edge.curve < brep.geometry().curves.size() &&
+          !std::holds_alternative<LineCurve3>(brep.geometry().curves[edge.curve])) {
+        return fail();
+      }
+      const std::array<std::uint32_t, 2> slots{edge.v0.index(), edge.v1.index()};
+      for (const std::uint32_t slot : slots) {
+        if (state.vertex_sampled[slot] != 0) continue;
+        const Point3d& point = brep.vertices()[slot].point;
+        if (!tessellate_point_finite(point)) return fail();
+        state.mesh.positions.push_back(point);
+        state.vertices[slot] = static_cast<std::uint32_t>(state.mesh.positions.size() - 1u);
+        state.vertex_sampled[slot] = 1;
+      }
+      const std::uint32_t from = coedge.reversed ? slots[1] : slots[0];
+      const std::uint32_t to = coedge.reversed ? slots[0] : slots[1];
+      if (ring_size == 0u || ring[ring_size - 1u] != from) ring[ring_size++] = from;
+      if (ring[ring_size - 1u] != to) ring[ring_size++] = to;
+
+      std::size_t used = 0;
+      while (used < used_size && used_edges[used] != coedge.edge.index()) ++used;
+      if (used == used_size) {
+        if (used_size == used_edges.size()) return fail();
+        used_edges[used_size] = coedge.edge.index();
+        used_count[used_size] = 0u;
+        ++used_size;
+      }
+      if (++used_count[used] > 2u) return fail();
+      coedge_id = coedge.next;
+    }
+    if (coedge_id != loop.start) return fail();
+    if (ring_size > 0u && ring[0] == ring[ring_size - 1u]) --ring_size;
+    if (ring_size != 4u) return fail();
+    for (std::size_t a = 0; a < 4u; ++a) {
+      for (std::size_t b = a + 1u; b < 4u; ++b) {
+        if (ring[a] == ring[b]) return fail();
+      }
+    }
+
+    std::array<Point2d, 4> points{};
+    for (std::size_t k = 0; k < 4u; ++k) {
+      const Vec3d relative = brep.vertices()[ring[k]].point - origin;
+      points[k] = Point2d{dot(relative, u_axis), dot(relative, v_axis)};
+      if (!(std::isfinite(points[k][0]) && std::isfinite(points[k][1]))) return fail();
+    }
+    const int orientation = ring_orientation2(points);
+    if (orientation == 0) return fail();
+    if (orientation < 0) {
+      std::reverse(ring.begin(), ring.begin() + 4);
+      std::reverse(points.begin(), points.end());
+    }
+    // Strict convexity is what makes the ear clipper deterministic here; it also
+    // rules out the collinear corners the clipper would merge away.
+    for (std::size_t k = 0; k < 4u; ++k) {
+      const Point2d& previous = points[(k + 3u) % 4u];
+      const Point2d& current = points[k];
+      const Point2d& next = points[(k + 1u) % 4u];
+      if (sign_orient2d(previous[0], previous[1], current[0], current[1], next[0], next[1]) <= 0) {
+        return fail();
+      }
+    }
+    plans[face_index].ring = {ring[0], ring[1], ring[2], ring[3]};
+    plans[face_index].reversed = face.reversed;
+  }
+
+  if (used_size != used_edges.size()) return fail();
+  for (std::size_t k = 0; k < used_size; ++k) {
+    if (used_count[k] != 2u) return fail();
+  }
+
+  state.mesh.positions.reserve(8u);
+  state.mesh.triangles.reserve(12u);
+  state.mesh.triangle_face.reserve(12u);
+  for (std::size_t face_index = 0; face_index < 6u; ++face_index) {
+    const FacePlan& plan = plans[face_index];
+    const std::uint32_t r0 = state.vertices[plan.ring[0]];
+    const std::uint32_t r1 = state.vertices[plan.ring[1]];
+    const std::uint32_t r2 = state.vertices[plan.ring[2]];
+    const std::uint32_t r3 = state.vertices[plan.ring[3]];
+    std::array<std::uint32_t, 3> first{r3, r0, r1};
+    std::array<std::uint32_t, 3> second{r1, r2, r3};
+    if (plan.reversed) {
+      std::swap(first[1], first[2]);
+      std::swap(second[1], second[2]);
+    }
+    state.mesh.triangles.push_back(first);
+    state.mesh.triangle_face.push_back(faces[face_index].index());
+    state.mesh.triangles.push_back(second);
+    state.mesh.triangle_face.push_back(faces[face_index].index());
+  }
+  return true;
+}
+
 // Split cones and their caps sample one cut circle through different code paths,
 // so the same rim can appear as several position slots whose coordinates differ
 // in the last bit (glibc) while MSVC happens to agree. Snap every position that
@@ -2237,6 +2436,50 @@ inline void tessellate_snap_cone_rims(TriMesh& mesh, const Brep& brep, double de
   mesh.triangle_face.resize(kept);
 }
 
+// Shared body of tessellate(). `allow_box_fast_path` is false only for tests that
+// need the generic per-face loop as a reference; the public entry always passes
+// true.
+inline Result<TriMesh> tessellate_impl(const Brep& brep, const TessellationOptions& options,
+                                       bool allow_box_fast_path) {
+  if (!std::isfinite(options.deflection) || !(options.deflection > 0.0)) {
+    return Error{Errc::tolerance_violation, "tessellate: deflection must be finite and positive",
+                 0u, 0u};
+  }
+  if (!std::isfinite(options.angle_tolerance) || !(options.angle_tolerance > 0.0)) {
+    return Error{Errc::tolerance_violation,
+                 "tessellate: angle tolerance must be finite and positive", 0u, 0u};
+  }
+
+  const std::vector<FaceId> faces = brep.face_ids();
+  for (const FaceId id : faces) {
+    const Face& face = brep.face(id);
+    if (face.surface >= brep.geometry().surfaces.size() ||
+        !tessellate_supported_surface(brep.geometry().surfaces[face.surface])) {
+      return Error{Errc::unsupported, "tessellate: unsupported surface type", id.index(), 0u};
+    }
+  }
+
+  TessellateState state;
+  state.edges.resize(brep.edges().size());
+  state.vertices.resize(brep.vertices().size());
+  state.vertex_sampled.assign(brep.vertices().size(), 0);
+  if (allow_box_fast_path && tessellate_box_fast_path(state, brep, faces)) {
+    tessellate_snap_cone_rims(state.mesh, brep, options.deflection);
+    return std::move(state.mesh);
+  }
+  for (const FaceId id : faces) {
+    const Face& face = brep.face(id);
+    const bool planar =
+        std::holds_alternative<Plane3>(brep.geometry().surfaces[face.surface]);
+    const Result<void> status = planar
+                                    ? tessellate_planar_face(state, brep, id, options)
+                                    : sample_curved_face(state, brep, id, options);
+    if (!status.has_value()) return status.error();
+  }
+  tessellate_snap_cone_rims(state.mesh, brep, options.deflection);
+  return std::move(state.mesh);
+}
+
 }  // namespace detail
 
 // Triangulates the faces of `brep`. Planar faces are triangulated from their
@@ -2255,39 +2498,7 @@ inline void tessellate_snap_cone_rims(TriMesh& mesh, const Brep& brep, double de
 // from a normal angle would break the bit-identical weld to those seams. It is
 // validated here and reserved for a future adaptive pass.
 inline Result<TriMesh> tessellate(const Brep& brep, const TessellationOptions& options) {
-  if (!std::isfinite(options.deflection) || !(options.deflection > 0.0)) {
-    return Error{Errc::tolerance_violation, "tessellate: deflection must be finite and positive",
-                 0u, 0u};
-  }
-  if (!std::isfinite(options.angle_tolerance) || !(options.angle_tolerance > 0.0)) {
-    return Error{Errc::tolerance_violation,
-                 "tessellate: angle tolerance must be finite and positive", 0u, 0u};
-  }
-
-  const std::vector<FaceId> faces = brep.face_ids();
-  for (const FaceId id : faces) {
-    const Face& face = brep.face(id);
-    if (face.surface >= brep.geometry().surfaces.size() ||
-        !detail::tessellate_supported_surface(brep.geometry().surfaces[face.surface])) {
-      return Error{Errc::unsupported, "tessellate: unsupported surface type", id.index(), 0u};
-    }
-  }
-
-  detail::TessellateState state;
-  state.edges.resize(brep.edges().size());
-  state.vertices.resize(brep.vertices().size());
-  state.vertex_sampled.assign(brep.vertices().size(), 0);
-  for (const FaceId id : faces) {
-    const Face& face = brep.face(id);
-    const bool planar =
-        std::holds_alternative<Plane3>(brep.geometry().surfaces[face.surface]);
-    const Result<void> status = planar
-                                    ? detail::tessellate_planar_face(state, brep, id, options)
-                                    : detail::sample_curved_face(state, brep, id, options);
-    if (!status.has_value()) return status.error();
-  }
-  detail::tessellate_snap_cone_rims(state.mesh, brep, options.deflection);
-  return std::move(state.mesh);
+  return detail::tessellate_impl(brep, options, true);
 }
 
 }  // namespace v1
