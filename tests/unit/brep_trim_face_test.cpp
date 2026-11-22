@@ -3742,3 +3742,31 @@ TEST_CASE("trim face: a stored inner loop is refused publicly") {
   CHECK(result.error().context_a == face.index());
   CHECK(result.error().context_b == 1u);
 }
+
+TEST_CASE("trim_face: a diameter cut on the base disk reuses the rim vertex") {
+  const Brep cone = make_cone(Point3d{0,0,0}, Vec3d{0,0,1}, 1.0, 2.0, kTol).value();
+  const FaceId base = face_with_surface<Plane3>(cone);
+  // Base chart uv = (y, x); the cut is the diameter y in [-1, 1] at x = 0.
+  const std::vector<Point2d> diameter{{-1.0, 0.0}, {1.0, 0.0}};
+  const auto split = split_face_curved(cone, base, std::vector<FaceCut>{FaceCut{diameter}}, 1e-9);
+  REQUIRE(split.has_value());
+  REQUIRE(split.value().size() == 2u);
+  double area = 0.0;
+  for (const CurvedFragment& fragment : split.value()) {
+    REQUIRE(fragment.loops_uv.size() == 1u);
+    const std::vector<Point2d>& ring = fragment.loops_uv.front();
+    area += std::fabs(signed_area2(ring));
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+      const Point2d& a = ring[i];
+      const Point2d& b = ring[(i + 1) % ring.size()];
+      CHECK(std::hypot(a[0] - b[0], a[1] - b[1]) > 1e-12);
+    }
+  }
+  // The base loop is a 32-gon inscribed in the rim circle, so the split conserves
+  // its polygonal area (3.121445...), not kPi; compare against the face boundary.
+  const auto base_loops = face_loops_uv(cone, base, 1e-9);
+  REQUIRE(base_loops.has_value());
+  REQUIRE(base_loops.value().size() == 1u);
+  CHECK(area == doctest::Approx(ring_area(base_loops.value().front().points))
+                     .epsilon(1e-12));
+}

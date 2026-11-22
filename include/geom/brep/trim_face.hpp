@@ -154,6 +154,22 @@ inline TrimFaceSnap trim_face_find_snap(
   return snap;
 }
 
+// Reuses an existing loop vertex when `point` lies within `radius` of one, so a
+// projected endpoint lands exactly on the rim vertex instead of a distinct point
+// a few ulps away.
+inline bool trim_face_reuse_loop_vertex(std::span<const std::vector<Point2d>> loops,
+                                        Point2d& point, double radius) {
+  for (const std::vector<Point2d>& loop : loops) {
+    for (const Point2d& vertex : loop) {
+      if (std::hypot(vertex[0] - point[0], vertex[1] - point[1]) <= radius) {
+        point = vertex;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 inline bool trim_face_snap_better(const TrimFaceSnap& candidate,
                                   const TrimFaceSnap& current) noexcept {
   if (candidate.boundary != current.boundary) return candidate.boundary;
@@ -2675,6 +2691,10 @@ inline Result<std::vector<CurvedFragment>> split_face_curved(
                   projection, on_arc, raw[0], true);
               if (uv.has_value()) {
                 snap.point = uv.value();
+                if (detail::trim_face_reuse_loop_vertex(loops, snap.point,
+                                                        snap_radius)) {
+                  snap.vertex = true;
+                }
                 projected = true;
               }
             }
