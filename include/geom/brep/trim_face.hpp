@@ -1777,6 +1777,16 @@ inline Result<std::vector<CurvedFragment>> trim_face_split_domain(
         // repeated first point, i.e. along the meridian chords rim -> pole ->
         // rim. The pole comes from the domain, so v is exactly the panel edge.
         points.push_back(Point2d{points.back()[0], pole_v});
+        if (domain.collapsed_row_is_linear_apex &&
+            !trim_face_seam_only_near_side(points.front()[1], pole_v)) {
+          // The run started on the opposite side row, so the ring must still
+          // travel the whole collapsed row to the front's meridian: the row is
+          // one 3D point, and its copy at the front's u carries that travel.
+          // Without it the ring closes with a uv diagonal from the pole to the
+          // front, which under-covers the chart by the front's u extent and
+          // leaves the pcurve off the ring.
+          points.push_back(Point2d{points.front()[0], pole_v});
+        }
         points.push_back(points.front());
         if (points.size() < 3) continue;
         trim_face_normalize_ring(points, true);

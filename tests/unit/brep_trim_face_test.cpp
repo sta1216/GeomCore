@@ -805,7 +805,7 @@ TEST_CASE("trim_face: a closed horizontal cut splits a cone cap from a band") {
     for (const Point2d& p : fragment.loops_uv.front()) {
       if (p[1] == v_apex) ++apex_points;
     }
-    if (apex_points == 1u) {
+    if (apex_points == 2u) {
       cap_index = i;
     } else {
       CHECK(apex_points == 0u);
@@ -815,12 +815,12 @@ TEST_CASE("trim_face: a closed horizontal cut splits a cone cap from a band") {
   const CurvedFragment& cap = fragments.value()[cap_index];
   const CurvedFragment& band = fragments.value()[1u - cap_index];
   CHECK(std::fabs(signed_area2(cap.loops_uv.front())) ==
-        doctest::Approx(kPi).epsilon(1e-12));
+        doctest::Approx(2.0 * kPi).epsilon(1e-9));
   CHECK(std::fabs(signed_area2(band.loops_uv.front())) ==
         doctest::Approx(2.0 * kPi).epsilon(1e-12));
   CHECK(std::fabs(signed_area2(cap.loops_uv.front())) +
             std::fabs(signed_area2(band.loops_uv.front())) ==
-        doctest::Approx(3.0 * kPi).epsilon(1e-12));
+        doctest::Approx(4.0 * kPi).epsilon(1e-9));
 }
 
 TEST_CASE("trim_face: a meridian open cut splits the cone chart in two") {
@@ -885,19 +885,20 @@ TEST_CASE("trim_face: a meridian open cut splits the cone chart in two") {
   }
   // A single meridian at u = 0.7 leaves the chart in two pieces: the wedge
   // between the seam and the cut (width 0.7) and the rest of the chart (width
-  // 2*pi - 0.7). It cannot halve the chart; equal areas would need u = pi. The
-  // wedge's area is half its chart area because the pole closure replaces the
-  // collapsed top edge with a chord, the same convention as the cap above.
+  // 2*pi - 0.7). It cannot halve the chart; equal areas would need u = pi. Each
+  // piece's apex ring closes along the whole collapsed row, so the wedge is the
+  // full sector 2 * (0.7 * v_apex / 2) = 1.4 and the two pieces cover 4*pi.
   // Fragments are pushed in arrangement-face order; on this fixture the
   // seam-side wedge comes first, so the expected areas below are in that
   // empirical order.
   REQUIRE(areas.size() == 2u);
   REQUIRE(apex_points.size() == 2u);
-  CHECK(areas[0] == doctest::Approx(0.7).epsilon(1e-9));
+  CHECK(areas[0] == doctest::Approx(1.4).epsilon(1e-9));
   CHECK(areas[1] == doctest::Approx(2.0 * (2.0 * kPi - 0.7)).epsilon(1e-9));
-  // Both pieces carry the cut's apex end. The wide piece also carries the apex
-  // at the back seam copy, where its collapsed edge starts.
-  CHECK(apex_points[0] == 1u);
+  CHECK(areas[0] + areas[1] == doctest::Approx(4.0 * kPi).epsilon(1e-9));
+  // Both pieces carry two apex copies: the cut's end and the back-seam copy
+  // that closes the ring along the collapsed row.
+  CHECK(apex_points[0] == 2u);
   CHECK(apex_points[1] == 2u);
 
   // The split is deterministic: a second run repeats every ring bitwise.
@@ -931,6 +932,45 @@ TEST_CASE("trim_face: a meridian open cut splits the cone chart in two") {
               split.value()[i].loops[l][k][2]);
       }
     }
+  }
+}
+
+TEST_CASE("trim_face: the apex ring of a seam-adjacent wedge is the full sector") {
+  const Brep cone = make_cone(Point3d{0,0,0}, Vec3d{0,0,1}, 1.0, 2.0, kTol).value();
+  const FaceId lateral = face_with_surface<Cone3>(cone);
+  const double v_apex = 1.0 / std::tan(std::atan2(1.0, 2.0));
+  const auto split = [&](double u_cut) {
+    std::vector<Point2d> meridian{{u_cut, 0.0}, {u_cut, v_apex}};
+    return split_face_curved(cone, lateral, std::vector<FaceCut>{FaceCut{meridian}}, 1e-9);
+  };
+  // u = pi/2: seam-adjacent wedge, 19-point ring ending with both apex copies.
+  const auto half = split(kPi / 2.0);
+  REQUIRE(half.has_value());
+  REQUIRE(half.value().size() == 2u);
+  const std::vector<Point2d>& wedge = half.value()[0].loops_uv.front();
+  REQUIRE(wedge.size() == 19u);
+  CHECK(wedge[17][0] == doctest::Approx(kPi / 2.0));
+  CHECK(wedge[17][1] == doctest::Approx(v_apex));
+  CHECK(wedge[18][0] == doctest::Approx(0.0));
+  CHECK(wedge[18][1] == doctest::Approx(v_apex));
+  CHECK(std::fabs(signed_area2(wedge)) == doctest::Approx(kPi).epsilon(1e-9));
+  // u = 0.7: the same closure at a non-side sample.
+  const auto small = split(0.7);
+  REQUIRE(small.has_value());
+  REQUIRE(small.value().size() == 2u);
+  const std::vector<Point2d>& sector = small.value()[0].loops_uv.front();
+  REQUIRE(sector.size() == 11u);
+  CHECK(sector[9][0] == doctest::Approx(0.7));
+  CHECK(sector[9][1] == doctest::Approx(v_apex));
+  CHECK(sector[10][0] == doctest::Approx(0.0));
+  CHECK(sector[10][1] == doctest::Approx(v_apex));
+  CHECK(std::fabs(signed_area2(sector)) == doctest::Approx(1.4).epsilon(1e-9));
+  for (const auto& result : {half, small}) {
+    double sum = 0.0;
+    for (const CurvedFragment& fragment : result.value()) {
+      sum += std::fabs(signed_area2(fragment.loops_uv.front()));
+    }
+    CHECK(sum == doctest::Approx(4.0 * kPi).epsilon(1e-9));
   }
 }
 
@@ -1100,10 +1140,13 @@ TEST_CASE(
   REQUIRE(areas.size() == 2u);
   REQUIRE(apex_points.size() == 2u);
   // Fragment order is the arrangement-face order pinned by Task 3: the
-  // seam-side 0.7 wedge first, then the wide chart remainder.
-  CHECK(areas[0] == doctest::Approx(0.7).epsilon(1e-9));
+  // seam-side 0.7 wedge first, then the wide chart remainder. The wedge's apex
+  // ring closes along the whole collapsed row, so its area is the full sector
+  // 1.4, and the two pieces cover 4*pi.
+  CHECK(areas[0] == doctest::Approx(1.4).epsilon(1e-9));
   CHECK(areas[1] == doctest::Approx(2.0 * (2.0 * kPi - 0.7)).epsilon(1e-9));
-  CHECK(apex_points[0] == 1u);
+  CHECK(areas[0] + areas[1] == doctest::Approx(4.0 * kPi).epsilon(1e-9));
+  CHECK(apex_points[0] == 2u);
   CHECK(apex_points[1] == 2u);
 
   const Result<std::vector<CurvedFragment>> again =

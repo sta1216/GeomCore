@@ -44,6 +44,10 @@ struct TrimFaceDomain {
   bool periodic_v = false;
   std::array<TrimSideKind, 4> sides{};
 
+  // A cone's top row is a single 3D apex: its uv row may be closed linearly,
+  // unlike a sphere pole row whose ring is a closed curve at constant v.
+  bool collapsed_row_is_linear_apex = false;
+
   bool collapsed_v() const noexcept {
     return sides[2] == TrimSideKind::kCollapsed ||
            sides[3] == TrimSideKind::kCollapsed;
@@ -98,6 +102,7 @@ inline Result<TrimFaceDomain> trim_face_domain(const Brep& brep, FaceId face,
         domain.sides = {TrimSideKind::kSeamCopy, TrimSideKind::kSeamCopy,
                         TrimSideKind::kRealBoundary,
                         TrimSideKind::kCollapsed};
+        domain.collapsed_row_is_linear_apex = true;
         return domain;
       }
     }
