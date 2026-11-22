@@ -33,7 +33,7 @@ Commands and full tables are in `docs/benchmarks/m3-5.md`. Release, three clean 
 | BVH build | 1,372 ms | 287-300 ms | ~4.6x | 350 ms PASS |
 | raycast | 0.45 Mray/s | 0.66 Mray/s | 1.47x | 8 Mray/s FAIL (documented) |
 | box meshing | 0.22 Mtri/s | 1.46-1.65 Mtri/s | 6.6-7.5x | 1.0 Mtri/s PASS |
-| QA-1 union | 1,888 ms | 887-1,037 ms | 2.1x measured, code untouched (run variance) | 80 ms FAIL (next slice) |
+| QA-1 union | 1,888 ms | 887-1,037 ms | 1.8-2.1x measured, code untouched (run variance) | 80 ms FAIL (next slice) |
 | QA-9 SSI | 9.6-19.5 ms | unchanged | - | 100 us FAIL (next slice) |
 
 Correctness evidence: BVH build is bitwise deterministic on the same path; serial and parallel builds produce identical public query results (node numbering may differ); the coplanar two-plane regression (2048 triangles, exact repro ray, 300 rays, 200 nearest queries) matches brute force; box output is bitwise identical to the generic path for four boxes at two deflections, including reversed faces, and canonical hashes for box/cylinder/torus are unchanged; QA-10 results remain watertight and outward. Focused Release runs: BVH 23 cases / 8,873 assertions; tessellation 82 cases / 9,226 assertions.
