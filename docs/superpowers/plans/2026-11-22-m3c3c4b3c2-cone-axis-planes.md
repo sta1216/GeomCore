@@ -343,6 +343,8 @@ git commit -m "feat(boolean): cut cones with planes through the axis"
 **Files:**
 - Create: `docs/adr/0038-cone-axis-plane-cuts.md`
 - Create: `docs/benchmarks/m3c3c4b3c2.md`
+- Modify: `docs/adr/0036-cone-tessellation-sag.md`（轴平面延期句指向 ADR-0038）
+- Modify: `docs/adr/0037-torus-twisted-cuts.md`（同上）
 - Modify: `docs/architecture/geometry-library-architecture.md`（§16.3 末尾加 M3c-3c-4b3c-2 段；ADR-0037 的 cone 延期句改为指向 ADR-0038）
 - Modify: `docs/superpowers/plans/2026-11-22-m3c3c4b3c2-cone-axis-planes.md`（勾选自检）
 
@@ -364,7 +366,10 @@ Run: Debug/Release 全量；把实际 `N cases / M assertions` 写进 ADR、benc
 - [x] **Step 4: 提交**
 
 ```bash
-git add docs/adr/0038-cone-axis-plane-cuts.md docs/benchmarks/m3c3c4b3c2.md \
+git add docs/adr/0035-cone-boolean.md docs/adr/0036-cone-tessellation-sag.md \
+        docs/adr/0037-torus-twisted-cuts.md docs/adr/0038-cone-axis-plane-cuts.md \
+        docs/adr/0034-cone-chart-open-cuts.md \
+        docs/benchmarks/m3c3c4b3c2.md \
         docs/architecture/geometry-library-architecture.md \
         docs/superpowers/plans/2026-11-22-m3c3c4b3c2-cone-axis-planes.md \
         include/geom/brep/boolean_solid_curved.hpp
@@ -394,8 +399,8 @@ git commit -m "docs(m3c3c4b3c2): record the axis-plane cone contract"
 
 ## Self-Review
 
-- [ ] 每个 Task 的测试名、数值、文件行号与探针报告一致。
-- [ ] Task 3 依赖 Task 1/2；三者按序执行，不并行改同一头文件。
-- [ ] Review Focus 5 条各自有任务测试（1→Task 3 apex-only，2→Task 3 窄切割面，3→Task 3 含缝射线，4→Task 3 旋转/平移，5→Task 3 apex 用例 + 既有平移锥拒绝）。
-- [ ] 无占位符、无未定义 helper、无跨任务类型漂移。
-- [ ] 允许的 pin 变更只有 3 个；文档计数在 Task 4 填入实测值。
+- [x] 每个 Task 的测试名、数值、文件行号与探针报告一致。
+- [x] Task 3 依赖 Task 1/2；三者按序执行，不并行改同一头文件。
+- [x] Review Focus 5 条各自有任务测试（1→Task 3 apex-only，2→Task 3 窄切割面，3→Task 3 含缝射线，4→Task 3 旋转/平移，5→Task 3 apex 用例 + 既有平移锥拒绝）。
+- [x] 无占位符、无未定义 helper、无跨任务类型漂移。
+- [x] 允许的 pin 变更只有 3 个；文档计数在 Task 4 填入实测值。

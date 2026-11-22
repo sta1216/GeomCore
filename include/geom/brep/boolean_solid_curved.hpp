@@ -7,8 +7,8 @@
 // only). Operands must be built from planes, cylinders, tori, whole cones, and
 // (for the sphere/sphere lens only) whole spheres; a torus can only be cut by a
 // plane (perpendicular to its axis or containing it), and a cone only by a plane
-// perpendicular to its axis (an axis-containing or oblique plane would need the
-// half-turn rim arcs and the ellipse this slice cannot represent). A cone is
+// perpendicular to its axis or containing it (an oblique plane would need the
+// ellipse this slice cannot represent). A cone is
 // accepted only as a whole operand (one shell, one lateral face and its base cap,
 // the canonical seam-only chart) and only against an all-planar partner; a cone
 // paired with a cone, torus, cylinder or sphere is refused before any cut work.

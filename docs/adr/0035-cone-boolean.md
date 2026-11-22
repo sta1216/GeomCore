@@ -2,7 +2,8 @@
 
 Status: accepted for M3c-3c-4b2 (2026-11-19); the trimmed-cone tessellation
 limitation is narrowed by ADR-0036 (frusta now tessellate; apex-bearing fragments
-keep the canonical fan).
+keep the canonical fan). Axis-containing cone cuts are supported since ADR-0038
+(M3c-3c-4b3c-2); oblique planes remain deferred to M3c-3c-4b3.
 
 ## Context
 
@@ -34,8 +35,9 @@ A cone operand is accepted only when all of the following hold:
   loop, that loop spans the full `u` period, and its `v` range reaches both the base
   row and the collapsed apex row;
 - the other operand is entirely planar, so every cut of the cone is a plane cut;
-- every cone/plane pair is either perpendicular to the cone axis (within `1e-9`) or
-  provably disjoint (see the conservative predicate below);
+- every cone/plane pair is perpendicular to the cone axis (within `1e-9`), contains
+  the cone axis (within `1e-9`, with the cone origin on the plane within the
+  boolean tolerance), or is provably disjoint (see the conservative predicate below);
 - the two parameter copies (`u = 0` and `u = 2*pi`) of a cut-circle seam point stay
   distinct in double precision. A placement where they round to the same point is
   refused deterministically (see the refusals table); re-centring the operands to
@@ -104,9 +106,11 @@ cone/cylinder and cone/sphere; curved/curved cutters have no analytic cone cut
 circle, no apex fan and no chart contract in this slice.
 
 Every cone/plane face pair is then checked with
-`curved_boolean_cone_plane_cut_supported` (`boolean_solid_curved.hpp:1378-1397`):
+`curved_boolean_cone_plane_cut_supported` (`boolean_solid_curved.hpp:1445-1466`):
 
 - perpendicular within `kCurvedBooleanConePerpendicularSlack = 1e-9` is accepted;
+- containing the cone axis (normal perpendicular to the axis within `1e-9`, cone
+  origin on the plane within the boolean tolerance) is accepted (ADR-0038);
 - any other orientation is accepted only when the plane misses a conservative
   bounding sphere of the cone: centre `origin + axis*h/3`, radius
   `hypot(radius, 2*h/3)`, where `h = radius/tan(half_angle)`. The sphere contains
@@ -119,7 +123,7 @@ cone (whose maximum radius is 1). The orientation is harmless only when the plan
 provably cuts nothing, which avoids producing half-turn rim arcs or an ellipse the
 splitter cannot represent. The refusal is
 
-`unsupported "boolean_solid_curved: cone cutters must be perpendicular to the cone axis; oblique and axis-containing planes are deferred to M3c-3c-4b3"`
+`unsupported "boolean_solid_curved: cone cutters must be perpendicular to or contain the cone axis; oblique planes are deferred to M3c-3c-4b3"`
 
 with the cone face and the plane face in the error context.
 
@@ -178,7 +182,7 @@ a cone cut by a plane now assemble into one closed shell.
 | input | result |
 | --- | --- |
 | cone/cone, cone/torus, cone/cylinder, cone/sphere (including a disjoint pair) | `unsupported "boolean_solid_curved: cone operands only support plane cutters"` |
-| oblique or axis-containing plane that reaches the cone's bounding sphere | `unsupported "boolean_solid_curved: cone cutters must be perpendicular to the cone axis; oblique and axis-containing planes are deferred to M3c-3c-4b3"` |
+| oblique plane that reaches the cone's bounding sphere | `unsupported "boolean_solid_curved: cone cutters must be perpendicular to or contain the cone axis; oblique planes are deferred to M3c-3c-4b3"` |
 | trimmed cone fragment (not one loop over the full chart) | `unsupported "boolean_solid_curved: cone operands must be whole cones; trimmed cone fragments are not supported"` |
 | cone placement where the two seam copies of a cut-circle point round to the same double (observed with base centre `y = -2`, or `|y| >= 2.25`, and radius `0.5`; `y = +2` still passes) | `unsupported "boolean_solid_curved: cone seam copies coincide at this placement; cone booleans at this offset are deferred to M3c-3c-4b3"` |
 | apex-bearing trimmed ring that reaches the trimmed path | `unsupported "tessellate: trimmed curved face boundary is not rectilinear"`; frusta tessellate since M3c-3c-4b3a (ADR-0036), and apex-bearing fragments keep the canonical `tessellate_cone_face` fan |
@@ -195,7 +199,7 @@ canonical fan.
 ### Deferred
 
 Trimmed cone fragments as boolean operands, cone/cone and cone/curved cutters, oblique
-and axis-containing planes (which need half-turn rim arcs or an exact ellipse), and
+planes (ellipse sections), and
 NURBS operands stay outside this slice. Frusta produced by a supported cut now
 tessellate (ADR-0036), while apex-bearing fragments keep the canonical whole-ring fan.
 The whole-cone restriction is also why a cone that is one face of a larger B-rep is
@@ -258,5 +262,5 @@ QA-22 renames the existing three-operation case, so it adds no case or assertion
   zipper joins the two independently sampled rims, and the sag metric now measures
   the surface at the same azimuth and axial height. Apex-bearing fragments still use
   the whole-ring fan of `tessellate_cone_face`; no supported path produces an apex
-ring in the trimmed path. General curved/curved cone booleans and oblique/axis-containing
+ring in the trimmed path. General curved/curved cone booleans and oblique
   planes remain deferred.

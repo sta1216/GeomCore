@@ -120,7 +120,8 @@ exit 0; QA-21 adds 1 case / 32 assertions over the 1000 / 670,351 baseline.
   closed shell (ADR-0035).
 - **The boolean gate is open for whole cones cut by planes.** `boolean_solid_curved`
   accepts the canonical whole cone and refuses only curved partners, trimmed
-  fragments and oblique/axis-containing planes, with the messages in ADR-0035.
+  fragments and oblique planes, with the messages in ADR-0035; axis-containing
+  planes are supported since ADR-0038.
 - **Trimmed cone faces are still refused by the splitter.** Only the canonical full
   half-chart face is split; a trimmed cone face keeps
   `"split_face_curved: trimmed cone faces are not supported yet"`. The older
