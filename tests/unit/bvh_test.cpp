@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -13,6 +14,44 @@ using geom::v1::Point3d;
 using geom::v1::Ray3d;
 using geom::v1::Triangle3d;
 using geom::v1::Vec3d;
+
+namespace geom {
+inline namespace v1 {
+
+// Test-only window on the node layout for the determinism digest. `Bvh` declares
+// this type a friend; it is not part of the public API.
+struct BvhTestAccess {
+  static constexpr std::uint32_t parallel_threshold() noexcept {
+    return Bvh::kParallelMinPrims;
+  }
+
+  static std::uint64_t digest(const Bvh& bvh) noexcept {
+    std::uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](std::uint64_t v) noexcept {
+      for (int i = 0; i < 8; ++i) {
+        h ^= (v >> (8 * i)) & 0xFFu;
+        h *= 1099511628211ull;
+      }
+    };
+    mix(bvh.nodes_.size());
+    for (const auto& n : bvh.nodes_) {
+      for (int i = 0; i < 3; ++i) {
+        mix(std::bit_cast<std::uint64_t>(n.box.lo[i]));
+        mix(std::bit_cast<std::uint64_t>(n.box.hi[i]));
+      }
+      mix(n.first);
+      mix(n.count);
+      mix(static_cast<std::uint32_t>(n.left));
+      mix(static_cast<std::uint32_t>(n.right));
+    }
+    mix(bvh.order_.size());
+    for (std::uint32_t prim : bvh.order_) mix(prim);
+    return h;
+  }
+};
+
+}  // namespace v1
+}  // namespace geom
 
 namespace {
 
@@ -451,4 +490,34 @@ TEST_CASE("BVH raycast and nearest are scale-invariant for tiny triangles") {
     CHECK(d2 == 1.0);
     CHECK(squared_distance(Point3d{s, s, 1.0}, tri) == doctest::Approx(1.0));
   }
+}
+
+TEST_CASE("BVH build is deterministic") {
+  // A 200 x 200 grid is above the parallel-build threshold, so the digest also
+  // catches a node layout that depends on how the frontier subtrees were
+  // scheduled: every build must produce byte-identical nodes and order_.
+  std::vector<Triangle3d> tris;
+  for (int y = 0; y < 200; ++y) {
+    for (int x = 0; x < 200; ++x) {
+      const double fx = static_cast<double>(x);
+      const double fy = static_cast<double>(y);
+      tris.push_back(Triangle3d{Point3d{fx, fy, 0.0}, Point3d{fx + 1.0, fy, 0.0},
+                                Point3d{fx, fy + 1.0, 0.0}});
+      tris.push_back(Triangle3d{Point3d{fx + 1.0, fy, 0.0}, Point3d{fx + 1.0, fy + 1.0, 0.0},
+                                Point3d{fx, fy + 1.0, 0.0}});
+    }
+  }
+  REQUIRE(tris.size() >= geom::v1::BvhTestAccess::parallel_threshold());
+
+  Bvh first;
+  first.build(tris);
+  const std::uint64_t expected = geom::v1::BvhTestAccess::digest(first);
+
+  Bvh second;
+  second.build(tris);
+  CHECK(geom::v1::BvhTestAccess::digest(second) == expected);
+
+  // Rebuilding the same object must not inherit state from the previous build.
+  first.build(tris);
+  CHECK(geom::v1::BvhTestAccess::digest(first) == expected);
 }

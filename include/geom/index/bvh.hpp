@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <future>
 #include <limits>
 #include <span>
 #include <utility>
@@ -97,22 +98,37 @@ inline double squared_distance(Point3d p, const Triangle3d& t) noexcept {
 // Bounding volume hierarchy over triangles, built with a 12-bin surface area
 // heuristic and queried iteratively (no recursion on the query path).
 //
-// Memory layout. All primitives live in one contiguous vector in build order;
-// `order_` is a permutation of primitive indices and every leaf covers a
-// contiguous range `[first, first + count)` of that permutation. Nodes live in
-// one contiguous vector; a node is a leaf when `count != 0`, otherwise it is an
-// interior node with `left`/`right` child indices (int32, never negative for a
-// valid node). A depth guard bounds the tree at 64 levels, so the explicit
-// query stacks never exceed 65 entries.
+// Memory layout. The primitives are stored structure-of-arrays (triangles and
+// boxes in separate contiguous vectors; a primitive's centroid is the midpoint of
+// its box, so it needs no array of its own); `order_` is a permutation of
+// primitive indices and every leaf covers a contiguous range
+// `[first, first + count)` of that permutation. Nodes live in one contiguous
+// vector; a node is a leaf when `count != 0`, otherwise it is an interior node
+// with `left`/`right` child indices (int32, never negative for a valid node). A
+// depth guard bounds the tree at 64 levels, so the explicit query stacks never
+// exceed 65 entries.
 //
 // Build: 12 bins over the centroid bounds of the current range, cost
 // `traversal + (left_area / area) * nleft + (right_area / area) * nright`
 // (the traversal constant cancels between candidates but is kept so the value
 // is comparable to a classic SAH cost). If the best bin split is not strictly
 // cheaper than a median split by centroid, or would leave one side empty, the
-// median split is used instead; it sorts the range by (centroid axis, index),
-// so the tree is deterministic. Leaves hold at most 4 primitives unless the
-// depth guard forces a larger one.
+// median split is used instead; it keeps the `count / 2` smallest (centroid
+// axis, index) keys, so the tree is deterministic. Both candidates reuse the
+// one binned scan: the prefix and suffix unions of the per-bin boxes are the
+// exact child bounds of every candidate, and because bins are ordered by
+// centroid the median split is a prefix of the bin order, so only the single bin
+// straddling the median needs a selection pass. A node's box and centroid box
+// are handed down by its parent (the root unions its primitives once), so a
+// primitive is examined once per level. Leaves hold at most 4 primitives unless
+// the depth guard forces a larger one.
+//
+// Parallel build: above a primitive threshold the top levels are built on the
+// calling thread and the frontier subtrees at a fixed depth are built by
+// independent tasks, each into its own node array and over its own slice of
+// `order_`. The arrays are then appended in frontier order. Both the frontier
+// depth and the assembly order are fixed, so the node array and the permutation
+// are byte-identical whatever the thread count or completion order.
 //
 // `bounds()` is the root node's box, therefore exactly the union of all
 // primitive boxes. An empty tree has no node at all and returns an empty box.
@@ -130,24 +146,30 @@ class Bvh {
   };
 
   void build(std::span<const Triangle3d> triangles) {
-    prims_.clear();
+    tris_.assign(triangles.begin(), triangles.end());
+    boxes_.resize(triangles.size());
     order_.clear();
     nodes_.clear();
-    prims_.reserve(triangles.size());
     order_.reserve(triangles.size());
+    Box3d root_box = Box3d::empty();
+    Box3d root_centroid_box = Box3d::empty();
     for (std::size_t i = 0; i < triangles.size(); ++i) {
-      Prim p;
-      p.tri = triangles[i];
-      p.box = triangle_box(triangles[i]);
-      p.centroid = Point3d{(p.box.lo[0] + p.box.hi[0]) * 0.5,
-                           (p.box.lo[1] + p.box.hi[1]) * 0.5,
-                           (p.box.lo[2] + p.box.hi[2]) * 0.5};
-      prims_.push_back(p);
+      const Box3d box = triangle_box(triangles[i]);
+      boxes_[i] = box;
+      root_box.expand(box);
+      root_centroid_box.expand(center_of(box));
       order_.push_back(static_cast<std::uint32_t>(i));
     }
-    if (prims_.empty()) return;
-    nodes_.reserve(2 * prims_.size());
-    build_node(0, static_cast<std::uint32_t>(prims_.size()), 0);
+    if (tris_.empty()) return;
+    scratch_.resize(tris_.size());
+    bin_index_.resize(tris_.size());
+    nodes_.reserve(2 * tris_.size());
+    const auto n = static_cast<std::uint32_t>(tris_.size());
+    if (n >= kParallelMinPrims) {
+      build_parallel(n, root_box, root_centroid_box);
+    } else {
+      build_node(nodes_, 0, n, 0, root_box, root_centroid_box);
+    }
   }
 
   const Box3d& bounds() const noexcept {
@@ -155,7 +177,7 @@ class Bvh {
     return nodes_.empty() ? kEmpty : nodes_[0].box;
   }
 
-  std::uint32_t size() const noexcept { return static_cast<std::uint32_t>(prims_.size()); }
+  std::uint32_t size() const noexcept { return static_cast<std::uint32_t>(tris_.size()); }
 
   bool raycast(const Ray3d& ray, double tmax, Hit& hit) const {
     if (nodes_.empty()) return false;
@@ -174,7 +196,7 @@ class Bvh {
         for (std::uint32_t i = n.first; i < n.first + n.count; ++i) {
           const std::uint32_t prim = order_[i];
           double t = 0.0;
-          if (!intersect_tri(ray, prims_[prim].tri, t)) continue;
+          if (!intersect_tri(ray, tris_[prim], t)) continue;
           // The interval is (0, tmax]: a hit exactly at tmax is included, so the
           // slab pruning limit above also keeps equality.
           const bool better = !found || t < best || (t == best && prim < best_prim);
@@ -221,7 +243,7 @@ class Bvh {
       if (n.count > 0) {
         for (std::uint32_t i = n.first; i < n.first + n.count; ++i) {
           const std::uint32_t prim = order_[i];
-          const double d2 = squared_distance(p, prims_[prim].tri);
+          const double d2 = squared_distance(p, tris_[prim]);
           if (d2 < best_d2 || (d2 == best_d2 && prim < best)) {
             best_d2 = d2;
             best = prim;
@@ -236,11 +258,9 @@ class Bvh {
   }
 
  private:
-  struct Prim {
-    Triangle3d tri;
-    Box3d box;
-    Point3d centroid;
-  };
+  // Test-only accessor for the determinism digest; it is not part of the
+  // public API and does not expose the node layout beyond the tests.
+  friend struct BvhTestAccess;
 
   struct Node {
     Box3d box;
@@ -254,23 +274,45 @@ class Bvh {
   static constexpr std::uint32_t kMaxLeaf = 4;
   static constexpr int kMaxDepth = 64;
   static constexpr double kTraversalCost = 1.0;
+  // Subtrees at this depth are built independently. The depth is fixed, so the
+  // resulting node array does not depend on the number of hardware threads or on
+  // the order in which the subtrees finish.
+  static constexpr int kParallelDepth = 3;
+  static constexpr std::uint32_t kParallelMinPrims = 1u << 15;
 
-  std::int32_t build_node(std::uint32_t begin, std::uint32_t end, int depth) {
-    const auto node_index = static_cast<std::int32_t>(nodes_.size());
-    nodes_.push_back(Node{});
-    Box3d box = Box3d::empty();
-    for (std::uint32_t i = begin; i < end; ++i) box.expand(prims_[order_[i]].box);
-    nodes_[static_cast<std::size_t>(node_index)].box = box;
+  // A subtree handed to the parallel phase: its range, the boxes its parent
+  // already computed, and the index of its (already emitted) root node.
+  struct Pending {
+    std::uint32_t begin;
+    std::uint32_t end;
+    int depth;
+    Box3d box;
+    Box3d centroid_box;
+    std::int32_t node;
+  };
+
+  // Builds the subtree over order_[begin, end) into `out`, returning the node's
+  // index in that vector. `box` and `centroid_box` are the exact unions of the
+  // range, computed by the caller from the data it already touched for its own
+  // split. When `cut_depth_` is set, a node at that depth is emitted without its
+  // children and recorded in `pending_` instead.
+  std::int32_t build_node(std::vector<Node>& out, std::uint32_t begin, std::uint32_t end, int depth,
+                          const Box3d& box, const Box3d& centroid_box) {
+    const auto node_index = static_cast<std::int32_t>(out.size());
+    out.push_back(Node{});
+    out.back().box = box;
 
     const std::uint32_t count = end - begin;
     if (count <= kMaxLeaf || depth >= kMaxDepth) {
-      nodes_[static_cast<std::size_t>(node_index)].first = begin;
-      nodes_[static_cast<std::size_t>(node_index)].count = count;
+      out[static_cast<std::size_t>(node_index)].first = begin;
+      out[static_cast<std::size_t>(node_index)].count = count;
+      return node_index;
+    }
+    if (depth == cut_depth_) {
+      pending_.push_back(Pending{begin, end, depth, box, centroid_box, node_index});
       return node_index;
     }
 
-    Box3d centroid_box = Box3d::empty();
-    for (std::uint32_t i = begin; i < end; ++i) centroid_box.expand(prims_[order_[i]].centroid);
     const Vec3d extent = centroid_box.diagonal();
     int axis = 0;
     if (extent[1] > extent[axis]) axis = 1;
@@ -279,93 +321,252 @@ class Bvh {
     const double hi = centroid_box.hi[axis];
     const double area = surface_area(box);
 
-    // Candidate 1: 12-bin SAH split over the chosen centroid axis.
-    int best_bin = -1;
-    double sah_cost = std::numeric_limits<double>::infinity();
+    // Candidate 1: 12-bin SAH split over the chosen centroid axis. The same
+    // scan also records each primitive's bin, so grouping by bin is a counting
+    // sort instead of a second predicate pass, and the per-bin boxes become the
+    // exact child bounds.
+    const std::uint32_t median_mid = begin + count / 2;
+    std::uint32_t mid = median_mid;
+    Box3d left_box = Box3d::empty();
+    Box3d left_cbox = Box3d::empty();
+    Box3d right_box = Box3d::empty();
+    Box3d right_cbox = Box3d::empty();
     if (hi > lo && area > 0.0) {
+      std::array<Box3d, kBins> bin_boxes;
+      std::array<Box3d, kBins> bin_cboxes;
+      for (auto& b : bin_boxes) b = Box3d::empty();
+      for (auto& b : bin_cboxes) b = Box3d::empty();
       std::array<int, kBins> counts{};
-      std::array<Box3d, kBins> bins{};
-      for (auto& b : bins) b = Box3d::empty();
+      std::array<int, kBins> prefix_count{};
+      std::array<int, kBins> suffix_count{};
+      std::array<double, kBins> prefix_area{};
+      std::array<double, kBins> suffix_area{};
+      // The prefix and suffix unions are kept as boxes, not just as areas, so a
+      // candidate's child bounds are a copy instead of a second union of bins.
+      std::array<Box3d, kBins> prefix_box;
+      std::array<Box3d, kBins> prefix_cbox;
+      std::array<Box3d, kBins> suffix_box;
+      std::array<Box3d, kBins> suffix_cbox;
       const double scale = static_cast<double>(kBins) / (hi - lo);
       for (std::uint32_t i = begin; i < end; ++i) {
-        const int b = bin_of(prims_[order_[i]].centroid[axis], lo, scale);
+        const std::uint32_t prim = order_[i];
+        const Box3d& prim_box = boxes_[prim];
+        const Point3d centroid = center_of(prim_box);
+        const int b = bin_of(centroid[axis], lo, scale);
         ++counts[static_cast<std::size_t>(b)];
-        bins[static_cast<std::size_t>(b)].expand(prims_[order_[i]].box);
+        bin_boxes[static_cast<std::size_t>(b)].expand(prim_box);
+        bin_cboxes[static_cast<std::size_t>(b)].expand(centroid);
+        bin_index_[i] = static_cast<std::uint8_t>(b);
       }
-      std::array<double, kBins> left_area{};
-      std::array<double, kBins> right_area{};
-      std::array<int, kBins> left_count{};
-      std::array<int, kBins> right_count{};
       Box3d acc = Box3d::empty();
+      Box3d acc_c = Box3d::empty();
       int nc = 0;
       for (int b = 0; b < kBins; ++b) {
-        acc.expand(bins[static_cast<std::size_t>(b)]);
-        nc += counts[static_cast<std::size_t>(b)];
-        left_count[static_cast<std::size_t>(b)] = nc;
-        left_area[static_cast<std::size_t>(b)] = surface_area(acc);
+        const auto index = static_cast<std::size_t>(b);
+        acc.expand(bin_boxes[index]);
+        acc_c.expand(bin_cboxes[index]);
+        nc += counts[index];
+        prefix_count[index] = nc;
+        prefix_box[index] = acc;
+        prefix_cbox[index] = acc_c;
+        prefix_area[index] = surface_area(acc);
       }
       acc = Box3d::empty();
+      acc_c = Box3d::empty();
       nc = 0;
       for (int b = kBins - 1; b >= 0; --b) {
-        acc.expand(bins[static_cast<std::size_t>(b)]);
-        nc += counts[static_cast<std::size_t>(b)];
-        right_count[static_cast<std::size_t>(b)] = nc;
-        right_area[static_cast<std::size_t>(b)] = surface_area(acc);
+        const auto index = static_cast<std::size_t>(b);
+        acc.expand(bin_boxes[index]);
+        acc_c.expand(bin_cboxes[index]);
+        nc += counts[index];
+        suffix_count[index] = nc;
+        suffix_box[index] = acc;
+        suffix_cbox[index] = acc_c;
+        suffix_area[index] = surface_area(acc);
       }
+      int best_bin = -1;
+      double sah_cost = std::numeric_limits<double>::infinity();
       for (int b = 0; b + 1 < kBins; ++b) {
-        const int lc = left_count[static_cast<std::size_t>(b)];
-        const int rc = right_count[static_cast<std::size_t>(b + 1)];
+        const int lc = prefix_count[static_cast<std::size_t>(b)];
+        const int rc = suffix_count[static_cast<std::size_t>(b + 1)];
         if (lc == 0 || rc == 0) continue;
-        const double cost = kTraversalCost + (left_area[static_cast<std::size_t>(b)] / area) * lc +
-                            (right_area[static_cast<std::size_t>(b + 1)] / area) * rc;
+        const double cost =
+            kTraversalCost + (prefix_area[static_cast<std::size_t>(b)] / area) * lc +
+            (suffix_area[static_cast<std::size_t>(b + 1)] / area) * rc;
         if (cost < sah_cost) {
           sah_cost = cost;
           best_bin = b;
         }
       }
+
+      // Candidate 2's split point: the median keeps the count / 2 smallest
+      // (centroid, index) keys. Bins are monotone in the centroid, so that set
+      // is every bin below the straddling bin plus its head.
+      int median_bin = 0;
+      while (prefix_count[static_cast<std::size_t>(median_bin)] < static_cast<int>(count / 2)) {
+        ++median_bin;
+      }
+      const std::uint32_t block_begin =
+          begin + (median_bin == 0
+                       ? 0u
+                       : static_cast<std::uint32_t>(
+                             prefix_count[static_cast<std::size_t>(median_bin) - 1]));
+      const std::uint32_t block_end =
+          begin + static_cast<std::uint32_t>(prefix_count[static_cast<std::size_t>(median_bin)]);
+
+      // Group the range by bin (counting sort through `scratch_`). This puts
+      // the straddling bin in one contiguous block, so the median selection
+      // only touches that block, and it makes the SAH split a plain index.
+      std::array<std::uint32_t, kBins> cursor{};
+      std::uint32_t pos = begin;
+      for (int b = 0; b < kBins; ++b) {
+        cursor[static_cast<std::size_t>(b)] = pos;
+        pos += static_cast<std::uint32_t>(counts[static_cast<std::size_t>(b)]);
+      }
+      for (std::uint32_t i = begin; i < end; ++i) {
+        scratch_[cursor[bin_index_[i]]++] = order_[i];
+      }
+      std::copy_n(scratch_.begin() + begin, count, order_.begin() + begin);
+
+      // Candidate 2: median split by centroid, deterministic via (axis, index).
+      // Only the straddling bin needs selecting: everything before it is
+      // already smaller and everything after it is already larger.
+      if (median_mid < block_end) {
+        std::nth_element(order_.begin() + block_begin, order_.begin() + median_mid,
+                         order_.begin() + block_end, [&](std::uint32_t x, std::uint32_t y) {
+                           const double cx = center_of(boxes_[x])[axis];
+                           const double cy = center_of(boxes_[y])[axis];
+                           if (cx != cy) return cx < cy;
+                           return x < y;
+                         });
+      }
+
+      if (median_bin > 0) {
+        left_box = prefix_box[static_cast<std::size_t>(median_bin) - 1];
+        left_cbox = prefix_cbox[static_cast<std::size_t>(median_bin) - 1];
+      }
+      if (median_bin + 1 < kBins) {
+        right_box = suffix_box[static_cast<std::size_t>(median_bin) + 1];
+        right_cbox = suffix_cbox[static_cast<std::size_t>(median_bin) + 1];
+      }
+      for (std::uint32_t i = block_begin; i < block_end; ++i) {
+        const std::uint32_t prim = order_[i];
+        if (i < median_mid) {
+          left_box.expand(boxes_[prim]);
+          left_cbox.expand(center_of(boxes_[prim]));
+        } else {
+          right_box.expand(boxes_[prim]);
+          right_cbox.expand(center_of(boxes_[prim]));
+        }
+      }
+
+      const double median_cost =
+          kTraversalCost + (surface_area(left_box) / area) * (median_mid - begin) +
+          (surface_area(right_box) / area) * (end - median_mid);
+      if (best_bin >= 0 && sah_cost < median_cost) {
+        mid = begin + static_cast<std::uint32_t>(prefix_count[static_cast<std::size_t>(best_bin)]);
+        left_box = prefix_box[static_cast<std::size_t>(best_bin)];
+        left_cbox = prefix_cbox[static_cast<std::size_t>(best_bin)];
+        right_box = suffix_box[static_cast<std::size_t>(best_bin) + 1];
+        right_cbox = suffix_cbox[static_cast<std::size_t>(best_bin) + 1];
+      }
+    } else {
+      // No usable axis range, or a zero-area parent: keep the whole-range
+      // median selection and derive both children by scanning.
+      if (median_mid < end) {
+        std::nth_element(order_.begin() + begin, order_.begin() + median_mid, order_.begin() + end,
+                         [&](std::uint32_t x, std::uint32_t y) {
+                           const double cx = center_of(boxes_[x])[axis];
+                           const double cy = center_of(boxes_[y])[axis];
+                           if (cx != cy) return cx < cy;
+                           return x < y;
+                         });
+      }
+      for (std::uint32_t i = begin; i < median_mid; ++i) {
+        left_box.expand(boxes_[order_[i]]);
+        left_cbox.expand(center_of(boxes_[order_[i]]));
+      }
+      for (std::uint32_t i = median_mid; i < end; ++i) {
+        right_box.expand(boxes_[order_[i]]);
+        right_cbox.expand(center_of(boxes_[order_[i]]));
+      }
+    }
+    if (mid == begin || mid == end) {
+      // The candidates above never leave a side empty; this keeps a malformed
+      // cost (e.g. a non-finite area) from producing one anyway.
+      mid = median_mid;
+      left_box = Box3d::empty();
+      left_cbox = Box3d::empty();
+      right_box = Box3d::empty();
+      right_cbox = Box3d::empty();
+      for (std::uint32_t i = begin; i < mid; ++i) {
+        left_box.expand(boxes_[order_[i]]);
+        left_cbox.expand(center_of(boxes_[order_[i]]));
+      }
+      for (std::uint32_t i = mid; i < end; ++i) {
+        right_box.expand(boxes_[order_[i]]);
+        right_cbox.expand(center_of(boxes_[order_[i]]));
+      }
     }
 
-    // Candidate 2: median split by centroid, deterministic via (axis, index).
-    // nth_element places the same order statistic that a full sort would, so the
-    // resulting partition (and therefore the tree) is unchanged, but the build
-    // stays O(n) per level instead of sorting every node.
-    const std::uint32_t median_mid = begin + count / 2;
-    if (count > 1) {
-      std::nth_element(order_.begin() + begin, order_.begin() + median_mid,
-                       order_.begin() + end,
-                       [&](std::uint32_t x, std::uint32_t y) {
-                         const double cx = prims_[x].centroid[axis];
-                         const double cy = prims_[y].centroid[axis];
-                         if (cx != cy) return cx < cy;
-                         return x < y;
-                       });
-    }
-    double median_cost = std::numeric_limits<double>::infinity();
-    if (area > 0.0) {
-      Box3d lb = Box3d::empty();
-      Box3d rb = Box3d::empty();
-      for (std::uint32_t i = begin; i < median_mid; ++i) lb.expand(prims_[order_[i]].box);
-      for (std::uint32_t i = median_mid; i < end; ++i) rb.expand(prims_[order_[i]].box);
-      median_cost = kTraversalCost + (surface_area(lb) / area) * (median_mid - begin) +
-                    (surface_area(rb) / area) * (end - median_mid);
-    }
-
-    std::uint32_t mid = median_mid;
-    if (best_bin >= 0 && sah_cost < median_cost) {
-      const double scale = static_cast<double>(kBins) / (hi - lo);
-      auto it = std::partition(order_.begin() + begin, order_.begin() + end,
-                               [&](std::uint32_t i) {
-                                 return bin_of(prims_[i].centroid[axis], lo, scale) <= best_bin;
-                               });
-      mid = static_cast<std::uint32_t>(it - order_.begin());
-    }
-    if (mid == begin || mid == end) mid = begin + count / 2;
-
-    const std::int32_t left = build_node(begin, mid, depth + 1);
-    const std::int32_t right = build_node(mid, end, depth + 1);
-    nodes_[static_cast<std::size_t>(node_index)].left = left;
-    nodes_[static_cast<std::size_t>(node_index)].right = right;
+    const std::int32_t left = build_node(out, begin, mid, depth + 1, left_box, left_cbox);
+    const std::int32_t right = build_node(out, mid, end, depth + 1, right_box, right_cbox);
+    out[static_cast<std::size_t>(node_index)].left = left;
+    out[static_cast<std::size_t>(node_index)].right = right;
     return node_index;
+  }
+
+  // Builds the top kParallelDepth levels on this thread, then the frontier
+  // subtrees on separate tasks. Each subtree writes its own node array and its
+  // own slice of `order_`, so the work is independent; the arrays are then
+  // appended in frontier order. The bytes produced are therefore the same for
+  // any thread count and any completion order.
+  void build_parallel(std::uint32_t n, const Box3d& root_box, const Box3d& root_centroid_box) {
+    pending_.clear();
+    cut_depth_ = kParallelDepth;
+    build_node(nodes_, 0, n, 0, root_box, root_centroid_box);
+    cut_depth_ = -1;
+    if (pending_.size() < 2) {
+      pending_.clear();
+      return;
+    }
+    std::vector<std::vector<Node>> subtrees(pending_.size());
+    try {
+      std::vector<std::future<void>> futures;
+      futures.reserve(pending_.size());
+      for (std::size_t t = 0; t < pending_.size(); ++t) {
+        const Pending task = pending_[t];
+        futures.push_back(std::async(std::launch::async, [this, &subtrees, t, task] {
+          build_node(subtrees[t], task.begin, task.end, task.depth, task.box, task.centroid_box);
+        }));
+      }
+      for (auto& future : futures) future.get();
+    } catch (...) {
+      // A thread or an allocation failed: rebuild on this thread. The tree does
+      // not depend on how the subtrees were scheduled, so the result is the same.
+      subtrees.clear();
+      nodes_.clear();
+      pending_.clear();
+      build_node(nodes_, 0, n, 0, root_box, root_centroid_box);
+      return;
+    }
+    for (std::size_t t = 0; t < pending_.size(); ++t) {
+      const std::vector<Node>& subtree = subtrees[t];
+      const auto base = static_cast<std::int32_t>(nodes_.size());
+      // The subtree's root is the node already emitted by the top phase, so its
+      // children are packed from `base` on: local index j >= 1 maps to base+j-1.
+      const std::int32_t shift = base - 1;
+      for (std::size_t j = 1; j < subtree.size(); ++j) {
+        Node node = subtree[j];
+        if (node.left >= 0) node.left += shift;
+        if (node.right >= 0) node.right += shift;
+        nodes_.push_back(node);
+      }
+      const Node& root = subtree.front();
+      nodes_[static_cast<std::size_t>(pending_[t].node)].left = root.left + shift;
+      nodes_[static_cast<std::size_t>(pending_[t].node)].right = root.right + shift;
+    }
+    pending_.clear();
   }
 
   // 1 / d, mapping a zero component to infinity. A non-finite inverse tells
@@ -380,6 +581,13 @@ class Bvh {
     if (b < 0) b = 0;
     if (b >= kBins) b = kBins - 1;
     return b;
+  }
+
+  // A primitive's centroid is the midpoint of its box, so it never needs its
+  // own array: the build derives it from the only field it has to read anyway.
+  static Point3d center_of(const Box3d& b) noexcept {
+    return Point3d{(b.lo[0] + b.hi[0]) * 0.5, (b.lo[1] + b.hi[1]) * 0.5,
+                   (b.lo[2] + b.hi[2]) * 0.5};
   }
 
   static double surface_area(const Box3d& b) noexcept {
@@ -450,9 +658,21 @@ class Bvh {
     return true;
   }
 
-  std::vector<Prim> prims_;
+  // Structure-of-arrays primitive storage: the build touches only boxes and
+  // centroids, and the binning scan reads the centroid axis alone, so keeping
+  // each field in its own contiguous array cuts the random-access footprint of
+  // a level by roughly the size of the triangle data.
+  std::vector<Triangle3d> tris_;
+  std::vector<Box3d> boxes_;
   std::vector<std::uint32_t> order_;
   std::vector<Node> nodes_;
+  // Build scratch, sized to the primitive count: the binned range grouped into
+  // `scratch_`, and the bin of each order_ slot for the counting sort.
+  std::vector<std::uint32_t> scratch_;
+  std::vector<std::uint8_t> bin_index_;
+  // Frontier subtrees recorded by the top phase of a parallel build.
+  std::vector<Pending> pending_;
+  int cut_depth_ = -1;
 };
 
 }  // namespace v1
