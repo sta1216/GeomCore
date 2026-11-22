@@ -150,7 +150,7 @@ Expected: 5 个用例失败——上面 3 个被改的 pin、新扇形用例，�
 
 Run: `.\build\tests\Debug\geom_tests.exe -tc=*cone*` → 42/46；4 个既有锥布尔用例（`brep_boolean_curved_test.cpp:593/:371/:669/:849`）因新的 apex 参数副本命中 `cone seam copies coincide` 守卫而红，Task 3 的 apex 豁免会恢复（计划内已知依赖）。
 Run: `-tc=*sphere*` 与 `-tc=*trim_face*` → 必须原样全过（标志门控的回归证据）。
-Run: Debug 与 Release 全量 → 记录实际用例/断言数（基线 1031/674,604；Task 1 后为 1032 用例 / 674,622 断言，其中 4 个既有锥布尔用例预期为红，Task 3 恢复）。
+Run: Debug 与 Release 全量 → 记录实际用例/断言数（基线 1031/674,604；Task 1 后为 1032 用例 / 673,522 断言，Task 2 后为 1033 / 673,563 断言，其中 4 个既有锥布尔用例预期为红，Task 3 恢复）。
 
 - [ ] **Step 5: 提交**
 
@@ -192,7 +192,10 @@ TEST_CASE("trim_face: a diameter cut on the base disk reuses the rim vertex") {
       CHECK(std::hypot(a[0] - b[0], a[1] - b[1]) > 1e-12);
     }
   }
-  CHECK(area == doctest::Approx(kPi).epsilon(1e-9));
+  // The base chart loop is a 32-gon inscribed in the rim: split areas conserve
+  // that polygon (3.121445...), not pi. The committed test compares against
+  // ring_area(base loop) instead of this literal.
+  CHECK(area == doctest::Approx(3.121445152258051).epsilon(1e-12));
 }
 ```
 
