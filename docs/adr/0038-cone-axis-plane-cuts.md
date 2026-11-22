@@ -1,6 +1,6 @@
 # ADR-0038: Cutting cones with planes through the axis
 
-Status: accepted for M3c-3c-4b3c-2 (2026-11-22); narrows the axis-plane deferral recorded in ADR-0036 and ADR-0037. Oblique cone cutters remain deferred to M3c-3c-4b3.
+Status: accepted for M3c-3c-4b3c-2 (2026-11-22); narrows the axis-plane deferral recorded in ADR-0035, ADR-0036 and ADR-0037. Oblique cone cutters remain deferred to M3c-3c-4b3.
 
 ## Context
 
@@ -19,7 +19,7 @@ Two details needed explicit treatment. Whole-cone operands only: the canonical c
 
 ## Evidence
 
-Fixture: canonical cone `make_cone({0,0,0}, +z, radius 1, height 2)` and box `{0,-1.5,-0.5}..{1.5,1.5,2.5}`, boolean tolerance `1e-9`. QA-22 already covers the perpendicular contract; the six cut cases and the predicate pin live in `tests/unit/brep_boolean_curved_test.cpp:936-1065`. Volumes are measured from the returned B-rep by `detail::curved_solid_volume`, not copied from the analytic formula.
+Fixture: canonical cone `make_cone({0,0,0}, +z, radius 1, height 2)` and box `{0,-1.5,-0.5}..{1.5,1.5,2.5}`, boolean tolerance `1e-9`. QA-22 already covers the perpendicular contract; the six cut cases and the predicate pin live in `tests/unit/brep_boolean_curved_test.cpp:936-1084`. Volumes are measured from the returned B-rep by `detail::curved_solid_volume`, not copied from the analytic formula.
 
 | Operation | Faces | Edges | Vertices | Shells | Zero-length edges | Measured volume | Analytic | Relative error |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

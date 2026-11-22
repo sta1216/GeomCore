@@ -120,8 +120,9 @@ A plane that is disjoint from the cone but still reaches that sphere is refused.
 This is deliberately conservative: for `radius = 1`, `height = 2`, the sphere has
 radius `5/3`, so the parallel plane `x = 1.5` is refused even though it misses the
 cone (whose maximum radius is 1). The orientation is harmless only when the plane
-provably cuts nothing, which avoids producing half-turn rim arcs or an ellipse the
-splitter cannot represent. The refusal is
+provably cuts nothing, which avoids producing an ellipse the splitter cannot
+represent (axis-containing cuts reuse the half-turn base rim, which the assembler
+now supports). The refusal is
 
 `unsupported "boolean_solid_curved: cone cutters must be perpendicular to or contain the cone axis; oblique planes are deferred to M3c-3c-4b3"`
 
@@ -189,8 +190,9 @@ a cone cut by a plane now assemble into one closed shell.
 
 The first row covers every non-planar partner. The cone gate message therefore
 concerns the partner's face kind (for example `cone/cone` or `cone/torus`); it no
-longer fires for a `Cone3` operand of the expected shape. The perpendicular guard is
-separate and concerns only the cut plane's orientation.
+longer fires for a `Cone3` operand of the expected shape. The orientation guard (perpendicular,
+axis-containing, or a harmless disjoint plane) is separate and concerns only the cut
+plane.
 
 The whole-cone gate is about boolean operands: a frustum produced by a supported cut
 tessellates through the trimmed path (ADR-0036), while apex-bearing fragments keep the

@@ -345,6 +345,9 @@ git commit -m "feat(boolean): cut cones with planes through the axis"
 - Create: `docs/benchmarks/m3c3c4b3c2.md`
 - Modify: `docs/adr/0036-cone-tessellation-sag.md`（轴平面延期句指向 ADR-0038）
 - Modify: `docs/adr/0037-torus-twisted-cuts.md`（同上）
+- Modify: `docs/adr/0035-cone-boolean.md`（轴平面合同与拒绝表收窄）
+- Modify: `docs/adr/0034-cone-chart-open-cuts.md`（指向 ADR-0038）
+- Modify: `include/geom/brep/boolean_solid_curved.hpp`（gate 文案）
 - Modify: `docs/architecture/geometry-library-architecture.md`（§16.3 末尾加 M3c-3c-4b3c-2 段；ADR-0037 的 cone 延期句改为指向 ADR-0038）
 - Modify: `docs/superpowers/plans/2026-11-22-m3c3c4b3c2-cone-axis-planes.md`（勾选自检）
 

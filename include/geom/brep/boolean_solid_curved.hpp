@@ -164,7 +164,7 @@ inline bool curved_boolean_bounds_overlap(const CurvedBooleanBounds& a,
 // The surface kinds the driver can cut. A whole cone is accepted here: its
 // lateral face is the canonical seam-only chart whose cut-end and back-seam
 // copies of the apex are welded during assembly, and the driver restricts a cone
-// operand to plane cutters perpendicular to its axis (see the cone guards in
+// operand to plane cutters perpendicular to or containing its axis (see the cone guards in
 // `boolean_solid_curved`). NURBS patches have no analytic parameterization here.
 // A sphere is periodic in u and collapses at both poles, but its closed latitude
 // cuts are supported: the splitter synthesizes the parameter rectangle and
