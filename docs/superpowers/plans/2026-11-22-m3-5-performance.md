@@ -14,14 +14,22 @@ QA-1（2D 布尔 ≤ 80 ms）与 QA-9（SSI ≤ 100 µs）作为第二切片，�
 | 项 | 实测 | 目标 | 差距 |
 | --- | --- | --- | --- |
 | QA-1 union（2×50k 星形） | 1,888 ms | 80 ms | 23.6× |
-| QA-4 build（1M 三角） | 2,063 ms | 350 ms | 5.9× |
-| QA-4 raycast（8M 射线） | 0.25 Mray/s | 8 Mray/s | 32× |
-| QA-10（16,666 盒） | 0.13 Mtri/s | 1.0 Mtri/s | 7.7× |
+| QA-4 build（1M 三角） | 1,372 ms（空载中位） | 350 ms | 3.9× |
+| QA-4 raycast（8M 射线） | 0.45 Mray/s（空载中位） | 8 Mray/s | 17.8× |
+| QA-10（16,666 盒） | 0.22 Mtri/s（55.6 µs/盒） | 1.0 Mtri/s | 4.5× |
 | QA-9（sphere/plane） | 9.6–19.5 ms | 0.1 ms | 96–195× |
 
 补充微基准（`qa10probe`，5000 盒）：`make_box` 82 µs/盒，`tessellate` 115 µs/盒，重复同一盒 126 µs/次——耗时在网格化路径本身，不在 fixture 构造；盒的 12 三角说明每条通用平面面路径（环/采样/三角化/展开）约 15–20 µs。
 
-## 诊断（代码阅读，待任务 1 用计时确认）
+## Task 1 profile 结论（2026-11-22，Release，3 次中位）
+
+报告 `.superpowers/perf/m3-5-profile.md`（20.9 KB）。要点：
+
+- **QA-4 build 1372 ms**：prim 3.8% · SAH 分箱 24.1% · median split（nth_element）34.9% · 子包围盒重扫 23.2% · 其它 13.9%。单次分箱扫描同时累积 per-bin 包围盒、用前缀/后缀并集得到子盒、按 bin 划分，可去掉 nth_element 与两次重扫，预计 −45%（~720–760 ms）；SoA prim 再省 15–25%；顶层并行可到 350 ms 量级。
+- **QA-4 raycast 0.45 Mray/s**：36.9 node pops/ray、4.0 prim tests/ray；traverse 占 78%。命中后 `best==1` 时剩余 908,672 次 pops **全部被 slab 拒绝**，tie 规则实际上从不触发（hits_at_tie=0）。有序子节点 + tie-aware 剪枝实测 **变慢 8–12%**，放弃。有效方向：2/4-wide 节点或内联子 AABB（每层一次 cache line，36.9→~19 touches）→ ~0.72–0.78 Mray/s；按叶子顺序重排 prims → +12–17%。报告估算 1M 点查询的 DRAM 下限约 0.7–1.0 Mray/s，8 Mray/s 需 packet/SIMD 与更好的数据布局，本轮目标改为“显著提升并记录下限”。
+- **QA-10 55.6 µs/盒**：setup 1.0% · 环/coedge/采样 27.5%（edge_positions 17.2%）· uv/定向 17.7% · triangulate_polygon2 27.6% · expand/append 18.6% · cone 后处理 0.1%。每盒 **288 次 malloc/free、8688 B**；bump-arena 试验 54.9→28.8 µs（−47%）。方向：arena/out-param + 凸四边形 fan 快路径 + 盒专用发射；12 µs/盒才到 1.0 Mtri/s，需同时消掉三角化与采样开销。
+
+## 诊断（代码阅读，Task 1 已用计时确认）
 
 ### QA-4
 
@@ -58,18 +66,26 @@ QA-1（2D 布尔 ≤ 80 ms）与 QA-9（SSI ≤ 100 µs）作为第二切片，�
 - 验收：每个阶段有毫秒数与占比，能回答「优化哪一段收益最大」。
 - 门禁：Release 定向运行；不改产品代码。
 
-## Task 2：QA-4 raycast 的 tie-aware 剪枝与有序遍历
+## Task 2：QA-4 查询（宽节点 + 叶子序 prims）
 
-- Files：`include/geom/index/bvh.hpp`、`tests/unit/bvh_test.cpp`、`bench/bench_m1b.cpp`（仅在需要新用例时）。
-- Interfaces：
-  - 节点增加 `std::uint32_t min_prim`（叶为最小图元索引，内部为两子最小）。
-  - `raycast`：子节点按 `slab_tmin` 升序入栈；命中后若 `box_tmin == best` 且 `node.min_prim >= best_prim`，整棵子树剪掉；`box_tmin > best` 仍剪。
-  - 保持现有 `slab` 与 `intersect_tri` 语义。
-- 测试：
-  - 共面网格 1M 三角 + 8M 射线基准（QA-4 门禁）。
-  - 新用例：共面两三角、射线恰过共享边、`t == tmax`、同 t 不同索引，断言最小索引与 `t`。
-  - 既有 `bvh` 全组与 fuzz 对拍不变。
-- 验收：QA-4 raycast ≥ 8 Mray/s（本机 Release，3 次中位数）；正确性测试 0 失败；Debug 定向通过。
+- Files：`include/geom/index/bvh.hpp`、`tests/unit/bvh_test.cpp`。
+- 工作：
+  - 节点改为 2-wide：内部节点内联两个子 AABB（每层一次 64 B 行读取），叶子保持 `first/count`；或等价的 SoA 子盒数组。
+  - `prims_` 按叶子顺序重排（构建完成后一次置换），使叶子测试的三角形连续。
+  - 不做有序子节点/tie-aware 剪枝（profile 证明负收益）；保留 `tmin <= best` 语义与 tie 规则。
+  - 可选：4 条同向射线打包的 SIMD 叶测试，只有实测有增益才保留。
+- 测试：既有 bvh 全组 + 共面/等距/`t==tmax`/共享边用例；1M 共面网格基准。
+- 验收：≥0.9 Mray/s（相对 0.45 至少 2×），报告给出实测与 DRAM 下限；8 Mray/s 若未达，记录差距与后续 packet 方案，不伪造。
+
+## Task 3：QA-4 构建（单次分箱 + SoA + 顶层并行）
+
+- Files：`include/geom/index/bvh.hpp`、`tests/unit/bvh_test.cpp`。
+- 工作：
+  - 一次扫描同时填 counts/bins，用前缀/后缀并集得到左右子盒；SAH 有效时按 bin 划分，彻底去掉 median `nth_element` 与两次子盒重扫（保留 median 回退仅当 SAH 无有效划分）。
+  - prim 拆为 SoA（box/centroid/tri 三个数组），扫描只触碰所需字段。
+  - 顶层若干层并行构建子树（确定性拼接 + 子索引修正）；线程数不影响 `nodes_` 字节。
+- 测试：同输入两次构建 `nodes_` 逐位相同；串行/并行结果一致；既有 build/raycast/nearest 全组不变。
+- 验收：≤350 ms（3 次中位）；确定性测试通过。
 
 ## Task 3：QA-4 构建加速（确定性并行 + 减少重扫）
 
@@ -81,14 +97,15 @@ QA-1（2D 布尔 ≤ 80 ms）与 QA-9（SSI ≤ 100 µs）作为第二切片，�
 - 测试：同一输入两次构建的 `nodes_` 逐位相同（新增内部可见性测试或哈希）；既有 build/raycast/nearest 全组不变；1M 三角构建基准。
 - 验收：QA-4 build ≤ 350 ms（3 次中位数）；并行/串行结果逐位相同。
 
-## Task 4：QA-10 盒网格化快路径
+## Task 4：QA-10 盒网格化快路径 + arena
 
-- Files：`include/geom/brep/tessellate.hpp`、`tests/unit/tessellate_*`（新增盒快路径回归）、`bench/bench_m2.cpp`（无需改）。
-- 工作：在 `tessellate()` 入口识别「所有面为 Plane3、每面单外环、4 条 coedge、4 个顶点」的盒；直接按现有三角形顺序发射 12 个三角形，复用已焊接的顶点索引，保持 `triangle_face`、`reversed` 与法向；任何不满足条件的输入落回通用路径。
-- 测试：
-  - 盒 12 三角/8 位置、水密、朝外；与通用路径输出逐位相同（对 `make_box` 与旋转/平移盒比对三角形与位置数组）。
-  - 带孔/非矩形/曲面面必须走通用路径（可用现有 fixture 断言计数与哈希）。
-- 验收：QA-10 ≥ 1.0 Mtri/s；既有 canonical 哈希不变；Debug 定向通过。
+- Files：`include/geom/brep/tessellate.hpp`、`tests/unit/tessellate_*`、`tests/unit/brep_boolean_curved_test.cpp`（回归）。
+- 工作：
+  - 识别「全平面、每面单外环、4 coedge、4 顶点」的盒，直接按现有三角形顺序发射 12 三角，复用已焊接顶点索引，保持 `triangle_face` 与 `reversed`。
+  - `TessellateState`/ring/polygon 的临时缓冲改为调用内复用；`tessellate_edge_positions` 返回引用或写入 out-param，消除每盒 288 次分配。
+  - 不满足盒条件的输入走通用路径（同样享受缓冲复用）。
+- 测试：盒输出与通用路径逐位相同（位置/三角形/triangle_face）；带孔/非矩形/曲面面仍走通用路径；canonical 哈希不变。
+- 验收：≥1.0 Mtri/s（12 µs/盒）；水密、朝外、8 位置/12 三角。
 
 ## Task 5：通用平面路径的分配削减（若 Task 4 未达 1.0）
 
