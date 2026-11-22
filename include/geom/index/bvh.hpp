@@ -10,6 +10,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(_MSC_VER) || defined(__SSE__)
+#include <xmmintrin.h>
+#endif
+
 #include <geom/primitives/box.hpp>
 #include <geom/primitives/point.hpp>
 #include <geom/primitives/vec.hpp>
@@ -100,13 +104,16 @@ inline double squared_distance(Point3d p, const Triangle3d& t) noexcept {
 //
 // Memory layout. The primitives are stored structure-of-arrays (triangles and
 // boxes in separate contiguous vectors; a primitive's centroid is the midpoint of
-// its box, so it needs no array of its own); `order_` is a permutation of
-// primitive indices and every leaf covers a contiguous range
-// `[first, first + count)` of that permutation. Nodes live in one contiguous
-// vector; a node is a leaf when `count != 0`, otherwise it is an interior node
-// with `left`/`right` child indices (int32, never negative for a valid node). A
-// depth guard bounds the tree at 64 levels, so the explicit query stacks never
-// exceed 65 entries.
+// its box, so it needs no array of its own). The build permutes the primitives
+// into leaf order: `order_[i]` is the original index of the primitive stored at
+// slot i, and every leaf covers a contiguous range of slots, so a leaf's
+// primitive tests walk contiguous triangle storage. The tree is widened after
+// the build: a wide node stores `kFanout` child boxes and child references in
+// one record, so a visited traversal level costs one node line instead of one
+// line per binary node. A child reference is either a leaf range (tagged payload)
+// or the index of another wide node. The binary tree produced by the SAH build
+// is converted depth-first, so the wide array is also deterministic. A depth
+// guard bounds the binary tree at 64 levels, hence the query stack bound below.
 //
 // Build: 12 bins over the centroid bounds of the current range, cost
 // `traversal + (left_area / area) * nleft + (right_area / area) * nright`
@@ -130,8 +137,8 @@ inline double squared_distance(Point3d p, const Triangle3d& t) noexcept {
 // depth and the assembly order are fixed, so the node array and the permutation
 // are byte-identical whatever the thread count or completion order.
 //
-// `bounds()` is the root node's box, therefore exactly the union of all
-// primitive boxes. An empty tree has no node at all and returns an empty box.
+// `bounds()` is the exact union of all primitive boxes. An empty tree has no
+// node at all and returns an empty box.
 //
 // Ray contract: `dir` is expected to be finite and non-zero; t is measured in
 // units of |dir|, so a non-normalised direction is fine. The accepted interval
@@ -149,41 +156,82 @@ class Bvh {
 
   const Box3d& bounds() const noexcept {
     static const Box3d kEmpty = Box3d::empty();
-    return nodes_.empty() ? kEmpty : nodes_[0].box;
+    return tris_.empty() ? kEmpty : root_box_;
   }
 
   std::uint32_t size() const noexcept { return static_cast<std::uint32_t>(tris_.size()); }
 
   bool raycast(const Ray3d& ray, double tmax, Hit& hit) const {
-    if (nodes_.empty()) return false;
+    if (tris_.empty() || root_payload_ == kInvalid) return false;
     const Vec3d inv{inverse_dir(ray.dir[0]), inverse_dir(ray.dir[1]), inverse_dir(ray.dir[2])};
-    std::array<std::int32_t, 128> stack;
+    // |dir| is shared by every primitive test of this ray; it used to be
+    // recomputed (three square roots) inside each test.
+    const double dir_len = std::sqrt(dot(ray.dir, ray.dir));
+    std::array<StackEntry, kStackSize> stack;
     int sp = 0;
-    stack[static_cast<std::size_t>(sp++)] = 0;
     bool found = false;
     double best = tmax;
     std::uint32_t best_prim = 0;
+    // The root box is tested once; every other child box arrives with its
+    // interior node's line, so a visited level costs one node line.
+    double root_t = 0.0;
+    if (!slab(root_box_, ray, inv, best, root_t)) return false;
+    stack[static_cast<std::size_t>(sp++)] = StackEntry{root_t, root_payload_};
     while (sp > 0) {
-      const std::size_t level = static_cast<std::size_t>(--sp);
-      const Node& n = nodes_[static_cast<std::size_t>(stack[level])];
-      if (!slab(n.box, ray, inv, best)) continue;
-      if (n.count > 0) {
-        for (std::uint32_t i = n.first; i < n.first + n.count; ++i) {
-          const std::uint32_t prim = order_[i];
+      const StackEntry entry = stack[static_cast<std::size_t>(--sp)];
+      // A child box entered behind the current best can only contain hits at or
+      // beyond it; equality is kept so a tie with a smaller index still wins.
+      if (entry.t > best) continue;
+      const std::uint64_t payload = entry.payload;
+      if (is_leaf(payload)) {
+        const std::uint32_t first = leaf_first(payload);
+        const std::uint32_t count = leaf_count(payload);
+        for (std::uint32_t i = first; i < first + count; ++i) {
           double t = 0.0;
-          if (!intersect_tri(ray, tris_[prim], t)) continue;
+          if (!intersect_tri(ray, tris_[i], dir_len, t)) continue;
           // The interval is (0, tmax]: a hit exactly at tmax is included, so the
           // slab pruning limit above also keeps equality.
+          if (t > best) continue;
+          const std::uint32_t prim = order_[i];
           const bool better = !found || t < best || (t == best && prim < best_prim);
-          if (t <= best && better) {
+          if (better) {
             best = t;
             best_prim = prim;
             found = true;
           }
         }
       } else {
-        stack[static_cast<std::size_t>(sp++)] = n.left;
-        stack[static_cast<std::size_t>(sp++)] = n.right;
+        const Node& n = nodes_[static_cast<std::size_t>(payload)];
+        for (int j = 0; j < kFanout; ++j) {
+          const std::uint64_t child = n.child[j];
+          if (child == kInvalid) break;
+          double t = 0.0;
+          if (!slab(n.lo[j], n.hi[j], ray, inv, best, t)) continue;
+          if (is_leaf(child)) {
+            // A leaf is small: testing it here avoids a stack round trip and
+            // lets its hits tighten `best` before the remaining slots of this
+            // node are tested. The result is identical to visiting the leaf
+            // later, because every primitive is still compared with the same
+            // tie-break.
+            const std::uint32_t first = leaf_first(child);
+            const std::uint32_t count = leaf_count(child);
+            for (std::uint32_t i = first; i < first + count; ++i) {
+              double tt = 0.0;
+              if (!intersect_tri(ray, tris_[i], dir_len, tt)) continue;
+              if (tt > best) continue;
+              const std::uint32_t prim = order_[i];
+              const bool better = !found || tt < best || (tt == best && prim < best_prim);
+              if (better) {
+                best = tt;
+                best_prim = prim;
+                found = true;
+              }
+            }
+          } else {
+            prefetch(&nodes_[static_cast<std::size_t>(child)]);
+            stack[static_cast<std::size_t>(sp++)] = StackEntry{t, child};
+          }
+        }
       }
     }
     if (found) {
@@ -200,33 +248,43 @@ class Bvh {
   // sum overflows to infinity and any distance involving a NaN coordinate is
   // NaN, which is outside the supported coordinate range.
   std::uint32_t nearest(const Point3d& p, double& best_d2) const {
-    if (nodes_.empty()) {
+    if (tris_.empty() || root_payload_ == kInvalid) {
       best_d2 = std::numeric_limits<double>::infinity();
       return 0xFFFFFFFFu;
     }
-    std::array<std::int32_t, 128> stack;
+    std::array<StackEntry, kStackSize> stack;
     int sp = 0;
-    stack[static_cast<std::size_t>(sp++)] = 0;
     best_d2 = std::numeric_limits<double>::infinity();
     std::uint32_t best = 0xFFFFFFFFu;
+    stack[static_cast<std::size_t>(sp++)] =
+        StackEntry{box_distance2(root_box_, p), root_payload_};
     while (sp > 0) {
-      const std::size_t level = static_cast<std::size_t>(--sp);
-      const Node& n = nodes_[static_cast<std::size_t>(stack[level])];
+      const StackEntry entry = stack[static_cast<std::size_t>(--sp)];
       // Equality is not pruned: a different primitive at exactly best_d2 may
       // still win the index tie-break.
-      if (box_distance2(n.box, p) > best_d2) continue;
-      if (n.count > 0) {
-        for (std::uint32_t i = n.first; i < n.first + n.count; ++i) {
+      if (entry.t > best_d2) continue;
+      const std::uint64_t payload = entry.payload;
+      if (is_leaf(payload)) {
+        const std::uint32_t first = leaf_first(payload);
+        const std::uint32_t count = leaf_count(payload);
+        for (std::uint32_t i = first; i < first + count; ++i) {
+          const double d2 = squared_distance(p, tris_[i]);
+          if (d2 > best_d2) continue;
           const std::uint32_t prim = order_[i];
-          const double d2 = squared_distance(p, tris_[prim]);
-          if (d2 < best_d2 || (d2 == best_d2 && prim < best)) {
+          if (d2 < best_d2 || prim < best) {
             best_d2 = d2;
             best = prim;
           }
         }
       } else {
-        stack[static_cast<std::size_t>(sp++)] = n.left;
-        stack[static_cast<std::size_t>(sp++)] = n.right;
+        const Node& n = nodes_[static_cast<std::size_t>(payload)];
+        for (int j = 0; j < kFanout; ++j) {
+          const std::uint64_t child = n.child[j];
+          if (child == kInvalid) break;
+          const double d2 = box_distance2(n.lo[j], n.hi[j], p);
+          if (d2 > best_d2) continue;
+          stack[static_cast<std::size_t>(sp++)] = StackEntry{d2, child};
+        }
       }
     }
     return best;
@@ -244,7 +302,9 @@ class Bvh {
   void build_impl(std::span<const Triangle3d> triangles, bool allow_parallel) {
     pending_.clear();
     cut_depth_ = -1;
-    tris_.assign(triangles.begin(), triangles.end());
+    tris_.clear();
+    root_box_ = Box3d::empty();
+    root_payload_ = kInvalid;
     boxes_.resize(triangles.size());
     order_.clear();
     nodes_.clear();
@@ -258,19 +318,54 @@ class Bvh {
       root_centroid_box.expand(center_of(box));
       order_.push_back(static_cast<std::uint32_t>(i));
     }
-    if (tris_.empty()) return;
-    scratch_.resize(tris_.size());
-    bin_index_.resize(tris_.size());
-    nodes_.reserve(2 * tris_.size());
-    const auto n = static_cast<std::uint32_t>(tris_.size());
+    if (triangles.empty()) return;
+    scratch_.resize(triangles.size());
+    bin_index_.resize(triangles.size());
+    const auto n = static_cast<std::uint32_t>(triangles.size());
+    // The SAH tree is built into a local binary array and widened into `nodes_`
+    // once complete; that keeps the query-node type out of the build entirely.
+    std::vector<BuildNode> bin;
+    bin.reserve(2 * triangles.size());
     if (allow_parallel && n >= kParallelMinPrims) {
-      build_parallel(n, root_box, root_centroid_box);
+      build_parallel(bin, n, root_box, root_centroid_box);
     } else {
-      build_node(nodes_, 0, n, 0, root_box, root_centroid_box);
+      build_node(bin, 0, n, 0, root_box, root_centroid_box);
     }
+    root_box_ = root_box;
+    // The binary tree above is the exact SAH tree (and the thing the parallel
+    // build packs identically). Widen it once into the k-ary traversal layout;
+    // this also releases the binary array before the leaf-ordered primitives are
+    // materialised.
+    widen_nodes(bin);
+    // The build only ever permutes `order_`, so the leaf ranges are known now.
+    // Materialise the triangles directly in that leaf order: a leaf's primitive
+    // tests then walk a contiguous run of the triangle array instead of
+    // gathering through `order_`, and `order_[i]` still reports the original
+    // index of the triangle that sits at leaf slot i.
+    tris_.resize(order_.size());
+    for (std::size_t i = 0; i < order_.size(); ++i) tris_[i] = triangles[order_[i]];
   }
 
-  struct Node {
+  // How many binary levels one traversal node collapses. The constants live
+  // before the node type because its array bounds need them.
+  static constexpr int kFanoutBits = 2;
+  static constexpr int kFanout = 1 << kFanoutBits;
+  static constexpr int kBins = 12;
+  static constexpr std::uint32_t kMaxLeaf = 4;
+  static constexpr int kMaxDepth = 64;
+  static constexpr double kTraversalCost = 1.0;
+  static constexpr int kParallelDepth = 3;
+  static constexpr std::uint32_t kParallelMinPrims = 1u << 15;
+  static constexpr std::uint64_t kLeafTag = 1ull << 63;
+  static constexpr std::uint64_t kInvalid = ~0ull;
+  // A wide node collapses kFanoutBits levels of the binary tree, so its query
+  // depth is at most ceil(kMaxDepth / kFanoutBits).
+  static constexpr int kStackSize = 1 + (kMaxDepth / kFanoutBits + 1) * (kFanout - 1);
+
+  // Binary build node: the SAH tree produced by build_node. It is converted to
+  // the wide traversal layout once the build is complete, so this type is never
+  // touched by a query.
+  struct BuildNode {
     Box3d box;
     std::uint32_t first = 0;   // leaf: first index into order_
     std::uint32_t count = 0;   // leaf: number of primitives; 0 => interior
@@ -278,15 +373,144 @@ class Bvh {
     std::int32_t right = -1;   // interior child index
   };
 
-  static constexpr int kBins = 12;
-  static constexpr std::uint32_t kMaxLeaf = 4;
-  static constexpr int kMaxDepth = 64;
-  static constexpr double kTraversalCost = 1.0;
-  // Subtrees at this depth are built independently. The depth is fixed, so the
-  // resulting node array does not depend on the number of hardware threads or on
-  // the order in which the subtrees finish.
-  static constexpr int kParallelDepth = 3;
-  static constexpr std::uint32_t kParallelMinPrims = 1u << 15;
+  // Traversal node: kFanout child boxes and child references in one record.
+  // Each child box is the exact binary child's box rounded outwards to float,
+  // so the widening never prunes a primitive the binary tree would have kept.
+  // `child[j]` is either a leaf payload (kLeafTag | first | count << 32) or the
+  // index of another wide node; unused slots are kInvalid and the valid ones are
+  // a prefix of the array.
+  struct alignas(64) Node {
+    float lo[kFanout][3];
+    float hi[kFanout][3];
+    std::uint64_t child[kFanout];
+  };
+
+  // Query stack entry: a node payload plus the entry parameter (raycast) or the
+  // box distance lower bound (nearest) that prunes it.
+  struct StackEntry {
+    double t;
+    std::uint64_t payload;
+  };
+
+  // Issues a best-effort hardware prefetch for a node that is about to be
+  // visited. It has no effect on results.
+
+  static void prefetch(const void* p) noexcept {
+#if defined(_MSC_VER) || defined(__SSE__)
+    _mm_prefetch(static_cast<const char*>(p), _MM_HINT_T0);
+#else
+    (void)p;
+#endif
+  }
+
+  static std::uint64_t leaf_payload(std::uint32_t first, std::uint32_t count) noexcept {
+    return kLeafTag | static_cast<std::uint64_t>(first) |
+           (static_cast<std::uint64_t>(count) << 32);
+  }
+  static bool is_leaf(std::uint64_t payload) noexcept { return (payload & kLeafTag) != 0; }
+  static std::uint32_t leaf_first(std::uint64_t payload) noexcept {
+    return static_cast<std::uint32_t>(payload);
+  }
+  static std::uint32_t leaf_count(std::uint64_t payload) noexcept {
+    // The tag lives in bit 63, which sits inside the high word; mask it off
+    // before extracting the count.
+    return static_cast<std::uint32_t>((payload >> 32) & 0x7FFFFFFFull);
+  }
+
+  // Rounds a double bound outwards so the float child box is a superset of the
+  // exact double box.
+  static float float_lo(double v) noexcept {
+    const float f = static_cast<float>(v);
+    return static_cast<double>(f) > v
+               ? std::nextafter(f, -std::numeric_limits<float>::infinity())
+               : f;
+  }
+  static float float_hi(double v) noexcept {
+    const float f = static_cast<float>(v);
+    return static_cast<double>(f) < v
+               ? std::nextafter(f, std::numeric_limits<float>::infinity())
+               : f;
+  }
+
+  // One slot of a wide node while the binary tree is being collapsed.
+  struct SlotDesc {
+    Box3d box;
+    std::int32_t node = -1;  // interior: binary node to expand
+    std::uint32_t first = 0;
+    std::uint32_t count = 0;
+  };
+
+  // Collects the descendants at relative binary depth kFanoutBits that become
+  // this wide node's children: a leaf ends the descent early, an interior node
+  // exactly at the target depth becomes a child wide node.
+  void collect_slots(const std::vector<BuildNode>& bin, std::int32_t bi, int rel,
+                     SlotDesc* slots, int& used) const {
+    const BuildNode& node = bin[static_cast<std::size_t>(bi)];
+    if (node.count > 0 || rel == kFanoutBits) {
+      SlotDesc& slot = slots[used++];
+      slot.box = node.box;
+      slot.first = node.first;
+      slot.count = node.count;
+      slot.node = node.count > 0 ? -1 : bi;
+      return;
+    }
+    collect_slots(bin, node.left, rel + 1, slots, used);
+    collect_slots(bin, node.right, rel + 1, slots, used);
+  }
+
+  // Emits the wide node for binary interior node `bi` into `out` and returns its
+  // index. Children are emitted depth-first, so the array is a pre-order layout
+  // independent of thread count.
+  std::uint32_t convert_node(const std::vector<BuildNode>& bin, std::vector<Node>& out,
+                             std::int32_t bi) {
+    std::array<SlotDesc, kFanout> slots;
+    int used = 0;
+    const BuildNode& node = bin[static_cast<std::size_t>(bi)];
+    collect_slots(bin, node.left, 1, slots.data(), used);
+    collect_slots(bin, node.right, 1, slots.data(), used);
+    const auto index = static_cast<std::uint32_t>(out.size());
+    out.push_back(Node{});
+    Node wide{};
+    for (int j = 0; j < kFanout; ++j) {
+      if (j >= used) {
+        wide.child[j] = kInvalid;
+        continue;
+      }
+      const SlotDesc& slot = slots[static_cast<std::size_t>(j)];
+      for (int a = 0; a < 3; ++a) {
+        wide.lo[j][a] = float_lo(slot.box.lo[a]);
+        wide.hi[j][a] = float_hi(slot.box.hi[a]);
+      }
+      if (slot.node < 0) wide.child[j] = leaf_payload(slot.first, slot.count);
+    }
+    // Expand the interior children last: `out` may reallocate while they are
+    // emitted, so this node is written by index once the recursion returns.
+    for (int j = 0; j < used; ++j) {
+      const SlotDesc& slot = slots[static_cast<std::size_t>(j)];
+      if (slot.node >= 0) wide.child[j] = convert_node(bin, out, slot.node);
+    }
+    out[index] = wide;
+    return index;
+  }
+
+  // Replaces the binary node array with the wide traversal layout. A single
+  // leaf tree becomes an empty node array with a root leaf payload.
+  void widen_nodes(const std::vector<BuildNode>& bin) {
+    if (bin.empty()) {
+      root_payload_ = kInvalid;
+      return;
+    }
+    const BuildNode& root = bin[0];
+    if (root.count > 0) {
+      root_payload_ = leaf_payload(root.first, root.count);
+      return;
+    }
+    std::vector<Node> wide;
+    wide.reserve(bin.size() / 2 + 1);
+    const std::uint32_t root_index = convert_node(bin, wide, 0);
+    root_payload_ = root_index;
+    nodes_.swap(wide);
+  }
 
   // A subtree handed to the parallel phase: its range, the boxes its parent
   // already computed, and the index of its (already emitted) root node.
@@ -304,10 +528,10 @@ class Bvh {
   // range, computed by the caller from the data it already touched for its own
   // split. When `cut_depth_` is set, a node at that depth is emitted without its
   // children and recorded in `pending_` instead.
-  std::int32_t build_node(std::vector<Node>& out, std::uint32_t begin, std::uint32_t end, int depth,
-                          const Box3d& box, const Box3d& centroid_box) {
+  std::int32_t build_node(std::vector<BuildNode>& out, std::uint32_t begin, std::uint32_t end,
+                          int depth, const Box3d& box, const Box3d& centroid_box) {
     const auto node_index = static_cast<std::int32_t>(out.size());
-    out.push_back(Node{});
+    out.push_back(BuildNode{});
     out.back().box = box;
 
     const std::uint32_t count = end - begin;
@@ -529,10 +753,11 @@ class Bvh {
   // own slice of `order_`, so the work is independent; the arrays are then
   // appended in frontier order. The bytes produced are therefore the same for
   // any thread count and any completion order.
-  void build_parallel(std::uint32_t n, const Box3d& root_box, const Box3d& root_centroid_box) {
+  void build_parallel(std::vector<BuildNode>& out, std::uint32_t n, const Box3d& root_box,
+                      const Box3d& root_centroid_box) {
     pending_.clear();
     cut_depth_ = kParallelDepth;
-    build_node(nodes_, 0, n, 0, root_box, root_centroid_box);
+    build_node(out, 0, n, 0, root_box, root_centroid_box);
     cut_depth_ = -1;
     if (pending_.empty()) {
       // The top phase already finished the whole tree.
@@ -540,7 +765,7 @@ class Bvh {
     }
     // A single frontier subtree still goes through the append path below: its
     // root node was emitted by the top phase and still needs its children.
-    std::vector<std::vector<Node>> subtrees(pending_.size());
+    std::vector<std::vector<BuildNode>> subtrees(pending_.size());
     try {
       std::vector<std::future<void>> futures;
       futures.reserve(pending_.size());
@@ -555,26 +780,26 @@ class Bvh {
       // A thread or an allocation failed: rebuild on this thread. The tree does
       // not depend on how the subtrees were scheduled, so the result is the same.
       subtrees.clear();
-      nodes_.clear();
+      out.clear();
       pending_.clear();
-      build_node(nodes_, 0, n, 0, root_box, root_centroid_box);
+      build_node(out, 0, n, 0, root_box, root_centroid_box);
       return;
     }
     for (std::size_t t = 0; t < pending_.size(); ++t) {
-      const std::vector<Node>& subtree = subtrees[t];
-      const auto base = static_cast<std::int32_t>(nodes_.size());
+      const std::vector<BuildNode>& subtree = subtrees[t];
+      const auto base = static_cast<std::int32_t>(out.size());
       // The subtree's root is the node already emitted by the top phase, so its
       // children are packed from `base` on: local index j >= 1 maps to base+j-1.
       const std::int32_t shift = base - 1;
       for (std::size_t j = 1; j < subtree.size(); ++j) {
-        Node node = subtree[j];
+        BuildNode node = subtree[j];
         if (node.left >= 0) node.left += shift;
         if (node.right >= 0) node.right += shift;
-        nodes_.push_back(node);
+        out.push_back(node);
       }
-      const Node& root = subtree.front();
-      nodes_[static_cast<std::size_t>(pending_[t].node)].left = root.left + shift;
-      nodes_[static_cast<std::size_t>(pending_[t].node)].right = root.right + shift;
+      const BuildNode& root = subtree.front();
+      out[static_cast<std::size_t>(pending_[t].node)].left = root.left + shift;
+      out[static_cast<std::size_t>(pending_[t].node)].right = root.right + shift;
     }
     pending_.clear();
   }
@@ -617,10 +842,26 @@ class Bvh {
     return sum;
   }
 
+  static double box_distance2(const float* lo, const float* hi, Point3d p) noexcept {
+    double sum = 0.0;
+    for (int i = 0; i < 3; ++i) {
+      const double l = lo[i];
+      const double h = hi[i];
+      double d = 0.0;
+      if (p[i] < l) d = l - p[i];
+      if (p[i] > h) d = p[i] - h;
+      sum += d * d;
+    }
+    return sum;
+  }
+
   // Slab test. A zero direction component makes 1/dir infinite; that case is
   // handled explicitly so a ray starting exactly on a slab plane cannot form
-  // 0 * inf = NaN and poison the interval comparisons.
-  static bool slab(const Box3d& b, const Ray3d& r, const Vec3d& inv, double tmax) noexcept {
+  // 0 * inf = NaN and poison the interval comparisons. On a hit, `t_out` is the
+  // entry parameter (0 when the origin is already inside the box); a child box
+  // entered behind the current best is only pruned by the caller's limit.
+  static bool slab(const Box3d& b, const Ray3d& r, const Vec3d& inv, double tmax,
+                   double& t_out) noexcept {
     double tmin = 0.0;
     double t_limit = tmax;
     for (int i = 0; i < 3; ++i) {
@@ -635,6 +876,31 @@ class Bvh {
       t_limit = std::min(t_limit, t1);
       if (tmin > t_limit) return false;
     }
+    t_out = tmin;
+    return true;
+  }
+
+  // Same test for the float child boxes stored in a wide node. The boxes were
+  // rounded outwards when the tree was widened, so this stays conservative.
+  static bool slab(const float* lo, const float* hi, const Ray3d& r, const Vec3d& inv,
+                   double tmax, double& t_out) noexcept {
+    double tmin = 0.0;
+    double t_limit = tmax;
+    for (int i = 0; i < 3; ++i) {
+      const double l = lo[i];
+      const double h = hi[i];
+      if (!std::isfinite(inv[i])) {
+        if (r.origin[i] < l || r.origin[i] > h) return false;
+        continue;
+      }
+      double t0 = (l - r.origin[i]) * inv[i];
+      double t1 = (h - r.origin[i]) * inv[i];
+      if (t0 > t1) std::swap(t0, t1);
+      tmin = std::max(tmin, t0);
+      t_limit = std::min(t_limit, t1);
+      if (tmin > t_limit) return false;
+    }
+    t_out = tmin;
     return true;
   }
 
@@ -645,13 +911,14 @@ class Bvh {
   // is computed in double, so it saturates once |e1| * |e2| * |dir| exceeds
   // DBL_MAX (~1e308). Past that point the guard rejects every ray rather than
   // misclassifying one, and the sliver measure itself has already overflowed.
-  static bool intersect_tri(const Ray3d& r, const Triangle3d& t, double& tout) noexcept {
+  static bool intersect_tri(const Ray3d& r, const Triangle3d& t, double dir_len,
+                            double& tout) noexcept {
     const Vec3d e1 = t.b - t.a;
     const Vec3d e2 = t.c - t.a;
     const Vec3d pv = cross(r.dir, e2);
     const double det = dot(e1, pv);
     const double scale =
-        std::sqrt(dot(e1, e1)) * std::sqrt(dot(e2, e2)) * std::sqrt(dot(r.dir, r.dir));
+        std::sqrt(dot(e1, e1)) * std::sqrt(dot(e2, e2)) * dir_len;
     if (!(std::abs(det) > 1e-14 * scale)) return false;
     const Vec3d tv{r.origin[0] - t.a[0], r.origin[1] - t.a[1], r.origin[2] - t.a[2]};
     // Divide by det instead of multiplying by 1/det: the reciprocal is
@@ -675,7 +942,14 @@ class Bvh {
   std::vector<Triangle3d> tris_;
   std::vector<Box3d> boxes_;
   std::vector<std::uint32_t> order_;
+  // Wide traversal nodes (the binary build array is converted and released by
+  // `widen_nodes` at the end of each build).
   std::vector<Node> nodes_;
+  // Exact union of every primitive box; the query's first slab test.
+  Box3d root_box_;
+  // Leaf payload when the whole tree is a single leaf, otherwise the index of
+  // the root wide node. kInvalid for an empty tree.
+  std::uint64_t root_payload_ = kInvalid;
   // Build scratch, sized to the primitive count: the binned range grouped into
   // `scratch_`, and the bin of each order_ slot for the counting sort.
   std::vector<std::uint32_t> scratch_;

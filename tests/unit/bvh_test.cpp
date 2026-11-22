@@ -37,15 +37,19 @@ struct BvhTestAccess {
   static std::uint64_t digest(const Bvh& bvh) noexcept {
     std::uint64_t h = 1469598103934665603ull;
     mix(h, bvh.nodes_.size());
+    mix(h, bvh.root_payload_);
+    for (int i = 0; i < 3; ++i) {
+      mix(h, std::bit_cast<std::uint64_t>(bvh.root_box_.lo[i]));
+      mix(h, std::bit_cast<std::uint64_t>(bvh.root_box_.hi[i]));
+    }
     for (const auto& n : bvh.nodes_) {
-      for (int i = 0; i < 3; ++i) {
-        mix(h, std::bit_cast<std::uint64_t>(n.box.lo[i]));
-        mix(h, std::bit_cast<std::uint64_t>(n.box.hi[i]));
+      for (int j = 0; j < Bvh::kFanout; ++j) {
+        for (int i = 0; i < 3; ++i) {
+          mix(h, std::bit_cast<std::uint32_t>(n.lo[j][i]));
+          mix(h, std::bit_cast<std::uint32_t>(n.hi[j][i]));
+        }
+        mix(h, n.child[j]);
       }
-      mix(h, n.first);
-      mix(h, n.count);
-      mix(h, static_cast<std::uint32_t>(n.left));
-      mix(h, static_cast<std::uint32_t>(n.right));
     }
     mix(h, bvh.order_.size());
     for (std::uint32_t prim : bvh.order_) mix(h, prim);
@@ -60,36 +64,94 @@ struct BvhTestAccess {
 
   static std::size_t node_count(const Bvh& bvh) noexcept { return bvh.nodes_.size(); }
 
-  // An interior node must have both children. A frontier node left as
-  // `count == 0, left == right == -1` silently hides its whole subtree.
+  // An interior wide node must have at least two children, its valid slots must
+  // be a prefix of the slot array, and every reference must stay in range. A
+  // node left with no children would silently hide its whole subtree.
   static bool has_dangling_interior(const Bvh& bvh) noexcept {
-    for (const auto& n : bvh.nodes_) {
-      if (n.count == 0 && (n.left < 0 || n.right < 0)) return true;
+    const std::size_t n = bvh.nodes_.size();
+    if (n == 0) {
+      // Either an empty tree (no payload) or a tree that is a single leaf.
+      return bvh.root_payload_ != Bvh::kInvalid && !Bvh::is_leaf(bvh.root_payload_);
+    }
+    if (Bvh::is_leaf(bvh.root_payload_)) return true;
+    if (bvh.root_payload_ >= static_cast<std::uint64_t>(n)) return true;
+    if (bvh.order_.empty()) return true;
+    for (const auto& node : bvh.nodes_) {
+      int valid = 0;
+      bool tail = false;
+      for (int j = 0; j < Bvh::kFanout; ++j) {
+        const std::uint64_t child = node.child[j];
+        if (child == Bvh::kInvalid) {
+          tail = true;
+          continue;
+        }
+        if (tail) return true;  // valid slots must be contiguous from slot 0
+        ++valid;
+        if (Bvh::is_leaf(child)) {
+          const std::uint32_t first = Bvh::leaf_first(child);
+          const std::uint32_t count = Bvh::leaf_count(child);
+          if (count == 0u || first > bvh.order_.size() ||
+              count > bvh.order_.size() - first) {
+            return true;
+          }
+        } else if (child >= static_cast<std::uint64_t>(n)) {
+          return true;
+        }
+      }
+      if (valid < 2) return true;
     }
     return false;
   }
 
+  // One leaf of the wide layout: its partition and the child box it was widened
+  // from. The root leaf (a tree of at most kMaxLeaf primitives) has no slot box,
+  // so it hashes the exact root box instead.
+  struct LeafView {
+    std::uint32_t first = 0;
+    std::uint32_t count = 0;
+    std::uint64_t box_bits[6] = {};
+  };
+
   // Hashes the leaf partition in permutation order, so two builds that number
   // their nodes differently still compare equal when they hold the same tree.
   static std::uint64_t leaf_digest(const Bvh& bvh) {
-    std::vector<std::uint32_t> leaves;
-    for (std::uint32_t i = 0; i < bvh.nodes_.size(); ++i) {
-      if (bvh.nodes_[i].count > 0) leaves.push_back(i);
+    std::vector<LeafView> leaves;
+    if (bvh.nodes_.empty() && bvh.root_payload_ != Bvh::kInvalid &&
+        Bvh::is_leaf(bvh.root_payload_)) {
+      LeafView leaf;
+      leaf.first = Bvh::leaf_first(bvh.root_payload_);
+      leaf.count = Bvh::leaf_count(bvh.root_payload_);
+      for (int a = 0; a < 3; ++a) {
+        leaf.box_bits[a] = std::bit_cast<std::uint64_t>(bvh.root_box_.lo[a]);
+        leaf.box_bits[3 + a] = std::bit_cast<std::uint64_t>(bvh.root_box_.hi[a]);
+      }
+      leaves.push_back(leaf);
     }
-    std::sort(leaves.begin(), leaves.end(), [&bvh](std::uint32_t a, std::uint32_t b) {
-      return bvh.nodes_[a].first < bvh.nodes_[b].first;
-    });
+    for (const auto& node : bvh.nodes_) {
+      for (int j = 0; j < Bvh::kFanout; ++j) {
+        const std::uint64_t child = node.child[j];
+        if (child == Bvh::kInvalid || !Bvh::is_leaf(child)) continue;
+        LeafView leaf;
+        leaf.first = Bvh::leaf_first(child);
+        leaf.count = Bvh::leaf_count(child);
+        for (int a = 0; a < 3; ++a) {
+          leaf.box_bits[a] = std::bit_cast<std::uint32_t>(node.lo[j][a]);
+          leaf.box_bits[3 + a] = std::bit_cast<std::uint32_t>(node.hi[j][a]);
+        }
+        leaves.push_back(leaf);
+      }
+    }
+    std::sort(leaves.begin(), leaves.end(),
+              [](const LeafView& a, const LeafView& b) { return a.first < b.first; });
     std::uint64_t h = 1469598103934665603ull;
     mix(h, leaves.size());
-    for (std::uint32_t i : leaves) {
-      const auto& n = bvh.nodes_[i];
-      for (int a = 0; a < 3; ++a) {
-        mix(h, std::bit_cast<std::uint64_t>(n.box.lo[a]));
-        mix(h, std::bit_cast<std::uint64_t>(n.box.hi[a]));
+    for (const LeafView& leaf : leaves) {
+      for (std::uint64_t bits : leaf.box_bits) mix(h, bits);
+      mix(h, leaf.first);
+      mix(h, leaf.count);
+      for (std::uint32_t j = leaf.first; j < leaf.first + leaf.count; ++j) {
+        mix(h, bvh.order_[j]);
       }
-      mix(h, n.first);
-      mix(h, n.count);
-      for (std::uint32_t j = n.first; j < n.first + n.count; ++j) mix(h, bvh.order_[j]);
     }
     return h;
   }
@@ -635,4 +697,149 @@ TEST_CASE("BVH build expands a single pending subtree") {
   REQUIRE(serial.raycast(ray, 10.0, serial_hit));
   CHECK(serial_hit.prim == hit.prim);
   CHECK(serial_hit.t == hit.t);
+}
+
+// ---------------------------------------------------------------------------
+// Widened traversal and leaf-ordered primitives: the added contract checks.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BVH raycast ties resolve to the smallest original index") {
+  // Five copies of one large coplanar triangle sit at spread-out indices, so
+  // several leaves report exactly the same hit distance. The tie must resolve to
+  // the smallest original primitive index whatever order the traversal and the
+  // leaf permutation happen to visit them in.
+  const Triangle3d big{Point3d{-100, -100, 0}, Point3d{100, -100, 0}, Point3d{0, 200, 0}};
+  const Triangle3d far{Point3d{-1, -1, 50}, Point3d{1, -1, 50}, Point3d{0, 1, 50}};
+  const std::uint32_t copy_at[5] = {0, 3, 9, 17, 33};
+  std::vector<Triangle3d> tris;
+  int next_copy = 0;
+  for (std::uint32_t i = 0; i < 40; ++i) {
+    if (next_copy < 5 && copy_at[next_copy] == i) {
+      tris.push_back(big);
+      ++next_copy;
+    } else {
+      tris.push_back(far);
+    }
+  }
+  REQUIRE(next_copy == 5);
+  Bvh bvh;
+  bvh.build(tris);
+  const Ray3d ray{Point3d{0.5, 0.5, -1.0}, Vec3d{0, 0, 1}};
+  const BruteHit ref = brute_raycast(tris, ray, 10.0);
+  REQUIRE(ref.hit);
+  CHECK(ref.prim == 0u);
+  CHECK(ref.t == 1.0);
+
+  Bvh::Hit hit;
+  REQUIRE(bvh.raycast(ray, 10.0, hit));
+  CHECK(hit.prim == 0u);  // not 3, 9, 17 or 33
+  CHECK(hit.t == 1.0);
+
+  // Remove the copy at index 0: index 3 becomes the smallest index at the same
+  // distance, so it must win even though its leaf slot is unrelated.
+  std::vector<Triangle3d> shifted = tris;
+  shifted[0] = far;
+  Bvh shifted_bvh;
+  shifted_bvh.build(shifted);
+  const BruteHit shifted_ref = brute_raycast(shifted, ray, 10.0);
+  REQUIRE(shifted_ref.hit);
+  CHECK(shifted_ref.prim == 3u);
+  REQUIRE(shifted_bvh.raycast(ray, 10.0, hit));
+  CHECK(hit.prim == 3u);
+  CHECK(hit.t == 1.0);
+}
+
+TEST_CASE("BVH raycast accepts a hit exactly at tmax on a multi-level tree") {
+  // A 100 x 100 grid puts the hit leaf several wide-node levels down, so the
+  // budget is checked by the widened traversal as well as by the leaf loop.
+  std::vector<Triangle3d> tris;
+  for (int y = 0; y < 100; ++y) {
+    for (int x = 0; x < 100; ++x) {
+      const double fx = static_cast<double>(x);
+      const double fy = static_cast<double>(y);
+      tris.push_back(Triangle3d{Point3d{fx, fy, 0.0}, Point3d{fx + 1.0, fy, 0.0},
+                                Point3d{fx, fy + 1.0, 0.0}});
+      tris.push_back(Triangle3d{Point3d{fx + 1.0, fy, 0.0}, Point3d{fx + 1.0, fy + 1.0, 0.0},
+                                Point3d{fx, fy + 1.0, 0.0}});
+    }
+  }
+  Bvh bvh;
+  bvh.build(tris);
+  const Ray3d ray{Point3d{25.25, 30.25, 1.0}, Vec3d{0, 0, -1}};
+  Bvh::Hit hit;
+  REQUIRE(bvh.raycast(ray, 1.0, hit));
+  CHECK(hit.t == 1.0);
+  CHECK(hit.prim == (30u * 100u + 25u) * 2u);
+  // One ulp below the hit distance is a miss, one ulp above still hits.
+  CHECK_FALSE(bvh.raycast(ray, std::nextafter(1.0, 0.0), hit));
+  CHECK(bvh.raycast(ray, std::nextafter(1.0, 2.0), hit));
+  CHECK(hit.t == 1.0);
+}
+
+TEST_CASE("BVH leaf-order permutation preserves hit.prim and nearest") {
+  std::mt19937 rng(20261113u);
+  const auto tris = random_triangles(rng, 400);
+  Bvh bvh;
+  bvh.build(tris);
+  std::uniform_real_distribution<double> coord(-1.0, 1.0);
+  int hits = 0;
+  for (int r = 0; r < 600; ++r) {
+    const Point3d origin{coord(rng) * 4.0, coord(rng) * 4.0, 4.0};
+    const Point3d target{coord(rng) * 1.5, coord(rng) * 1.5, coord(rng) * 1.5};
+    const Ray3d ray{origin, target - origin};
+    const BruteHit ref = brute_raycast(tris, ray, 1e30);
+    Bvh::Hit hit;
+    const bool got = bvh.raycast(ray, 1e30, hit);
+    CHECK(got == ref.hit);
+    if (got && ref.hit) {
+      // Bit-identical: the remap must not perturb the arithmetic, and the
+      // reported index is the ORIGINAL triangle index, not a leaf slot.
+      CHECK(hit.t == ref.t);
+      CHECK(hit.prim == ref.prim);
+      ++hits;
+    }
+  }
+  CHECK(hits > 200);
+
+  // The same primitives in reverse input order: every leaf permutation changes,
+  // so a stale slot/index mapping would report the mirror image of each hit.
+  const std::vector<Triangle3d> reversed(tris.rbegin(), tris.rend());
+  Bvh reversed_bvh;
+  reversed_bvh.build(reversed);
+  for (int r = 0; r < 300; ++r) {
+    const Point3d origin{coord(rng) * 4.0, coord(rng) * 4.0, 4.0};
+    const Point3d target{coord(rng) * 1.5, coord(rng) * 1.5, coord(rng) * 1.5};
+    const Ray3d ray{origin, target - origin};
+    const BruteHit ref = brute_raycast(reversed, ray, 1e30);
+    Bvh::Hit hit;
+    const bool got = reversed_bvh.raycast(ray, 1e30, hit);
+    CHECK(got == ref.hit);
+    if (got && ref.hit) {
+      CHECK(hit.t == ref.t);
+      CHECK(hit.prim == ref.prim);
+    }
+  }
+
+  // Nearest, including duplicated primitives: exact distance ties must resolve
+  // to the smallest original index, exactly as the brute-force oracle does.
+  for (int q = 0; q < 200; ++q) {
+    const Point3d p{coord(rng) * 3.0, coord(rng) * 3.0, coord(rng) * 3.0};
+    double ref_d2 = 0.0;
+    const std::uint32_t ref = brute_nearest(tris, p, ref_d2);
+    double d2 = 0.0;
+    CHECK(bvh.nearest(p, d2) == ref);
+    CHECK(d2 == ref_d2);
+  }
+  std::vector<Triangle3d> duplicated = tris;
+  for (std::size_t i = 0; i < 30; ++i) duplicated.push_back(tris[i]);
+  Bvh duplicate_bvh;
+  duplicate_bvh.build(duplicated);
+  for (int q = 0; q < 200; ++q) {
+    const Point3d p{coord(rng) * 3.0, coord(rng) * 3.0, coord(rng) * 3.0};
+    double ref_d2 = 0.0;
+    const std::uint32_t ref = brute_nearest(duplicated, p, ref_d2);
+    double d2 = 0.0;
+    CHECK(duplicate_bvh.nearest(p, d2) == ref);
+    CHECK(d2 == ref_d2);
+  }
 }
