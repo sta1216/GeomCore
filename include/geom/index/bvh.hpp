@@ -109,7 +109,7 @@ inline double squared_distance(Point3d p, const Triangle3d& t) noexcept {
 // slot i, and every leaf covers a contiguous range of slots, so a leaf's
 // primitive tests walk contiguous triangle storage. The tree is widened after
 // the build: a wide node stores `kFanout` child boxes and child references in
-// one record, so a visited traversal level costs one node line instead of one
+// one record, so a visited traversal level costs one 224-byte node record instead of one
 // line per binary node. A child reference is either a leaf range (tagged payload)
 // or the index of another wide node. The binary tree produced by the SAH build
 // is converted depth-first, so the wide array is also deterministic. A depth
@@ -173,7 +173,7 @@ class Bvh {
     double best = tmax;
     std::uint32_t best_prim = 0;
     // The root box is tested once; every other child box arrives with its
-    // interior node's line, so a visited level costs one node line.
+    // interior node's record, so a visited level costs one 224-byte node record.
     double root_t = 0.0;
     if (!slab(root_box_, ray, inv, best * (1.0 + kPruneSlack), root_t)) return false;
     stack[static_cast<std::size_t>(sp++)] = StackEntry{root_t, root_payload_};
@@ -385,7 +385,8 @@ class Bvh {
     std::int32_t right = -1;   // interior child index
   };
 
-  // Traversal node: kFanout child boxes and child references in one record.
+  // Traversal node: kFanout child boxes and child references in one 224-byte
+  // record (three and a half 64-byte cache lines).
   // Each child box is the exact binary child's box, stored in double. The entry
   // parameter is compared against the primitive distances computed from the same
   // ray; a narrowed (float) bound can round the entry time above a hit and prune
