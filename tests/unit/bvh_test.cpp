@@ -1,10 +1,12 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <random>
+#include <span>
 #include <vector>
 
 #include <geom/index/bvh.hpp>
@@ -25,27 +27,90 @@ struct BvhTestAccess {
     return Bvh::kParallelMinPrims;
   }
 
+  static void mix(std::uint64_t& h, std::uint64_t v) noexcept {
+    for (int i = 0; i < 8; ++i) {
+      h ^= (v >> (8 * i)) & 0xFFu;
+      h *= 1099511628211ull;
+    }
+  }
+
   static std::uint64_t digest(const Bvh& bvh) noexcept {
     std::uint64_t h = 1469598103934665603ull;
-    auto mix = [&h](std::uint64_t v) noexcept {
-      for (int i = 0; i < 8; ++i) {
-        h ^= (v >> (8 * i)) & 0xFFu;
-        h *= 1099511628211ull;
-      }
-    };
-    mix(bvh.nodes_.size());
+    mix(h, bvh.nodes_.size());
     for (const auto& n : bvh.nodes_) {
       for (int i = 0; i < 3; ++i) {
-        mix(std::bit_cast<std::uint64_t>(n.box.lo[i]));
-        mix(std::bit_cast<std::uint64_t>(n.box.hi[i]));
+        mix(h, std::bit_cast<std::uint64_t>(n.box.lo[i]));
+        mix(h, std::bit_cast<std::uint64_t>(n.box.hi[i]));
       }
-      mix(n.first);
-      mix(n.count);
-      mix(static_cast<std::uint32_t>(n.left));
-      mix(static_cast<std::uint32_t>(n.right));
+      mix(h, n.first);
+      mix(h, n.count);
+      mix(h, static_cast<std::uint32_t>(n.left));
+      mix(h, static_cast<std::uint32_t>(n.right));
     }
-    mix(bvh.order_.size());
-    for (std::uint32_t prim : bvh.order_) mix(prim);
+    mix(h, bvh.order_.size());
+    for (std::uint32_t prim : bvh.order_) mix(h, prim);
+    return h;
+  }
+
+  // Builds the same input without the parallel phase. The public entry point
+  // always allows it, so this is the only way to compare the two modes.
+  static void build_serial(Bvh& bvh, std::span<const Triangle3d> tris) {
+    bvh.build_impl(tris, false);
+  }
+
+  static std::size_t node_count(const Bvh& bvh) noexcept { return bvh.nodes_.size(); }
+
+  // An interior node must have both children. A frontier node left as
+  // `count == 0, left == right == -1` silently hides its whole subtree.
+  static bool has_dangling_interior(const Bvh& bvh) noexcept {
+    for (const auto& n : bvh.nodes_) {
+      if (n.count == 0 && (n.left < 0 || n.right < 0)) return true;
+    }
+    return false;
+  }
+
+  // Hashes the leaf partition in permutation order, so two builds that number
+  // their nodes differently still compare equal when they hold the same tree.
+  static std::uint64_t leaf_digest(const Bvh& bvh) {
+    std::vector<std::uint32_t> leaves;
+    for (std::uint32_t i = 0; i < bvh.nodes_.size(); ++i) {
+      if (bvh.nodes_[i].count > 0) leaves.push_back(i);
+    }
+    std::sort(leaves.begin(), leaves.end(), [&bvh](std::uint32_t a, std::uint32_t b) {
+      return bvh.nodes_[a].first < bvh.nodes_[b].first;
+    });
+    std::uint64_t h = 1469598103934665603ull;
+    mix(h, leaves.size());
+    for (std::uint32_t i : leaves) {
+      const auto& n = bvh.nodes_[i];
+      for (int a = 0; a < 3; ++a) {
+        mix(h, std::bit_cast<std::uint64_t>(n.box.lo[a]));
+        mix(h, std::bit_cast<std::uint64_t>(n.box.hi[a]));
+      }
+      mix(h, n.first);
+      mix(h, n.count);
+      for (std::uint32_t j = n.first; j < n.first + n.count; ++j) mix(h, bvh.order_[j]);
+    }
+    return h;
+  }
+
+  // Hashes the answers of the public queries for a fixed ray/point set. The
+  // serial and parallel builds may number their nodes differently, but they must
+  // return the same primitive and the same distances.
+  static std::uint64_t query_digest(const Bvh& bvh) {
+    std::uint64_t h = 1469598103934665603ull;
+    for (int i = 0; i < 256; ++i) {
+      const double fx = static_cast<double>(i % 16) + 0.5;
+      const double fy = static_cast<double>(i / 16) + 0.25;
+      Bvh::Hit hit;
+      const bool found = bvh.raycast(Ray3d{Point3d{fx, fy, 5.0}, Vec3d{0.0, 0.0, -1.0}}, 10.0, hit);
+      mix(h, found ? 1u : 0u);
+      mix(h, hit.prim);
+      mix(h, std::bit_cast<std::uint64_t>(hit.t));
+      double d2 = 0.0;
+      mix(h, bvh.nearest(Point3d{fx, fy, 3.0}, d2));
+      mix(h, std::bit_cast<std::uint64_t>(d2));
+    }
     return h;
   }
 };
@@ -520,4 +585,54 @@ TEST_CASE("BVH build is deterministic") {
   // Rebuilding the same object must not inherit state from the previous build.
   first.build(tris);
   CHECK(geom::v1::BvhTestAccess::digest(first) == expected);
+
+  // A serial build numbers its nodes differently, but it must produce the same
+  // tree and answer every query identically.
+  Bvh serial;
+  geom::v1::BvhTestAccess::build_serial(serial, tris);
+  CHECK(geom::v1::BvhTestAccess::node_count(serial) ==
+        geom::v1::BvhTestAccess::node_count(first));
+  CHECK(geom::v1::BvhTestAccess::leaf_digest(serial) == geom::v1::BvhTestAccess::leaf_digest(first));
+  CHECK(geom::v1::BvhTestAccess::query_digest(serial) ==
+        geom::v1::BvhTestAccess::query_digest(first));
+  CHECK_FALSE(geom::v1::BvhTestAccess::has_dangling_interior(serial));
+  CHECK_FALSE(geom::v1::BvhTestAccess::has_dangling_interior(first));
+}
+
+TEST_CASE("BVH build expands a single pending subtree") {
+  // A comb-shaped input: thousands of coincident triangles plus three distant
+  // clusters, so the frontier at the parallel cut depth holds exactly one
+  // interior node. That node must still get its children.
+  std::vector<Triangle3d> tris;
+  const Triangle3d base{Point3d{1.0, 0.0, 0.0}, Point3d{1.0031578, 0.0, 0.0},
+                        Point3d{1.0, 0.0031578, 0.0}};
+  for (int i = 0; i < 32760; ++i) tris.push_back(base);
+  const double xs[3] = {1.00919, 6.7843, 265.862};
+  const double sizes[3] = {1.59593, 45.5318, 629.062};
+  for (int c = 0; c < 3; ++c) {
+    for (int i = 0; i < 4; ++i) {
+      tris.push_back(Triangle3d{Point3d{xs[c], 0.0, 0.0}, Point3d{xs[c] + sizes[c], 0.0, 0.0},
+                                Point3d{xs[c], sizes[c], 0.0}});
+    }
+  }
+  REQUIRE(tris.size() >= geom::v1::BvhTestAccess::parallel_threshold());
+
+  Bvh bvh;
+  bvh.build(tris);
+  CHECK_FALSE(geom::v1::BvhTestAccess::has_dangling_interior(bvh));
+
+  const Ray3d ray{Point3d{1.0015, 0.0015, 5.0}, Vec3d{0.0, 0.0, -1.0}};
+  Bvh::Hit hit;
+  REQUIRE(bvh.raycast(ray, 10.0, hit));
+  CHECK(hit.prim == 0u);
+  CHECK(hit.t == 5.0);
+
+  // The serial build sees the same triangles, so it must agree.
+  Bvh serial;
+  geom::v1::BvhTestAccess::build_serial(serial, tris);
+  CHECK_FALSE(geom::v1::BvhTestAccess::has_dangling_interior(serial));
+  Bvh::Hit serial_hit;
+  REQUIRE(serial.raycast(ray, 10.0, serial_hit));
+  CHECK(serial_hit.prim == hit.prim);
+  CHECK(serial_hit.t == hit.t);
 }

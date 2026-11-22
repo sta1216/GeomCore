@@ -145,32 +145,7 @@ class Bvh {
     double t = 0.0;
   };
 
-  void build(std::span<const Triangle3d> triangles) {
-    tris_.assign(triangles.begin(), triangles.end());
-    boxes_.resize(triangles.size());
-    order_.clear();
-    nodes_.clear();
-    order_.reserve(triangles.size());
-    Box3d root_box = Box3d::empty();
-    Box3d root_centroid_box = Box3d::empty();
-    for (std::size_t i = 0; i < triangles.size(); ++i) {
-      const Box3d box = triangle_box(triangles[i]);
-      boxes_[i] = box;
-      root_box.expand(box);
-      root_centroid_box.expand(center_of(box));
-      order_.push_back(static_cast<std::uint32_t>(i));
-    }
-    if (tris_.empty()) return;
-    scratch_.resize(tris_.size());
-    bin_index_.resize(tris_.size());
-    nodes_.reserve(2 * tris_.size());
-    const auto n = static_cast<std::uint32_t>(tris_.size());
-    if (n >= kParallelMinPrims) {
-      build_parallel(n, root_box, root_centroid_box);
-    } else {
-      build_node(nodes_, 0, n, 0, root_box, root_centroid_box);
-    }
-  }
+  void build(std::span<const Triangle3d> triangles) { build_impl(triangles, true); }
 
   const Box3d& bounds() const noexcept {
     static const Box3d kEmpty = Box3d::empty();
@@ -261,6 +236,39 @@ class Bvh {
   // Test-only accessor for the determinism digest; it is not part of the
   // public API and does not expose the node layout beyond the tests.
   friend struct BvhTestAccess;
+
+  // `allow_parallel` is a test seam: the determinism test builds one input both
+  // ways to check that the two modes agree on the tree shape and on query
+  // results. Mode state is reset here, so a build that throws part-way through
+  // the parallel phase cannot leak into the next one.
+  void build_impl(std::span<const Triangle3d> triangles, bool allow_parallel) {
+    pending_.clear();
+    cut_depth_ = -1;
+    tris_.assign(triangles.begin(), triangles.end());
+    boxes_.resize(triangles.size());
+    order_.clear();
+    nodes_.clear();
+    order_.reserve(triangles.size());
+    Box3d root_box = Box3d::empty();
+    Box3d root_centroid_box = Box3d::empty();
+    for (std::size_t i = 0; i < triangles.size(); ++i) {
+      const Box3d box = triangle_box(triangles[i]);
+      boxes_[i] = box;
+      root_box.expand(box);
+      root_centroid_box.expand(center_of(box));
+      order_.push_back(static_cast<std::uint32_t>(i));
+    }
+    if (tris_.empty()) return;
+    scratch_.resize(tris_.size());
+    bin_index_.resize(tris_.size());
+    nodes_.reserve(2 * tris_.size());
+    const auto n = static_cast<std::uint32_t>(tris_.size());
+    if (allow_parallel && n >= kParallelMinPrims) {
+      build_parallel(n, root_box, root_centroid_box);
+    } else {
+      build_node(nodes_, 0, n, 0, root_box, root_centroid_box);
+    }
+  }
 
   struct Node {
     Box3d box;
@@ -526,10 +534,12 @@ class Bvh {
     cut_depth_ = kParallelDepth;
     build_node(nodes_, 0, n, 0, root_box, root_centroid_box);
     cut_depth_ = -1;
-    if (pending_.size() < 2) {
-      pending_.clear();
+    if (pending_.empty()) {
+      // The top phase already finished the whole tree.
       return;
     }
+    // A single frontier subtree still goes through the append path below: its
+    // root node was emitted by the top phase and still needs its children.
     std::vector<std::vector<Node>> subtrees(pending_.size());
     try {
       std::vector<std::future<void>> futures;
