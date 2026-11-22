@@ -175,13 +175,14 @@ class Bvh {
     // The root box is tested once; every other child box arrives with its
     // interior node's line, so a visited level costs one node line.
     double root_t = 0.0;
-    if (!slab(root_box_, ray, inv, best, root_t)) return false;
+    if (!slab(root_box_, ray, inv, best * (1.0 + kPruneSlack), root_t)) return false;
     stack[static_cast<std::size_t>(sp++)] = StackEntry{root_t, root_payload_};
     while (sp > 0) {
       const StackEntry entry = stack[static_cast<std::size_t>(--sp)];
-      // A child box entered behind the current best can only contain hits at or
-      // beyond it; equality is kept so a tie with a smaller index still wins.
-      if (entry.t > best) continue;
+      // A child box entered behind the current best (allowing for the rounding
+      // slack described at kPruneSlack) can only contain hits at or beyond it;
+      // equality is kept so a tie with a smaller index still wins.
+      if (entry.t > best * (1.0 + kPruneSlack)) continue;
       const std::uint64_t payload = entry.payload;
       if (is_leaf(payload)) {
         const std::uint32_t first = leaf_first(payload);
@@ -206,7 +207,7 @@ class Bvh {
           const std::uint64_t child = n.child[j];
           if (child == kInvalid) break;
           double t = 0.0;
-          if (!slab(n.lo[j], n.hi[j], ray, inv, best, t)) continue;
+          if (!slab(n.lo[j], n.hi[j], ray, inv, best * (1.0 + kPruneSlack), t)) continue;
           if (is_leaf(child)) {
             // A leaf is small: testing it here avoids a stack round trip and
             // lets its hits tighten `best` before the remaining slots of this
@@ -261,8 +262,9 @@ class Bvh {
     while (sp > 0) {
       const StackEntry entry = stack[static_cast<std::size_t>(--sp)];
       // Equality is not pruned: a different primitive at exactly best_d2 may
-      // still win the index tie-break.
-      if (entry.t > best_d2) continue;
+      // still win the index tie-break. The slack covers the same box-distance
+      // rounding as kPruneSlack does for raycast.
+      if (entry.t > best_d2 * (1.0 + kPruneSlack)) continue;
       const std::uint64_t payload = entry.payload;
       if (is_leaf(payload)) {
         const std::uint32_t first = leaf_first(payload);
@@ -282,7 +284,7 @@ class Bvh {
           const std::uint64_t child = n.child[j];
           if (child == kInvalid) break;
           const double d2 = box_distance2(n.lo[j], n.hi[j], p);
-          if (d2 > best_d2) continue;
+          if (d2 > best_d2 * (1.0 + kPruneSlack)) continue;
           stack[static_cast<std::size_t>(sp++)] = StackEntry{d2, child};
         }
       }
@@ -362,6 +364,16 @@ class Bvh {
   // depth is at most ceil(kMaxDepth / kFanoutBits).
   static constexpr int kStackSize = 1 + (kMaxDepth / kFanoutBits + 1) * (kFanout - 1);
 
+  // A box entry parameter and a primitive distance are computed by different
+  // floating-point expressions, so an entry can round a few ulps above a hit
+  // that lies exactly on the box's own boundary; coplanar geometry does that for
+  // every ray. Pruning therefore compares against the current best widened by
+  // this relative slack. Without it the traversal order alone decides whether
+  // such a leaf is visited, and the reported closest hit changes by ulps. The
+  // slack is far below any distance a caller can distinguish, and it only keeps
+  // boxes that were within a few thousand ulps of the best hit anyway.
+  static constexpr double kPruneSlack = 1e-12;
+
   // Binary build node: the SAH tree produced by build_node. It is converted to
   // the wide traversal layout once the build is complete, so this type is never
   // touched by a query.
@@ -374,14 +386,15 @@ class Bvh {
   };
 
   // Traversal node: kFanout child boxes and child references in one record.
-  // Each child box is the exact binary child's box rounded outwards to float,
-  // so the widening never prunes a primitive the binary tree would have kept.
-  // `child[j]` is either a leaf payload (kLeafTag | first | count << 32) or the
-  // index of another wide node; unused slots are kInvalid and the valid ones are
-  // a prefix of the array.
-  struct alignas(64) Node {
-    float lo[kFanout][3];
-    float hi[kFanout][3];
+  // Each child box is the exact binary child's box, stored in double. The entry
+  // parameter is compared against the primitive distances computed from the same
+  // ray; a narrowed (float) bound can round the entry time above a hit and prune
+  // the leaf that holds it, so the bounds must stay exact. `child[j]` is either a
+  // leaf payload (kLeafTag | first | count << 32) or the index of another wide
+  // node; unused slots are kInvalid and the valid ones are a prefix of the array.
+  struct Node {
+    double lo[kFanout][3];
+    double hi[kFanout][3];
     std::uint64_t child[kFanout];
   };
 
@@ -415,21 +428,6 @@ class Bvh {
     // The tag lives in bit 63, which sits inside the high word; mask it off
     // before extracting the count.
     return static_cast<std::uint32_t>((payload >> 32) & 0x7FFFFFFFull);
-  }
-
-  // Rounds a double bound outwards so the float child box is a superset of the
-  // exact double box.
-  static float float_lo(double v) noexcept {
-    const float f = static_cast<float>(v);
-    return static_cast<double>(f) > v
-               ? std::nextafter(f, -std::numeric_limits<float>::infinity())
-               : f;
-  }
-  static float float_hi(double v) noexcept {
-    const float f = static_cast<float>(v);
-    return static_cast<double>(f) < v
-               ? std::nextafter(f, std::numeric_limits<float>::infinity())
-               : f;
   }
 
   // One slot of a wide node while the binary tree is being collapsed.
@@ -478,8 +476,8 @@ class Bvh {
       }
       const SlotDesc& slot = slots[static_cast<std::size_t>(j)];
       for (int a = 0; a < 3; ++a) {
-        wide.lo[j][a] = float_lo(slot.box.lo[a]);
-        wide.hi[j][a] = float_hi(slot.box.hi[a]);
+        wide.lo[j][a] = slot.box.lo[a];
+        wide.hi[j][a] = slot.box.hi[a];
       }
       if (slot.node < 0) wide.child[j] = leaf_payload(slot.first, slot.count);
     }
@@ -842,7 +840,7 @@ class Bvh {
     return sum;
   }
 
-  static double box_distance2(const float* lo, const float* hi, Point3d p) noexcept {
+  static double box_distance2(const double* lo, const double* hi, Point3d p) noexcept {
     double sum = 0.0;
     for (int i = 0; i < 3; ++i) {
       const double l = lo[i];
@@ -880,9 +878,8 @@ class Bvh {
     return true;
   }
 
-  // Same test for the float child boxes stored in a wide node. The boxes were
-  // rounded outwards when the tree was widened, so this stays conservative.
-  static bool slab(const float* lo, const float* hi, const Ray3d& r, const Vec3d& inv,
+  // Same test for the child boxes stored inline in a wide node.
+  static bool slab(const double* lo, const double* hi, const Ray3d& r, const Vec3d& inv,
                    double tmax, double& t_out) noexcept {
     double tmin = 0.0;
     double t_limit = tmax;

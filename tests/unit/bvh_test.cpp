@@ -45,8 +45,8 @@ struct BvhTestAccess {
     for (const auto& n : bvh.nodes_) {
       for (int j = 0; j < Bvh::kFanout; ++j) {
         for (int i = 0; i < 3; ++i) {
-          mix(h, std::bit_cast<std::uint32_t>(n.lo[j][i]));
-          mix(h, std::bit_cast<std::uint32_t>(n.hi[j][i]));
+          mix(h, std::bit_cast<std::uint64_t>(n.lo[j][i]));
+          mix(h, std::bit_cast<std::uint64_t>(n.hi[j][i]));
         }
         mix(h, n.child[j]);
       }
@@ -135,8 +135,8 @@ struct BvhTestAccess {
         leaf.first = Bvh::leaf_first(child);
         leaf.count = Bvh::leaf_count(child);
         for (int a = 0; a < 3; ++a) {
-          leaf.box_bits[a] = std::bit_cast<std::uint32_t>(node.lo[j][a]);
-          leaf.box_bits[3 + a] = std::bit_cast<std::uint32_t>(node.hi[j][a]);
+          leaf.box_bits[a] = std::bit_cast<std::uint64_t>(node.lo[j][a]);
+          leaf.box_bits[3 + a] = std::bit_cast<std::uint64_t>(node.hi[j][a]);
         }
         leaves.push_back(leaf);
       }
@@ -842,4 +842,73 @@ TEST_CASE("BVH leaf-order permutation preserves hit.prim and nearest") {
     CHECK(duplicate_bvh.nearest(p, d2) == ref);
     CHECK(d2 == ref_d2);
   }
+}
+
+TEST_CASE("BVH coplanar two-plane queries match brute force") {
+  // Coplanar scenes are the adversarial case for traversal pruning: a child's
+  // box entry parameter is computed from the box bounds, while every triangle
+  // hit is computed by Moller-Trumbore from the vertices, and the two differ by
+  // a few ulps. A two-plane fixture (z = 0 and z = 1e-9) puts every hit exactly
+  // on its leaf box boundary, so a prune that ignores that rounding error drops
+  // the closer leaf as soon as the farther plane has set the best distance.
+  std::mt19937 rng(999u);
+  std::uniform_real_distribution<double> off(-1000.0, 1000.0);
+  std::vector<Triangle3d> tris;
+  for (int i = 0; i < 2048; ++i) {
+    const double z = (i % 2 == 0) ? 0.0 : 1e-9;
+    tris.push_back(Triangle3d{Point3d{off(rng), off(rng), z}, Point3d{off(rng), off(rng), z},
+                              Point3d{off(rng), off(rng), z}});
+  }
+  Bvh bvh;
+  bvh.build(tris);
+
+  // The reviewer's repro ray. With float child boxes (or with unadjusted exact
+  // boxes) the traversal returned the farther plane's primitive here; the near
+  // plane is only one or two ulps closer.
+  const Ray3d repro{Point3d{0.029098780043033345, -0.29076196527186837, 2.834452562994902},
+                    Vec3d{0, 0, -1}};
+  const BruteHit ref = brute_raycast(tris, repro, 1e300);
+  REQUIRE(ref.hit);
+  CHECK((ref.prim % 2u) == 1u);  // the z = 1e-9 plane is the closer one
+  Bvh::Hit hit;
+  REQUIRE(bvh.raycast(repro, 1e300, hit));
+  CHECK(hit.prim == ref.prim);
+  // Bit-exact: the reported t must be the same value the brute-force oracle
+  // computes, not just a nearby one.
+  CHECK(std::bit_cast<std::uint64_t>(hit.t) == std::bit_cast<std::uint64_t>(ref.t));
+
+  // A spread of vertical rays over both planes. Most points are covered by
+  // several triangles per plane, so the two candidate distances stay within a
+  // few ulps and every leaf box boundary is hit exactly.
+  std::uniform_real_distribution<double> sx(-200.0, 200.0), sy(-200.0, 200.0);
+  int ray_hits = 0;
+  for (int r = 0; r < 300; ++r) {
+    const Ray3d ray{Point3d{sx(rng), sy(rng), 2.834452562994902}, Vec3d{0, 0, -1}};
+    const BruteHit want = brute_raycast(tris, ray, 1e300);
+    Bvh::Hit got;
+    const bool found = bvh.raycast(ray, 1e300, got);
+    CHECK(found == want.hit);
+    if (found && want.hit) {
+      ++ray_hits;
+      CHECK(got.prim == want.prim);
+      CHECK(std::bit_cast<std::uint64_t>(got.t) == std::bit_cast<std::uint64_t>(want.t));
+    }
+  }
+  CHECK(ray_hits > 250);
+
+  // Nearest on both planes: a point on a plane has distance 0 to every triangle
+  // of that plane that contains it, so exact-distance ties must resolve to the
+  // smallest original index, and the box-distance prune must not drop them.
+  int nearest_hits = 0;
+  for (int q = 0; q < 200; ++q) {
+    const Point3d p{sx(rng), sy(rng), (q % 2 == 0) ? 0.0 : 1e-9};
+    double want_d2 = 0.0;
+    const std::uint32_t want = brute_nearest(tris, p, want_d2);
+    double got_d2 = 0.0;
+    const std::uint32_t got = bvh.nearest(p, got_d2);
+    CHECK(got == want);
+    CHECK(got_d2 == want_d2);
+    if (got_d2 == 0.0) ++nearest_hits;
+  }
+  CHECK(nearest_hits > 100);
 }
