@@ -257,7 +257,7 @@ git commit -m "fix(trim_face): reuse the rim vertex after radial projection"
 - Produces: `namespace detail { inline bool curved_boolean_cone_plane_contains_axis(const Cone3& cone, const Plane3& plane, double tolerance); }`——`|dot(unit_normal, axis)| <= kCurvedBooleanConePerpendicularSlack` 且 `|dot(unit_normal, origin) - offset/|normal|| <= tolerance`。
 - Consumes: Task 1 的 apex 双副本环；Task 2 的底圆盘顶点复用。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 1. 谓词 pin：`supported(cone, Plane3{{1,0,0}, 0.0}) == true`（过轴）；`Plane3{{1,0,0}, 0.5} == false`（平行偏移、双曲线族）；`Plane3{{1,0,0}, 2.0} == true`（远到错过保守包围球）；既有垂直/斜切断言不变。
 2. 替换 `"curved boolean: a cone refuses an axis-containing plane cut"`：
@@ -303,13 +303,13 @@ TEST_CASE("curved boolean: an axis-containing plane cuts the cone in two rulings
    - 切割面含缝射线：`box {0,0,-0.5}..{1.5,1.5,2.5}` → `unsupported`，消息 `"boolean_solid_curved: result touches itself along an edge"`。
    - 保留 `"curved boolean: a translated cone refuses coincident seam copies"` 不变。
 
-- [ ] **Step 2: 运行确认 RED**
+- [x] **Step 2: 运行确认 RED**
 
 Run: `.\build\tests\Debug\geom_tests.exe -tc="curved boolean: a*n axis-containing*"`
 
 Expected: FAIL——当前返回 `unsupported "cone cutters must be perpendicular..."`。
 
-- [ ] **Step 3: 三处最小修改**
+- [x] **Step 3: 三处最小修改**
 
 1. 谓词 `curved_boolean_cone_plane_cut_supported`：在垂直分支之后、包围球分支之前：
 
@@ -325,11 +325,11 @@ Expected: FAIL——当前返回 `unsupported "cone cutters must be perpendicula
 
 3. apex 副本守卫：若两个逐位相同的点都在 `apex = origin + axis * (radius / tan(half_angle))` 的 `tolerance` 内，`continue`（不记录失败）；真正的缝重合仍拒绝。
 
-- [ ] **Step 4: 运行确认 GREEN（定向 + 两配置全量）**
+- [x] **Step 4: 运行确认 GREEN（定向 + 两配置全量）**
 
 Run: 定向 `-tc="curved boolean:*"` 与 `-tc=*cone*`；Debug/Release 全量 → 记录计数。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add include/geom/brep/boolean_solid_curved.hpp tests/unit/brep_boolean_curved_test.cpp
@@ -349,32 +349,44 @@ git commit -m "feat(boolean): cut cones with planes through the axis"
 **Interfaces:**
 - 无代码接口；文档必须与 Task 3 的实测值一致。
 
-- [ ] **Step 1: 写 ADR-0038（≤120 行）**
+- [x] **Step 1: 写 ADR-0038（≤120 行）**
 
 记录：过轴平面切的两条经线由既有 SSI 提供（零合成链）；gate 的两条新条件；AABB 过滤；apex 副本豁免；apex 环闭包修复；验收矩阵（3 个运算、旋转/平移、拒绝类）；延期项（反序差集、偏移平行/斜切、切割面窄于直径的参数域裁剪、apex-only 专用诊断、含缝射线、非整锥、同面双 pole-run 合并）。
 
-- [ ] **Step 2: 写 benchmark 与 §16.3 段**
+- [x] **Step 2: 写 benchmark 与 §16.3 段**
 
 `docs/benchmarks/m3c3c4b3c2.md`：测试矩阵（difference 1.0471975511965941、intersection 1.0471975511965979、union 14.547197551196593；faces 3/4/8；edges 64/66/76；vertices 63/64/71；0 zero-length；逐位确定性）、与 π/3 的相对误差、运行命令、环境。
 
-- [ ] **Step 3: 全量两配置并统一计数**
+- [x] **Step 3: 全量两配置并统一计数**
 
 Run: Debug/Release 全量；把实际 `N cases / M assertions` 写进 ADR、bench、§16.3。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add docs/adr/0038-cone-axis-plane-cuts.md docs/benchmarks/m3c3c4b3c2.md \
         docs/architecture/geometry-library-architecture.md \
-        docs/superpowers/plans/2026-11-22-m3c3c4b3c2-cone-axis-planes.md
+        docs/superpowers/plans/2026-11-22-m3c3c4b3c2-cone-axis-planes.md \
+        include/geom/brep/boolean_solid_curved.hpp
 git commit -m "docs(m3c3c4b3c2): record the axis-plane cone contract"
 ```
 
 ---
 
+## Execution Deviations
+
+- apex 容差按欧氏 `tolerance` 而非平方：实际代码为 `norm2(first - apex) <= tolerance`，`norm2` 已开方。
+- 旋转 `+x` 与平移 `(0,5,0)` 夹具取自 Task 3 探针报告，盒范围与原稿不同。
+- 含缝射线拒绝夹具加宽为 `{-1.5,0,-0.5}..{1.5,1.5,2.5}`；原稿较窄的盒没有触及缝射线。
+- 近锥顶用例只 pin `Errc::unsupported` 与无实体，不 pin 消息；拒绝来自下游 `split_face_curved`，不是锥门契约。
+- 测试文件使用 `const double tolerance = 1e-9;`，没有 `kTol` 常量（原稿代码片段中的 `kTol` 未采用）。
+- 全量计数落在 Debug/Release 各 1038 用例、674,758 条断言；Task 4 的消息文本修改不改变任何测试期望。
+
+---
+
 ## Exit Criteria
 
-- `-tc=*cone*` 42/46，4 个既有锥布尔用例因 `cone seam copies coincide` 守卫预期为红（Task 3 恢复）；除此之外 Debug/Release 全量 0 失败、0 警告。
+- `-tc=*cone*` 49/49 全绿；Task 1 阶段的 42/46 基线已由 Task 3 恢复。Task 4 只改门消息文本，不增删用例。
 - 过轴差/交/并体积与解析值相对误差 ≤1e-12；单壳、`validate_topology` 通过、0 零长 3D 边、两次运行逐位相同。
 - 旋转 +x、平移 (0,5,0) 的差集同为 `π/3`。
 - apex-only、窄切割面、含缝射线、平移锥缝重合全部确定性拒绝，无错误实体。

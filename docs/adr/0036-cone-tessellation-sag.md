@@ -165,6 +165,7 @@ adds 3 cases and 272 assertions once the split-solid rows are out of the matrix.
   the deflection bound, and over-splitting is preferable to accepting a mesh whose
   true error is unknown.
 - Apex-bearing fragments are still canonical-only. The apex fan, seam rewrite and
-  uv-ring apex insertion remain in M3c-3c-4b3, together with oblique/axis-containing
-  cone planes, general curved/curved cone booleans and re-centring of translated
-  cones whose seam copies collide.
+  uv-ring apex insertion remain in M3c-3c-4b3, together with oblique cone planes,
+  general curved/curved cone booleans and re-centring of translated cones whose
+  seam copies collide. Axis-containing cone planes are no longer deferred: ADR-0038
+  covers the two-ruling cut accepted by M3c-3c-4b3c-2.

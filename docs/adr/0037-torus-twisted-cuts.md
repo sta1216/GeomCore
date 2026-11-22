@@ -202,10 +202,10 @@ Debug and Release with `/W4 /WX /utf-8` and no warnings; the focused torus tests
 - Reversed difference is deferred by the flipped-fragment limitation, which
   pre-dates this change; reversed intersection and union work because their
   fragments keep the expected orientation.
-- Deferred to M3c-3c-4b3c-2: torus/torus and torus/curved pairs, tangent planes,
-  cuts with more than two seam crossings or more than four covered bands, multiple
-  re-charts, and the cone axis-plane/apex-ring case. The cone work is the other half
-  of 4b3c and is not covered by this ADR.
+- Deferred beyond this ADR: torus/torus and torus/curved pairs, tangent planes,
+  cuts with more than two seam crossings or more than four covered bands, and
+  multiple re-charts. The cone axis-plane/apex-ring half of 4b3c is now covered by
+  ADR-0038 (M3c-3c-4b3c-2), not by this ADR.
 - The volumes are polygonal SSI volumes, not exact analytic ones. No performance or
   accuracy claim is made beyond the table; a change to the SSI chord budget moves
   these numbers and requires re-measuring this note.

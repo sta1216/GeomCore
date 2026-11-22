@@ -2106,10 +2106,10 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
     }
   }
 
-  // A cone can only be cut by a plane perpendicular to its axis; see the
-  // predicate for why. Check every cone/plane face pair (in either operand
-  // order) so an axis-containing or oblique cutter is refused before the splitter
-  // produces half-turn arcs or an ellipse it cannot represent.
+  // A cone is cut exactly by a plane perpendicular to its axis (a circle) or one
+  // that contains the axis (two rulings); see the predicate for why. Check every
+  // cone/plane face pair (in either operand order) so an oblique cutter is
+  // refused before the splitter produces an ellipse it cannot represent.
   for (std::size_t ia = 0; ia < infos_a.size(); ++ia) {
     for (std::size_t ib = 0; ib < infos_b.size(); ++ib) {
       const detail::CurvedBooleanFaceInfo& face_a = infos_a[ia];
@@ -2129,8 +2129,8 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
       if (detail::curved_boolean_cone_plane_cut_supported(*cone, *plane, tolerance)) continue;
       record_failure();
       return Error{Errc::unsupported,
-                   "boolean_solid_curved: cone cutters must be perpendicular to the cone axis; "
-                   "oblique and axis-containing planes are deferred to M3c-3c-4b3",
+                   "boolean_solid_curved: cone cutters must be perpendicular to or contain "
+                   "the cone axis; oblique planes are deferred to M3c-3c-4b3",
                    face_a.id.index(), face_b.id.index()};
     }
   }
