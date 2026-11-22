@@ -1411,17 +1411,36 @@ inline bool curved_boolean_torus_plane_cut_supported(const Plane3& plane, const 
   return false;
 }
 
-// A cone's cut rim is a circle only when the cutting plane is perpendicular to
-// the cone axis: an oblique plane cuts an ellipse, which the splitter cannot
-// trace, and a plane containing the axis leaves two half-turn rim arcs the
-// assembler cannot stitch. Both are deferred to M3c-3c-4b3. A plane that does not
+// A cone's cut rim is a circle when the cutting plane is perpendicular to the
+// cone axis, and two straight rulings when the plane contains the axis. Both are
+// traced and assembled today. An oblique plane cuts an ellipse, which the
+// splitter cannot trace, so it is deferred to M3c-3c-4b3. A plane that does not
 // reach the cone cuts nothing, so its orientation is harmless; the test is
 // against a conservative bounding sphere centred a third of the height up the
 // axis with radius hypot(radius, 2*height/3), which contains the whole cone
 // including its base disk. The perpendicularity band is 1e-9, far wider than the
 // rounding error of a constructed perpendicular plane and far narrower than any
-// constructed oblique cut.
+// constructed oblique cut. Containing the axis uses the caller's tolerance: the
+// axis point `origin` lying on the plane is a geometric coincidence the caller
+// owns, exactly like every other placement test in this file.
 constexpr double kCurvedBooleanConePerpendicularSlack = 1e-9;
+
+inline bool curved_boolean_cone_plane_contains_axis(const Cone3& cone, const Plane3& plane,
+                                                    double tolerance) noexcept {
+  const double length = std::sqrt(plane.normal[0] * plane.normal[0] +
+                                  plane.normal[1] * plane.normal[1] +
+                                  plane.normal[2] * plane.normal[2]);
+  if (!(length > 0.0) || !std::isfinite(length)) return false;
+  const Vec3d unit{plane.normal[0] / length, plane.normal[1] / length,
+                   plane.normal[2] / length};
+  const double axis_norm = std::sqrt(dot(cone.axis, cone.axis));
+  if (!(axis_norm > 0.0) || !std::isfinite(axis_norm)) return false;
+  const Vec3d axis{cone.axis[0] / axis_norm, cone.axis[1] / axis_norm,
+                   cone.axis[2] / axis_norm};
+  if (std::abs(dot(unit, axis)) > kCurvedBooleanConePerpendicularSlack) return false;
+  return std::abs(dot(unit, split_solid_as_vec(cone.origin)) - plane.offset / length) <=
+         tolerance;
+}
 
 inline bool curved_boolean_cone_plane_cut_supported(const Cone3& cone, const Plane3& plane,
                                                     double tolerance) noexcept {
@@ -1436,6 +1455,7 @@ inline bool curved_boolean_cone_plane_cut_supported(const Cone3& cone, const Pla
   const Vec3d axis{cone.axis[0] / axis_norm, cone.axis[1] / axis_norm,
                    cone.axis[2] / axis_norm};
   if (std::abs(dot(unit, axis)) >= 1.0 - kCurvedBooleanConePerpendicularSlack) return true;
+  if (curved_boolean_cone_plane_contains_axis(cone, plane, tolerance)) return true;
   const double height = cone.radius / std::tan(cone.half_angle);
   if (!(height > 0.0) || !std::isfinite(height)) return false;
   const Vec3d center = split_solid_as_vec(cone.origin) + axis * (height / 3.0);
@@ -2094,6 +2114,9 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
     for (std::size_t ib = 0; ib < infos_b.size(); ++ib) {
       const detail::CurvedBooleanFaceInfo& face_a = infos_a[ia];
       const detail::CurvedBooleanFaceInfo& face_b = infos_b[ib];
+      if (!detail::curved_boolean_bounds_overlap(face_a.bounds, face_b.bounds, tolerance)) {
+        continue;
+      }
       const Cone3* cone = std::get_if<Cone3>(face_a.surface);
       const Plane3* plane = std::get_if<Plane3>(face_b.surface);
       if (cone == nullptr || plane == nullptr) {
@@ -2648,15 +2671,22 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
   // evaluations round to the same doubles; the duplicate then closes the ring
   // with a zero-length chord instead of the seam, and assembly cannot pair the
   // rim. Detect the coincidence and refuse deterministically rather than
-  // reporting an internal topology failure. Re-centring the operands would
-  // recover the case; that is deferred to M3c-3c-4b3.
+  // reporting an internal topology failure. The apex is the exception: its
+  // parameter row collapses to one point, so the two copies of the apex that
+  // close a full sector ring are legitimate and must be welded, not refused.
+  // Re-centring the operands would recover the other cases; that is deferred to
+  // M3c-3c-4b3.
   for (const CurvedAssembledFace& face : assembled_faces) {
-    if (std::get_if<Cone3>(&face.surface) == nullptr) continue;
+    const Cone3* face_cone = std::get_if<Cone3>(&face.surface);
+    if (face_cone == nullptr) continue;
+    const double apex_height = face_cone->radius / std::tan(face_cone->half_angle);
+    const Point3d apex = face_cone->origin + face_cone->axis * apex_height;
     for (const std::vector<Point3d>& loop : face.loops) {
       for (std::size_t pi = 0; pi < loop.size(); ++pi) {
         const Point3d& first = loop[pi];
         const Point3d& second = loop[(pi + 1) % loop.size()];
         if (first[0] == second[0] && first[1] == second[1] && first[2] == second[2]) {
+          if (norm2(first - apex) <= tolerance && norm2(second - apex) <= tolerance) continue;
           record_failure();
           return Error{Errc::unsupported,
                        "boolean_solid_curved: cone seam copies coincide at this placement; "

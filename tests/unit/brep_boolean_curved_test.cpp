@@ -929,30 +929,127 @@ TEST_CASE("curved boolean: a translated cone refuses coincident seam copies") {
   }
 }
 
-TEST_CASE("curved boolean: a cone refuses an axis-containing plane cut") {
+// x = 0 contains the cone axis, so it cuts the cone in two rulings (the
+// meridians y = 0, x >= 0 and y = 0, x <= 0). The difference and the
+// intersection are each one half of the cone; the union is the box plus the
+// half the box leaves out.
+TEST_CASE("curved boolean: an axis-containing plane cuts the cone in two rulings") {
   const double tolerance = 1e-9;
   const geom::Brep cone =
       geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
                       tolerance)
           .value();
-  // x = 0 contains the cone axis; the other planes either miss the cone or are
-  // perpendicular to it. Half-turn rim arcs from the axis-containing cut cannot
-  // be assembled yet, so the refusal must be deterministic.
   const geom::Brep box =
-      geom::make_box(geom::Point3d{0.0, -2.0, -1.0}, geom::Point3d{2.0, 2.0, 3.0}, tolerance)
+      geom::make_box(geom::Point3d{0.0, -1.5, -0.5}, geom::Point3d{1.5, 1.5, 2.5}, tolerance)
           .value();
   REQUIRE(geom::validate_topology(cone).ok());
   REQUIRE(geom::validate_topology(box).ok());
-
-  constexpr std::string_view message =
-      "boolean_solid_curved: cone cutters must be perpendicular to the cone axis; oblique and "
-      "axis-containing planes are deferred to M3c-3c-4b3";
-  check_qa_rejection("axis-containing", cone, box, geom::SolidBooleanOp::intersection, message);
-  check_qa_rejection("axis-containing reversed", box, cone, geom::SolidBooleanOp::intersection,
-                     message);
+  const auto run = [&](geom::SolidBooleanOp op) {
+    return geom::boolean_solid_curved(cone, only_solid(cone), box, only_solid(box), op,
+                                      geom::CurvedBooleanOptions{tolerance});
+  };
+  const auto difference = run(geom::SolidBooleanOp::difference);
+  const auto intersection = run(geom::SolidBooleanOp::intersection);
+  const auto united = run(geom::SolidBooleanOp::union_);
+  REQUIRE(difference.has_value());
+  REQUIRE(intersection.has_value());
+  REQUIRE(united.has_value());
+  const auto check = [](const geom::CurvedBooleanResult& result, double volume,
+                        std::size_t faces) {
+    CHECK(geom::validate_topology(result.brep).ok());
+    CHECK(result.brep.face_ids().size() == faces);
+    CHECK(std::fabs(volume_of(result.brep) - volume) <= 1e-12);
+    CHECK(result.brep.solid_shells(only_solid(result.brep)).size() == 1u);
+  };
+  check(difference.value(), kPi / 3.0, 3u);
+  check(intersection.value(), kPi / 3.0, 4u);
+  check(united.value(), 13.5 + kPi / 3.0, 8u);
+  // Determinism: the difference repeats bitwise.
+  const auto again = run(geom::SolidBooleanOp::difference);
+  REQUIRE(again.has_value());
+  CHECK(volume_of(again.value().brep) == volume_of(difference.value().brep));
 }
 
-TEST_CASE("curved boolean: the cone cut plane predicate accepts only perpendicular planes") {
+// The same cut with the cone's frame rotated onto +x: the cutter plane y = 0
+// contains the axis, and every azimuth must come from Cone3::x_axis/y_axis
+// rather than the world frame.
+TEST_CASE("curved boolean: an axis-containing plane cuts a rotated cone") {
+  const double tolerance = 1e-9;
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{1.0, 0.0, 0.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-0.5, 0.0, -1.5}, geom::Point3d{2.5, 1.5, 1.5}, tolerance)
+          .value();
+  check_cone_boolean("rotated cone", cone, box, geom::SolidBooleanOp::difference, kPi / 3.0);
+}
+
+// The same cut with the cone translated off the origin: the apex is at
+// (0, 5, 2), so the apex copies the seam guard sees are not near the origin.
+TEST_CASE("curved boolean: an axis-containing plane cuts a translated cone") {
+  const double tolerance = 1e-9;
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 5.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{0.0, 3.5, -0.5}, geom::Point3d{1.5, 6.5, 2.5}, tolerance)
+          .value();
+  check_cone_boolean("translated cone", cone, box, geom::SolidBooleanOp::difference,
+                     kPi / 3.0);
+}
+
+// A cutter that reaches only the part of the cone near the apex leaves the cut
+// chain open inside the face. The refusal must be loud: no half-cone result.
+TEST_CASE("curved boolean: a cutter near the apex is refused") {
+  const double tolerance = 1e-9;
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{0.0, -1.5, 1.5}, geom::Point3d{1.5, 1.5, 2.5}, tolerance)
+          .value();
+  const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
+      cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::difference,
+      geom::CurvedBooleanOptions{tolerance});
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(!message_of(result.error()).empty());
+}
+
+// A cutter face that is shorter than the rim diameter stops the cut chain inside
+// the parameter domain; the trimmed face cannot be assembled.
+TEST_CASE("curved boolean: a cutter face narrower than the cone diameter is refused") {
+  const double tolerance = 1e-9;
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{0.0, -1.5, 0.2}, geom::Point3d{1.5, 1.5, 1.0}, tolerance)
+          .value();
+  check_qa_rejection("narrow cutter", cone, box, geom::SolidBooleanOp::difference,
+                     "trim_face: cut chain ends inside the parameter domain");
+}
+
+// A plane that contains both the axis and the u = 0 seam ray makes the trim ring
+// touch itself along that ray; assembly cannot decide the edge's use count.
+TEST_CASE("curved boolean: a cutter plane containing a seam ray is refused") {
+  const double tolerance = 1e-9;
+  const geom::Brep cone =
+      geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0,
+                      tolerance)
+          .value();
+  const geom::Brep box =
+      geom::make_box(geom::Point3d{-1.5, 0.0, -0.5}, geom::Point3d{1.5, 1.5, 2.5}, tolerance)
+          .value();
+  check_qa_rejection("seam ray", cone, box, geom::SolidBooleanOp::difference,
+                     "boolean_solid_curved: result touches itself along an edge");
+}
+
+TEST_CASE("curved boolean: the cone cut plane predicate accepts perpendicular and axis planes") {
   const double tolerance = 1e-9;
   const double half_angle = std::atan2(1.0, 2.0);
   const geom::Cone3 cone{geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
@@ -970,8 +1067,13 @@ TEST_CASE("curved boolean: the cone cut plane predicate accepts only perpendicul
   // cuts nothing and is harmless.
   CHECK(supported(cone, geom::Plane3{geom::Vec3d{1.0, 0.0, 0.0}, 2.0}, tolerance));
 
-  // Axis-containing and oblique planes that do reach the cone are deferred.
-  CHECK_FALSE(supported(cone, geom::Plane3{geom::Vec3d{1.0, 0.0, 0.0}, 0.0}, tolerance));
+  // A plane containing the axis cuts two rulings and is accepted; a plane
+  // parallel to the axis but offset from it is the deferred hyperbola family
+  // when it reaches the cone.
+  CHECK(supported(cone, geom::Plane3{geom::Vec3d{1.0, 0.0, 0.0}, 0.0}, tolerance));
+  CHECK_FALSE(supported(cone, geom::Plane3{geom::Vec3d{1.0, 0.0, 0.0}, 0.5}, tolerance));
+
+  // Oblique planes that do reach the cone are deferred.
   const double inv_sqrt2 = 1.0 / std::numbers::sqrt2_v<double>;
   CHECK_FALSE(supported(cone,
                         geom::Plane3{geom::Vec3d{inv_sqrt2, 0.0, -inv_sqrt2}, inv_sqrt2},
