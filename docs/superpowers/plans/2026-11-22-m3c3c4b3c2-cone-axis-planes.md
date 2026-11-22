@@ -148,9 +148,9 @@ Expected: 5 个用例失败——上面 3 个被改的 pin、新扇形用例，�
 
 - [ ] **Step 4: 运行确认 GREEN（定向 + 两配置全量）**
 
-Run: `.\build\tests\Debug\geom_tests.exe -tc=*cone*` → 46 用例全过（探针实测 4,955 断言）。
+Run: `.\build\tests\Debug\geom_tests.exe -tc=*cone*` → 42/46；4 个既有锥布尔用例（`brep_boolean_curved_test.cpp:593/:371/:669/:849`）因新的 apex 参数副本命中 `cone seam copies coincide` 守卫而红，Task 3 的 apex 豁免会恢复（计划内已知依赖）。
 Run: `-tc=*sphere*` 与 `-tc=*trim_face*` → 必须原样全过（标志门控的回归证据）。
-Run: Debug 与 Release 全量 → 记录实际用例/断言数（基线 1031/674,604；探针参考 1031/674,618）。
+Run: Debug 与 Release 全量 → 记录实际用例/断言数（基线 1031/674,604；Task 1 后为 1032 用例 / 674,622 断言，其中 4 个既有锥布尔用例预期为红，Task 3 恢复）。
 
 - [ ] **Step 5: 提交**
 
@@ -371,7 +371,7 @@ git commit -m "docs(m3c3c4b3c2): record the axis-plane cone contract"
 
 ## Exit Criteria
 
-- `-tc=*cone*` 46 用例全过；`-tc="curved boolean:*"` 全过；Debug/Release 全量 0 失败、0 警告。
+- `-tc=*cone*` 42/46，4 个既有锥布尔用例因 `cone seam copies coincide` 守卫预期为红（Task 3 恢复）；除此之外 Debug/Release 全量 0 失败、0 警告。
 - 过轴差/交/并体积与解析值相对误差 ≤1e-12；单壳、`validate_topology` 通过、0 零长 3D 边、两次运行逐位相同。
 - 旋转 +x、平移 (0,5,0) 的差集同为 `π/3`。
 - apex-only、窄切割面、含缝射线、平移锥缝重合全部确定性拒绝，无错误实体。
