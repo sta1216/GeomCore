@@ -133,6 +133,6 @@ QA-1（2D 布尔 ≤ 80 ms）与 QA-9（SSI ≤ 100 µs）作为第二切片，�
 - QA-4 build: median 287-300 ms (budget 350) PASS.
 - QA-4 raycast: median 0.66 Mray/s (1.47x); 0.9 and 8 Mray/s remain open with the measured 0.87-0.91 single-ray latency floor; packets deferred.
 - QA-10: median 7.3-8.2 us/box, 1.46-1.65 Mtri/s (budget 1.0) PASS; watertight/outward; bitwise parity with the generic path.
-- QA-1 ~0.9 s and QA-9 9.6-19.5 ms unchanged; next slice.
+- QA-1 measures 887-1,037 ms (no QA-1 code touched; run variance around the earlier 1.9 s sample); QA-9 9.6-19.5 ms; both remain FAIL and go to the next slice.
 - Task 5 skipped because Task 4 already met the target; its allocation work (span return, scratch reuse) landed in Task 4.
 - Full suites after the slice: Debug and Release 1047 cases / 678,788 assertions, 0 failures.

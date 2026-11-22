@@ -18,7 +18,7 @@ A profile (`.superpowers/perf/m3-5-profile.md`) attributed BVH build time to SAH
 
 ## Decision
 
-1. **BVH build**: one pass fills the 12 SAH bins (counting scatter), prefix/suffix box unions produce both child boxes without rescanning, and the median fallback only runs inside the straddling bin. Primitives are stored SoA (triangle, box, centroid). The top three levels are built as independent frontiers and concatenated in fixed order, so thread count changes speed but not the array contents or node numbering.
+1. **BVH build**: one pass fills the 12 SAH bins (counting scatter), prefix/suffix box unions produce both child boxes without rescanning, and the median fallback only runs inside the straddling bin for normal binned splits; a degenerate parent (zero centroid extent or zero area) still falls back to a full-range median and rescans both halves. Primitives are stored SoA (triangle, box, centroid). The top three levels are built as independent frontiers and concatenated in fixed order, so thread count changes speed but not the array contents or node numbering.
 2. **BVH traversal**: four-way nodes with child references and exact **double** child boxes; primitives are permuted into leaf order so leaf tests read contiguous triangles; leaf tests are inlined and the hit index maps back through `order_`.
 3. **Conservative pruning**: every box prune uses `best * (1 + 1e-12)` in the five prune comparisons. Leaf acceptance stays exact (`t > best`, `t == tmax`, tie to the smallest primitive index). The slack only widens the visited set; it exists because a box entry parameter and a Moller-Trumbore hit computed from the same ray can differ by an ulp, and float child boxes were measured to prune a leaf whose true hit was one ulp closer (4000 coplanar rays: 619 wrong primitives). Float boxes were therefore rejected. Tie-aware ordered traversal was measured 8-12% slower and is not used.
 4. **Box meshing**: a canonical box (6 planar faces, one 4-coedge outer loop each, 12 line edges, 8 vertices, every edge used twice, strictly convex) emits the same 12 triangles directly from the same welded indices in the same order, preserving `triangle_face` and `reversed`. Any precondition failure clears partial state and falls back to the unchanged generic loop. Rings, projected points, polygons and layout buffers are reused across faces through `TessellatePlanarScratch`; `tessellate_edge_positions` returns a span instead of a per-coedge copy.
@@ -33,10 +33,10 @@ Commands and full tables are in `docs/benchmarks/m3-5.md`. Release, three clean 
 | BVH build | 1,372 ms | 287-300 ms | ~4.6x | 350 ms PASS |
 | raycast | 0.45 Mray/s | 0.66 Mray/s | 1.47x | 8 Mray/s FAIL (documented) |
 | box meshing | 0.22 Mtri/s | 1.46-1.65 Mtri/s | 6.6-7.5x | 1.0 Mtri/s PASS |
-| QA-1 union | ~1.9 s | ~0.9 s | unchanged | 80 ms FAIL (next slice) |
+| QA-1 union | 1,888 ms | 887-1,037 ms | 2.1x measured, code untouched (run variance) | 80 ms FAIL (next slice) |
 | QA-9 SSI | 9.6-19.5 ms | unchanged | - | 100 us FAIL (next slice) |
 
-Correctness evidence: BVH build is bitwise deterministic on the same path; serial and parallel builds produce identical public query results (node numbering may differ); the coplanar two-plane regression (2048 triangles, exact repro ray, 300 rays, 200 nearest queries) matches brute force; box output is bitwise identical to the generic path for four boxes at two deflections, including reversed faces, and canonical hashes for box/cylinder/torus/sphere are unchanged; QA-10 results remain watertight and outward. Focused Release runs: BVH 23 cases / 8,873 assertions; tessellation 82 cases / 9,226 assertions.
+Correctness evidence: BVH build is bitwise deterministic on the same path; serial and parallel builds produce identical public query results (node numbering may differ); the coplanar two-plane regression (2048 triangles, exact repro ray, 300 rays, 200 nearest queries) matches brute force; box output is bitwise identical to the generic path for four boxes at two deflections, including reversed faces, and canonical hashes for box/cylinder/torus are unchanged; QA-10 results remain watertight and outward. Focused Release runs: BVH 23 cases / 8,873 assertions; tessellation 82 cases / 9,226 assertions.
 
 ## Consequences
 
