@@ -84,7 +84,7 @@ QA-1（2D 布尔 ≤ 80 ms）与 QA-9（SSI ≤ 100 µs）作为第二切片，�
   - 一次扫描同时填 counts/bins，用前缀/后缀并集得到左右子盒；SAH 有效时按 bin 划分，彻底去掉 median `nth_element` 与两次子盒重扫（保留 median 回退仅当 SAH 无有效划分）。
   - prim 拆为 SoA（box/centroid/tri 三个数组），扫描只触碰所需字段。
   - 顶层若干层并行构建子树（确定性拼接 + 子索引修正）；线程数不影响 `nodes_` 字节。
-- 测试：同输入两次构建 `nodes_` 逐位相同；串行/并行结果一致；既有 build/raycast/nearest 全组不变。
+- 测试：同一路径重复构建 `nodes_` 逐位相同（含跨对象重建）；串行与并行的公开查询结果必须一致（节点编号允许不同）；既有 build/raycast/nearest 全组不变。
 - 验收：≤350 ms（3 次中位）；确定性测试通过。
 
 ## Task 3：QA-4 构建加速（确定性并行 + 减少重扫）
