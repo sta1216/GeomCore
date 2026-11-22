@@ -1376,6 +1376,8 @@ ADR-0030。Debug 与 Release 各 949 个用例、659,600 条断言全绿，
 错误返回（`Affine::inverse`、`boolean2`、`split_segments`、`cdt2` 等）；谓词之外
 无全局 epsilon。
 
+**M3.5a 性能切片（2026-11-23，Release 实测）：** QA-4 BVH 构建 1,372→287–300 ms（单次分箱 + SoA + 顶层确定性并行）；raycast 0.45→0.66–0.67 Mray/s（约 1.5×；0.9 与 8 Mray/s 未达，单射线延迟下限实测 0.87–0.91，packet 留后续；节点 224 B，盒子剪枝用 `best*(1+1e-12)` 保守松弛，浮点子盒因 1 ulp 漏命中被否决）；QA-10 盒网格化 0.22→1.46–1.65 Mtri/s（7–7.6×，盒快路径与通用路径逐位一致）；QA-1/QA-9 不变。ADR-0039、`docs/benchmarks/m3-5.md`。
+
 ---
 
 ## 17. 附录

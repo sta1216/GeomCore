@@ -108,7 +108,7 @@ QA-1（2D 布尔 ≤ 80 ms）与 QA-9（SSI ≤ 100 µs）作为第二切片，�
 - 测试：盒输出与通用路径逐位相同（位置/三角形/triangle_face）；带孔/非矩形/曲面面仍走通用路径；canonical 哈希不变。
 - 验收：≥1.0 Mtri/s（12 µs/盒）；水密、朝外、8 位置/12 三角。
 
-## Task 5：通用平面路径的分配削减（若 Task 4 未达 1.0）
+## Task 5: skipped (Task 4 met the 1.0 Mtri/s target)
 
 - Files：`include/geom/brep/tessellate.hpp`。
 - 工作：`tessellate_edge_positions` 改 out-param 复用、`append_ring` 复用缓冲、`tessellate()` 避免 `face_ids()` 复制；保持输出逐位不变。
@@ -122,8 +122,17 @@ QA-1（2D 布尔 ≤ 80 ms）与 QA-9（SSI ≤ 100 µs）作为第二切片，�
 
 ## 自检
 
-- [ ] 性能数字有命令、构建类型、3 次中位数。
-- [ ] tie-break/tmax 契约有新增测试。
-- [ ] 盒路径与通用路径逐位比对。
-- [ ] 并行构建确定性测试。
-- [ ] 无 API/测试期望变更。
+- [x] 性能数字有命令、构建类型、3 次中位数。
+- [x] tie-break/tmax 契约有新增测试。
+- [x] 盒路径与通用路径逐位比对。
+- [x] 并行构建确定性测试。
+- [x] 无 API/测试期望变更。
+
+## Results (2026-11-23)
+
+- QA-4 build: median 287-300 ms (budget 350) PASS.
+- QA-4 raycast: median 0.66 Mray/s (1.47x); 0.9 and 8 Mray/s remain open with the measured 0.87-0.91 single-ray latency floor; packets deferred.
+- QA-10: median 7.3-8.2 us/box, 1.46-1.65 Mtri/s (budget 1.0) PASS; watertight/outward; bitwise parity with the generic path.
+- QA-1 ~0.9 s and QA-9 9.6-19.5 ms unchanged; next slice.
+- Task 5 skipped because Task 4 already met the target; its allocation work (span return, scratch reuse) landed in Task 4.
+- Full suites after the slice: Debug and Release 1047 cases / 678,788 assertions, 0 failures.
