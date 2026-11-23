@@ -2314,6 +2314,7 @@ inline Result<CurvedBooleanResult> boolean_solid_curved(const Brep& a, SolidId a
 
   SsiOptions ssi_options;
   ssi_options.tolerance = tolerance;
+  ssi_options.analytic_sphere_plane = false;
 
   std::vector<std::vector<FaceCut>> cuts_a(infos_a.size());
   std::vector<std::vector<FaceCut>> cuts_b(infos_b.size());

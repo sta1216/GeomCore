@@ -79,6 +79,10 @@ struct SsiOptions {
   double tolerance = 1e-9;
   int max_depth = 12;
   std::uint64_t max_segments = 100000;
+  // Exact analytic sphere-plane chart. Callers that need the traced
+  // parameterization (the boolean driver, whose seam handling is built around
+  // it) can opt out; public callers get the exact path by default.
+  bool analytic_sphere_plane = true;
 };
 
 namespace detail {
@@ -176,40 +180,64 @@ inline bool ssi_try_analytic_sphere_plane(const SsiPatch& a, const SsiPatch& b,
     }
   }
 
+  const Vec3d y_axis = cross(sphere->axis, sphere->x_axis);
+  // Start the loop on the u = 0 seam so the parameter sequence is monotone and
+  // the closing segment is the only one that crosses the seam, exactly like a
+  // traced closed curve.
+  const double phi = std::atan2(dot(radial_x, y_axis), dot(radial_x, sphere->x_axis));
+  const double angle_start = -phi;
+  std::vector<Point3d> points;
+  std::vector<Point2d> plane_uv;
+  std::vector<std::array<double, 2>> sphere_uv;
+  points.reserve(static_cast<std::size_t>(segments));
+  plane_uv.reserve(static_cast<std::size_t>(segments));
+  sphere_uv.reserve(static_cast<std::size_t>(segments));
+  for (std::uint64_t i = 0; i < segments; ++i) {
+    const double angle =
+        angle_start + kSsiTwoPi * static_cast<double>(i) / static_cast<double>(segments);
+    const Point3d p =
+        center + radial_x * (rho * std::cos(angle)) + radial_y * (rho * std::sin(angle));
+    const Point2d uv = plane_frame_to_2d(frame, p);
+    points.push_back(p);
+    plane_uv.push_back(uv);
+    sphere_uv.push_back({kSsiTwoPi * static_cast<double>(i) / static_cast<double>(segments), v});
+  }
+
   SsiCurve curve;
   curve.closed = true;
   curve.segments.reserve(static_cast<std::size_t>(segments));
-  const Vec3d y_axis = cross(sphere->axis, sphere->x_axis);
+  double worst_residual = 0.0;
   for (std::uint64_t i = 0; i < segments; ++i) {
-    const double angle_a = kSsiTwoPi * static_cast<double>(i) / static_cast<double>(segments);
-    const double angle_b = kSsiTwoPi * static_cast<double>(i + 1) / static_cast<double>(segments);
-    const Point3d pa = center + radial_x * (rho * std::cos(angle_a)) + radial_y * (rho * std::sin(angle_a));
-    const Point3d pb = center + radial_x * (rho * std::cos(angle_b)) + radial_y * (rho * std::sin(angle_b));
-    const Vec3d ra = pa - sphere->center;
-    const Vec3d rb = pb - sphere->center;
-    const Point2d qa = plane_frame_to_2d(frame, pa);
-    const Point2d qb = plane_frame_to_2d(frame, pb);
-    SsiPoint point_a{{std::atan2(dot(ra, y_axis), dot(ra, sphere->x_axis)), v},
-                     {qa[0], qa[1]}, pa};
-    SsiPoint point_b{{std::atan2(dot(rb, y_axis), dot(rb, sphere->x_axis)), v},
-                     {qb[0], qb[1]}, pb};
+    const std::uint64_t next = (i + 1) % segments;
+    const std::array<double, 2> sphere_a = sphere_uv[static_cast<std::size_t>(i)];
+    const std::array<double, 2> plane_a{plane_uv[static_cast<std::size_t>(i)][0],
+                                        plane_uv[static_cast<std::size_t>(i)][1]};
+    std::array<double, 2> sphere_b = sphere_uv[static_cast<std::size_t>(next)];
+    if (next == 0) sphere_b[0] = kSsiTwoPi;  // closing endpoint keeps the winding
+    const std::array<double, 2> plane_b{plane_uv[static_cast<std::size_t>(next)][0],
+                                        plane_uv[static_cast<std::size_t>(next)][1]};
+    const SsiPoint point_a = swapped ? SsiPoint{plane_a, sphere_a, points[static_cast<std::size_t>(i)]}
+                                     : SsiPoint{sphere_a, plane_a, points[static_cast<std::size_t>(i)]};
+    const SsiPoint point_b = swapped ? SsiPoint{plane_b, sphere_b, points[static_cast<std::size_t>(next)]}
+                                     : SsiPoint{sphere_b, plane_b, points[static_cast<std::size_t>(next)]};
     SsiSegment segment;
-    segment.a = pa;
-    segment.b = pb;
+    segment.a = point_a.p;
+    segment.b = point_b.p;
     segment.ua = point_a.ua;
     segment.ub = point_b.ua;
     segment.va = point_a.va;
     segment.vb = point_b.va;
-    segment.residual = std::max(ssi_residual(sphere_patch, plane_patch, point_a),
-                                ssi_residual(sphere_patch, plane_patch, point_b));
+    segment.residual = std::max(ssi_residual(swapped ? plane_patch : sphere_patch,
+                                            swapped ? sphere_patch : plane_patch, point_a),
+                                ssi_residual(swapped ? plane_patch : sphere_patch,
+                                            swapped ? sphere_patch : plane_patch, point_b));
+    worst_residual = std::max(worst_residual, segment.residual);
     curve.segments.push_back(segment);
   }
   result.curves.push_back(std::move(curve));
   result.candidate_pairs = 0;
   result.accepted_segments = segments;
-  for (const SsiSegment& segment : result.curves.front().segments) {
-    result.max_residual = std::max(result.max_residual, segment.residual);
-  }
+  result.max_residual = worst_residual;
   return true;
 }
 
@@ -246,6 +274,7 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
   // The analytic sphere/plane chart is exact, so it runs before patch_bounds
   // and the tangency predicates: those sample grids that cost milliseconds and
   // are only needed by the generic tracer.
+  if (options.analytic_sphere_plane) {
   if (const Sphere3* sphere = std::get_if<Sphere3>(&a.surface);
       sphere != nullptr && std::get_if<Plane3>(&b.surface) != nullptr) {
     SsiResult analytic;
@@ -260,6 +289,7 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
     if (detail::ssi_try_analytic_sphere_plane(a, b, options, chord, analytic)) {
       return analytic;
     }
+  }
   }
 
   // A patch whose 3D extent is inside the acceptance band has no well-defined
