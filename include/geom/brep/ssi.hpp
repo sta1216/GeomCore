@@ -92,6 +92,127 @@ inline SsiIssue ssi_driver_issue(SsiDiagnostic code, const char* message) noexce
   return issue;
 }
 
+// Exact sphere/plane fast path. A plane perpendicular to the sphere's axis
+// cuts the sphere in one latitude circle, so the intersection can be emitted
+// without tessellation or Newton refinement. The path is taken only when the
+// whole circle lies strictly inside both patch domains and the result is
+// certifiable at the requested tolerance; every other case returns false so
+// the generic driver produces the same classification and clipping it always
+// did.
+inline bool ssi_try_analytic_sphere_plane(const SsiPatch& a, const SsiPatch& b,
+                                          const SsiOptions& options,
+                                          double chord_tolerance,
+                                          SsiResult& result) {
+  const Sphere3* sphere = std::get_if<Sphere3>(&a.surface);
+  const Plane3* plane = std::get_if<Plane3>(&b.surface);
+  bool swapped = false;
+  if (sphere == nullptr || plane == nullptr) {
+    sphere = std::get_if<Sphere3>(&b.surface);
+    plane = std::get_if<Plane3>(&a.surface);
+    swapped = true;
+  }
+  if (sphere == nullptr || plane == nullptr) return false;
+  if (!sphere->is_valid()) return false;
+  const SsiPatch& sphere_patch = swapped ? b : a;
+  const SsiPatch& plane_patch = swapped ? a : b;
+  if (sphere_patch.u[1] - sphere_patch.u[0] < kSsiTwoPi - 1e-12) return false;
+
+  const Result<PlaneFrame> frame_result = make_plane_frame(*plane);
+  if (!frame_result.has_value()) return false;
+  const PlaneFrame& frame = frame_result.value();
+  const double axial_tilt = norm2(cross(frame.normal, sphere->axis));
+  if (!(axial_tilt <= 1e-12)) return false;
+
+  const double d = dot(frame.normal, sphere->center - frame.origin);
+  const double scale = std::max({1.0, std::fabs(sphere->center[0]),
+                                 std::fabs(sphere->center[1]),
+                                 std::fabs(sphere->center[2])}) +
+                       sphere->radius + std::fabs(plane->offset);
+  if (options.tolerance <
+      2.0 * std::numeric_limits<double>::epsilon() * scale) {
+    return false;
+  }
+  const double radius = sphere->radius;
+  if (!(std::fabs(d) < radius)) return false;
+  const double gap = radius - std::fabs(d);
+  const double tangent_band =
+      std::max(1e-12 * (1.0 + radius + std::fabs(d)), 0.05 * options.tolerance);
+  if (gap <= tangent_band) {
+    result.issues.push_back(ssi_driver_issue(SsiDiagnostic::tangent_contact,
+                                             "ssi: patches touch tangentially"));
+    return true;
+  }
+
+  const double rho = std::sqrt(std::max(0.0, radius * radius - d * d));
+  if (!(rho > chord_tolerance)) return false;
+  const double ratio = chord_tolerance / rho;
+  if (!(ratio < 1.0)) return false;
+  const double step = std::acos(1.0 - ratio);
+  if (!(step > 0.0)) return false;
+  const double count = std::ceil(0.5 * kSsiTwoPi / step);
+  if (!std::isfinite(count) || count < 8.0) return false;
+  const auto segments = static_cast<std::uint64_t>(count);
+  if (segments > 4096u || segments > options.max_segments) return false;
+
+  const double v = std::asin(std::clamp(-d / radius, -1.0, 1.0));
+  const double v_margin = 1e-12 * (1.0 + std::fabs(sphere_patch.v[0]) + std::fabs(sphere_patch.v[1]));
+  if (!(v > sphere_patch.v[0] + v_margin) || !(v < sphere_patch.v[1] - v_margin)) {
+    return false;
+  }
+
+  const Vec3d radial_x = frame.u;
+  const Vec3d radial_y = frame.v;
+  const Point3d center = sphere->center - frame.normal * d;
+  const double u_margin = 1e-12 * (1.0 + std::fabs(plane_patch.u[0]) + std::fabs(plane_patch.u[1]));
+  const double w_margin = 1e-12 * (1.0 + std::fabs(plane_patch.v[0]) + std::fabs(plane_patch.v[1]));
+  const std::uint64_t sample_count = std::max<std::uint64_t>(segments, 64u);
+  for (std::uint64_t i = 0; i < sample_count; ++i) {
+    const double angle = kSsiTwoPi * static_cast<double>(i) / static_cast<double>(sample_count);
+    const Point3d p = center + radial_x * (rho * std::cos(angle)) + radial_y * (rho * std::sin(angle));
+    const Point2d uv = plane_frame_to_2d(frame, p);
+    if (!(uv[0] > plane_patch.u[0] + u_margin) || !(uv[0] < plane_patch.u[1] - u_margin) ||
+        !(uv[1] > plane_patch.v[0] + w_margin) || !(uv[1] < plane_patch.v[1] - w_margin)) {
+      return false;
+    }
+  }
+
+  SsiCurve curve;
+  curve.closed = true;
+  curve.segments.reserve(static_cast<std::size_t>(segments));
+  const Vec3d y_axis = cross(sphere->axis, sphere->x_axis);
+  for (std::uint64_t i = 0; i < segments; ++i) {
+    const double angle_a = kSsiTwoPi * static_cast<double>(i) / static_cast<double>(segments);
+    const double angle_b = kSsiTwoPi * static_cast<double>(i + 1) / static_cast<double>(segments);
+    const Point3d pa = center + radial_x * (rho * std::cos(angle_a)) + radial_y * (rho * std::sin(angle_a));
+    const Point3d pb = center + radial_x * (rho * std::cos(angle_b)) + radial_y * (rho * std::sin(angle_b));
+    const Vec3d ra = pa - sphere->center;
+    const Vec3d rb = pb - sphere->center;
+    const Point2d qa = plane_frame_to_2d(frame, pa);
+    const Point2d qb = plane_frame_to_2d(frame, pb);
+    SsiPoint point_a{{std::atan2(dot(ra, y_axis), dot(ra, sphere->x_axis)), v},
+                     {qa[0], qa[1]}, pa};
+    SsiPoint point_b{{std::atan2(dot(rb, y_axis), dot(rb, sphere->x_axis)), v},
+                     {qb[0], qb[1]}, pb};
+    SsiSegment segment;
+    segment.a = pa;
+    segment.b = pb;
+    segment.ua = point_a.ua;
+    segment.ub = point_b.ua;
+    segment.va = point_a.va;
+    segment.vb = point_b.va;
+    segment.residual = std::max(ssi_residual(sphere_patch, plane_patch, point_a),
+                                ssi_residual(sphere_patch, plane_patch, point_b));
+    curve.segments.push_back(segment);
+  }
+  result.curves.push_back(std::move(curve));
+  result.candidate_pairs = 0;
+  result.accepted_segments = segments;
+  for (const SsiSegment& segment : result.curves.front().segments) {
+    result.max_residual = std::max(result.max_residual, segment.residual);
+  }
+  return true;
+}
+
 }  // namespace detail
 
 // Traces the intersection of two patches. Degenerate, coincident, and tangent
@@ -122,6 +243,25 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
   SsiResult result;
   const double tolerance = options.tolerance;
 
+  // The analytic sphere/plane chart is exact, so it runs before patch_bounds
+  // and the tangency predicates: those sample grids that cost milliseconds and
+  // are only needed by the generic tracer.
+  if (const Sphere3* sphere = std::get_if<Sphere3>(&a.surface);
+      sphere != nullptr && std::get_if<Plane3>(&b.surface) != nullptr) {
+    SsiResult analytic;
+    const double chord = std::max(1e-3 * 2.0 * sphere->radius, 64.0 * tolerance);
+    if (detail::ssi_try_analytic_sphere_plane(a, b, options, chord, analytic)) {
+      return analytic;
+    }
+  } else if (const Sphere3* sphere_b = std::get_if<Sphere3>(&b.surface);
+             sphere_b != nullptr && std::get_if<Plane3>(&a.surface) != nullptr) {
+    SsiResult analytic;
+    const double chord = std::max(1e-3 * 2.0 * sphere_b->radius, 64.0 * tolerance);
+    if (detail::ssi_try_analytic_sphere_plane(a, b, options, chord, analytic)) {
+      return analytic;
+    }
+  }
+
   // A patch whose 3D extent is inside the acceptance band has no well-defined
   // parameterization to trace on, so it is diagnosed before any predicate or
   // tessellation work.
@@ -138,17 +278,6 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
       diagonal_b <= tolerance) {
     result.issues.push_back(detail::ssi_driver_issue(
         SsiDiagnostic::degenerate_patch, "ssi: patch is degenerate within tolerance"));
-    return result;
-  }
-
-  if (surfaces_coincident(a, b, tolerance)) {
-    result.issues.push_back(detail::ssi_driver_issue(
-        SsiDiagnostic::coincident, "ssi: surfaces are coincident over the shared domain"));
-    return result;
-  }
-  if (patches_tangent(a, b, tolerance)) {
-    result.issues.push_back(detail::ssi_driver_issue(
-        SsiDiagnostic::tangent_contact, "ssi: patches touch tangentially"));
     return result;
   }
 
@@ -171,6 +300,17 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
     result.issues.push_back(detail::ssi_driver_issue(
         SsiDiagnostic::no_convergence,
         "ssi: tolerance is below the coordinate resolution of the patches"));
+    return result;
+  }
+
+  if (surfaces_coincident(a, b, tolerance)) {
+    result.issues.push_back(detail::ssi_driver_issue(
+        SsiDiagnostic::coincident, "ssi: surfaces are coincident over the shared domain"));
+    return result;
+  }
+  if (patches_tangent(a, b, tolerance)) {
+    result.issues.push_back(detail::ssi_driver_issue(
+        SsiDiagnostic::tangent_contact, "ssi: patches touch tangentially"));
     return result;
   }
 

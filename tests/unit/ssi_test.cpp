@@ -761,6 +761,63 @@ TEST_CASE("ssi: a tight but achievable tolerance still traces") {
   CHECK(result.value().max_residual <= 1e-14);
 }
 
+TEST_CASE("ssi: the analytic sphere-plane cut is exact and order independent") {
+  // A translated sphere with a tilted axis and a plane perpendicular to that
+  // axis: the exact path must emit the latitude circle without tessellation.
+  const Vec3d normal{0.7071067811865476, 0.7071067811865476, 0.0};
+  const Vec3d x_axis{0.7071067811865476, -0.7071067811865476, 0.0};
+  const Point3d center{1.0, -2.0, 0.5};
+  const Sphere3 sphere{center, normal, x_axis, 2.0};
+  const Vec3d center_vec{center[0], center[1], center[2]};
+  const Plane3 plane{normal, dot(normal, center_vec) + 0.7};
+  const Result<SsiPatch> sphere_patch =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 6.283185307179586}, {-1.5, 1.5});
+  const Result<SsiPatch> plane_patch =
+      make_ssi_patch(SurfaceGeometry{plane}, {-6, 6}, {-6, 6});
+  REQUIRE(sphere_patch.has_value());
+  REQUIRE(plane_patch.has_value());
+
+  const Result<SsiResult> forward =
+      ssi(sphere_patch.value(), plane_patch.value(), SsiOptions{1e-9});
+  const Result<SsiResult> backward =
+      ssi(plane_patch.value(), sphere_patch.value(), SsiOptions{1e-9});
+  REQUIRE(forward.has_value());
+  REQUIRE(backward.has_value());
+  REQUIRE(forward.value().curves.size() == 1);
+  REQUIRE(backward.value().curves.size() == 1);
+  CHECK(forward.value().candidate_pairs == 0);
+  CHECK(backward.value().candidate_pairs == 0);
+  CHECK(forward.value().curves[0].closed);
+  CHECK(forward.value().curves[0].segments.size() ==
+        backward.value().curves[0].segments.size());
+  CHECK(forward.value().curves[0].segments.size() >= 8);
+  const double rho = std::sqrt(4.0 - 0.7 * 0.7);
+  for (const SsiSegment& segment : forward.value().curves[0].segments) {
+    for (const Point3d& p : {segment.a, segment.b}) {
+      CHECK(std::fabs(plane.signed_distance(p)) <= 1e-12);
+      CHECK(std::fabs(norm2(p - center) - 2.0) <= 1e-12);
+      CHECK(std::fabs(norm2((p - center) - normal * 0.7) - rho) <= 1e-12);
+    }
+  }
+  // Swapping patch roles keeps the exact circle: same first point, same count.
+  CHECK(forward.value().curves[0].segments[0].a[0] ==
+        backward.value().curves[0].segments[0].a[0]);
+  CHECK(forward.value().curves[0].segments[0].a[1] ==
+        backward.value().curves[0].segments[0].a[1]);
+  CHECK(forward.value().curves[0].segments[0].a[2] ==
+        backward.value().curves[0].segments[0].a[2]);
+  CHECK(forward.value().max_residual == backward.value().max_residual);
+
+  // Repeating the call is bit-identical.
+  const Result<SsiResult> again =
+      ssi(sphere_patch.value(), plane_patch.value(), SsiOptions{1e-9});
+  REQUIRE(again.has_value());
+  CHECK(again.value().curves.size() == 1);
+  CHECK(again.value().curves[0].segments.size() ==
+        forward.value().curves[0].segments.size());
+  CHECK(again.value().max_residual == forward.value().max_residual);
+}
+
 TEST_CASE("ssi: the tolerance floor is two ulp of the coordinate magnitude") {
   const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
   const Result<SsiPatch> a = make_ssi_patch(
@@ -804,8 +861,8 @@ TEST_CASE("ssi: rejected segments report the saturated extracted-vs-accepted sur
   // steps (accepted can exceed extracted), so the difference saturates at zero.
   CHECK(planes.value().rejected_segments == 0);
 
-  // Sphere/plane: accepted 31 of the 96 extracted segments; the saturated
-  // surplus is 65 (trace segmentation is finer than seed segmentation).
+  // Sphere/plane: the analytic latitude circle is emitted directly, so no
+  // triangle-pair segments are extracted and the surplus saturates at zero.
   const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
   const Result<SsiPatch> sphere_patch = make_ssi_patch(
       SurfaceGeometry{sphere}, {0, 2 * 3.14159265358979323846}, {-1.5, 1.5});
@@ -820,10 +877,9 @@ TEST_CASE("ssi: rejected segments report the saturated extracted-vs-accepted sur
   const std::uint64_t sphere_extracted =
       extracted_segments(sphere_patch.value(), plane_z01.value(), 1e-9, 12);
   CHECK(sphere_extracted == 96);
-  CHECK(sphere_result.value().accepted_segments == 31);
-  CHECK(sphere_result.value().rejected_segments == 65);
-  CHECK(sphere_result.value().accepted_segments + sphere_result.value().rejected_segments ==
-        sphere_extracted);
+  CHECK(sphere_result.value().accepted_segments == 50);
+  CHECK(sphere_result.value().rejected_segments == 0);
+  CHECK(sphere_result.value().candidate_pairs == 0);
   double worst_residual = 0.0;
   for (const SsiSegment& segment : sphere_result.value().curves[0].segments) {
     worst_residual = std::max(worst_residual, segment.residual);
