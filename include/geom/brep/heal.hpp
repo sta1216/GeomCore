@@ -343,6 +343,21 @@ inline std::size_t selected_weld(const Brep& brep, const HealEdgePair& pair) {
   return d0 <= d1 ? 0u : 1u;
 }
 
+// Whether the face using `coedge` carries a Plane3 surface. Missing geometry is
+// reported as planar so the tie-break leaves the pre-existing ambiguity
+// behavior untouched when a carrier is unknown.
+inline bool adjacent_face_is_planar(const Brep& brep, CoedgeId coedge_id) {
+  if (!brep.coedge_alive(coedge_id)) return true;
+  const FaceId face_id = brep.coedge(coedge_id).face;
+  if (!brep.face_alive(face_id)) return true;
+  const Face& face = brep.face(face_id);
+  const auto& surfaces = brep.geometry().surfaces;
+  if (face.surface == kNoGeometry || face.surface >= surfaces.size()) {
+    return true;
+  }
+  return std::holds_alternative<Plane3>(surfaces[face.surface]);
+}
+
 }  // namespace heal_detail
 
 inline Result<HealPlan> heal_plan(const Brep& brep,
@@ -486,7 +501,36 @@ inline Result<HealPlan> heal_plan(const Brep& brep,
     if (accepted[index].size() < 2u) continue;
     const double best_gap = candidates[accepted[index][0]].pair.gap;
     const double next_gap = candidates[accepted[index][1]].pair.gap;
-    if (std::fabs(best_gap - next_gap) > kAmbiguityGap) continue;
+    const double tie_gap = kAmbiguityGap * std::max(1.0, best_gap);
+    if (std::fabs(best_gap - next_gap) > tie_gap) continue;
+
+    // Two gap edges on a central-symmetric analytic carrier (the two rims of
+    // one cylinder, two latitudes of one sphere) have identical endpoint
+    // distances, so the distance mapping alone cannot tell the real seam from
+    // the central-symmetric decoy. Only the real seam welds the two coedge
+    // starts to each other, which is what directions_agree reports. Resolve
+    // such a tie by orientation only when the boundary edge's adjacent face is
+    // not planar: planar rims must keep reporting ambiguous_gap even when one
+    // candidate happens to be orientation-consistent.
+    if (!heal_detail::adjacent_face_is_planar(
+            brep, first_coedge[boundary[index].index()])) {
+      std::size_t tied_opposite = 0;
+      std::size_t tied_opposite_index = std::numeric_limits<std::size_t>::max();
+      for (const std::size_t candidate_index : accepted[index]) {
+        if (std::fabs(candidates[candidate_index].pair.gap - best_gap) >
+            tie_gap) {
+          continue;
+        }
+        if (!candidates[candidate_index].pair.same_direction) {
+          ++tied_opposite;
+          tied_opposite_index = candidate_index;
+        }
+      }
+      if (tied_opposite == 1u) {
+        accepted[index].assign(1u, tied_opposite_index);
+        continue;
+      }
+    }
 
     ambiguous[index] = 1;
     const EdgeId edge_id = boundary[index];
