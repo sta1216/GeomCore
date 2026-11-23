@@ -177,17 +177,25 @@ messages; no planar behaviour change.
 ```cpp
 TEST_CASE("heal: a cylinder radial gap resolves by seam orientation") {
   const auto [brep, solid] = make_two_band_cylinder(1.0, 1e-6);
-  const auto healed = geom::v1::heal_brep(brep, solid, options);
-  REQUIRE(healed);
-  CHECK(healed.value().report.changed);
-  CHECK(healed.value().report.boundary_edges == 4u);
-  CHECK(healed.value().report.welded_vertices == 2u);
-  CHECK(healed.value().report.sewn_edges == 2u);
+  const std::vector<geom::v1::EdgeId> boundary =
+      geom::v1::detail::heal_boundary_edges(brep, solid);
+  const auto plan = geom::v1::detail::heal_plan(brep, boundary, 1e-6);
+  REQUIRE(plan);
+  CHECK(plan.value().pairs.size() == 2u);
+  const auto ambiguous = std::find_if(
+      plan.value().issues.begin(), plan.value().issues.end(),
+      [](const auto& issue) {
+        return issue.kind == geom::v1::HealIssueKind::ambiguous_gap;
+      });
+  CHECK(ambiguous == plan.value().issues.end());
+  CHECK(plan.value().pairs.front().same_direction == false);
 }
 ```
 
-Add the sphere lune version. On the current tree both report `ambiguous_gap`,
-`changed = false`.
+Add the sphere lune version. On the current tree both return an `ambiguous_gap`
+issue and no pairs. These are plan-level tests on purpose: the end-to-end
+`heal_brep` acceptance is Task 5, because until Task 4 the two-point pcurve
+rebuild cannot represent arcs.
 
 **Step 2 — run** the two cases; expect red.
 
@@ -201,8 +209,9 @@ Add the sphere lune version. On the current tree both report `ambiguous_gap`,
 - Planar pairs keep the old behaviour exactly.
 
 **Step 4 — green**: targeted tests green; run the full `heal:*` filter and
-confirm 40/43-style planar cases (except Task 1's updated messages) still pass
-and `make_ambiguous_rims` still yields four `ambiguous_gap` issues.
+confirm the planar cases (except Task 1's updated messages) still pass, and
+`make_ambiguous_rims` still yields its `ambiguous_gap` issues through the same
+plan-level test. Task 2 does not assert a successful `heal_brep` yet.
 
 **Step 5 — commit**: `feat(heal): resolve curved seam ties by orientation`.
 
