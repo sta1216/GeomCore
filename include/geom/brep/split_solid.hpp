@@ -1097,6 +1097,9 @@ inline Result<SplitSolidResult> split_solid_by_plane(const Brep& brep, SolidId s
   plane_patch.v = {patch_v_min - plane_margin, patch_v_max + plane_margin};
 
   SsiOptions options;
+  // This splitter folds parameters onto the seam itself; the analytic chart's
+  // unwrapped closed loop is not what its seam logic expects.
+  options.analytic_sphere_plane = false;
   options.tolerance = tolerance;
 
   std::vector<detail::SplitSolidCutChain> chains;

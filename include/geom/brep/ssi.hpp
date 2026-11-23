@@ -203,6 +203,18 @@ inline bool ssi_try_analytic_sphere_plane(const SsiPatch& a, const SsiPatch& b,
     sphere_uv.push_back({kSsiTwoPi * static_cast<double>(i) / static_cast<double>(segments), v});
   }
 
+  const SsiPatch& patch_a = swapped ? plane_patch : sphere_patch;
+  const SsiPatch& patch_b = swapped ? sphere_patch : plane_patch;
+  std::vector<double> point_residual(static_cast<std::size_t>(segments), 0.0);
+  for (std::uint64_t i = 0; i < segments; ++i) {
+    const std::array<double, 2> sphere_param = sphere_uv[static_cast<std::size_t>(i)];
+    const std::array<double, 2> plane_param{plane_uv[static_cast<std::size_t>(i)][0],
+                                            plane_uv[static_cast<std::size_t>(i)][1]};
+    const SsiPoint point = swapped ? SsiPoint{plane_param, sphere_param, points[static_cast<std::size_t>(i)]}
+                                   : SsiPoint{sphere_param, plane_param, points[static_cast<std::size_t>(i)]};
+    point_residual[static_cast<std::size_t>(i)] = ssi_residual(patch_a, patch_b, point);
+  }
+
   SsiCurve curve;
   curve.closed = true;
   curve.segments.reserve(static_cast<std::size_t>(segments));
@@ -227,10 +239,8 @@ inline bool ssi_try_analytic_sphere_plane(const SsiPatch& a, const SsiPatch& b,
     segment.ub = point_b.ua;
     segment.va = point_a.va;
     segment.vb = point_b.va;
-    // Every emitted point is constructed on the circle, hence on both
-    // carriers up to double rounding: the analytic gap is below the resolution
-    // of the coordinates, so the exact zero is the honest residual.
-    segment.residual = 0.0;
+    segment.residual = std::max(point_residual[static_cast<std::size_t>(i)],
+                                point_residual[static_cast<std::size_t>(next)]);
     worst_residual = std::max(worst_residual, segment.residual);
     curve.segments.push_back(segment);
   }
@@ -275,21 +285,21 @@ inline Result<SsiResult> ssi(const SsiPatch& a, const SsiPatch& b, const SsiOpti
   // and the tangency predicates: those sample grids that cost milliseconds and
   // are only needed by the generic tracer.
   if (options.analytic_sphere_plane) {
-  if (const Sphere3* sphere = std::get_if<Sphere3>(&a.surface);
-      sphere != nullptr && std::get_if<Plane3>(&b.surface) != nullptr) {
-    SsiResult analytic;
-    const double chord = std::max(1e-3 * 2.0 * sphere->radius, 64.0 * tolerance);
-    if (detail::ssi_try_analytic_sphere_plane(a, b, options, chord, analytic)) {
-      return analytic;
+    if (const Sphere3* sphere = std::get_if<Sphere3>(&a.surface);
+        sphere != nullptr && std::get_if<Plane3>(&b.surface) != nullptr) {
+      SsiResult analytic;
+      const double chord = std::max(1e-3 * 2.0 * sphere->radius, 64.0 * tolerance);
+      if (detail::ssi_try_analytic_sphere_plane(a, b, options, chord, analytic)) {
+        return analytic;
+      }
+    } else if (const Sphere3* sphere_b = std::get_if<Sphere3>(&b.surface);
+               sphere_b != nullptr && std::get_if<Plane3>(&a.surface) != nullptr) {
+      SsiResult analytic;
+      const double chord = std::max(1e-3 * 2.0 * sphere_b->radius, 64.0 * tolerance);
+      if (detail::ssi_try_analytic_sphere_plane(a, b, options, chord, analytic)) {
+        return analytic;
+      }
     }
-  } else if (const Sphere3* sphere_b = std::get_if<Sphere3>(&b.surface);
-             sphere_b != nullptr && std::get_if<Plane3>(&a.surface) != nullptr) {
-    SsiResult analytic;
-    const double chord = std::max(1e-3 * 2.0 * sphere_b->radius, 64.0 * tolerance);
-    if (detail::ssi_try_analytic_sphere_plane(a, b, options, chord, analytic)) {
-      return analytic;
-    }
-  }
   }
 
   // A patch whose 3D extent is inside the acceptance band has no well-defined

@@ -118,7 +118,7 @@ jobs:
       - name: Run M3c-3b lens benchmark
         run: ./build-bench/geom_bench_m3c3b | tee bench-m3c3b.txt
       - name: Run SSI benchmark (QA-9)
-        run: ./build-bench/geom_bench_ssi 1000 | tee bench-ssi.txt
+        run: set -o pipefail; ./build-bench/geom_bench_ssi 1000 | tee bench-ssi.txt
       - name: Upload benchmark output
         if: always()
         uses: actions/upload-artifact@v4

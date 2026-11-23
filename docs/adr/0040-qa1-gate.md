@@ -21,7 +21,7 @@ ms under load). The stage split for one union call (914 ms instrumented run) is:
 | `split_segments` | 534 | bbox enumeration 242; cheap disjoint reject 120; 44,462 proper crossings 77; shared-endpoint handling, setup, sorts, emit 83 |
 | arrangement (DCEL) | 340 | edges 93, fan 73, faces 64, vertices 49, winding 38, rest 23 |
 | `boolean2` post-build | 41 | classify, trace, assemble |
-| total | 914 | 100,000 input segments |
+| total | 915 (914.1 unrounded) | 100,000 input segments |
 
 Counts: 6,852,366 bbox candidates (68 per segment), 144,462 recorded pairs
 (100,000 shared-endpoint plus 44,462 proper crossings), 188,924 output edges,
@@ -59,7 +59,7 @@ part of this slice. This is recorded so the next slice does not repeat it.
   remaining optimization path (flat DCEL, sweep, threading) is tracked as
   future work rather than silently bundled into a gate change.
 - The QA-9 gate is closed separately by the exact analytic sphere-plane path
-  (median 53.5 us, measured in `docs/benchmarks/m3-5.md`).
+  (median 83.1–93.6 us, measured in `docs/benchmarks/m3-5.md`).
 
 ## Alternatives considered
 

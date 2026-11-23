@@ -55,7 +55,10 @@ struct SsiCurve {
 // axis is compared modulo 2*pi, so a seam pair such as -pi+eps and pi-eps is
 // 2*eps apart rather than almost a full period. Non-periodic axes are compared
 // as plain differences. The result is in parameter units, not radians alone:
-// it is the Euclidean length of the folded (du, dv) vector.
+// it is the Euclidean length of the folded (du, dv) vector. Analytic closed
+// curves may store one monotone lap (for example u = 0..2*pi) instead of
+// folding every parameter into [-pi, pi]; patch_contains folds, so the stored
+// representation does not change geometric membership.
 inline double ssi_param_distance(const SsiPatch& patch, std::array<double, 2> p,
                                  std::array<double, 2> q) noexcept {
   std::array<double, 2> delta{p[0] - q[0], p[1] - q[1]};

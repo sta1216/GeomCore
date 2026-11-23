@@ -761,6 +761,33 @@ TEST_CASE("ssi: a tight but achievable tolerance still traces") {
   CHECK(result.value().max_residual <= 1e-14);
 }
 
+TEST_CASE("ssi: partial and oblique sphere-plane cuts use the generic tracer") {
+  const Sphere3 sphere{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
+  const Result<SsiPatch> partial =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 3.14159265358979323846}, {-1.5, 1.5});
+  const Result<SsiPatch> full =
+      make_ssi_patch(SurfaceGeometry{sphere}, {0, 6.283185307179586}, {-1.5, 1.5});
+  const Result<SsiPatch> horizontal =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0, 0, 1}, 0.2}}, {-2, 2}, {-2, 2});
+  const Result<SsiPatch> oblique =
+      make_ssi_patch(SurfaceGeometry{Plane3{{0.7071067811865476, 0, 0.7071067811865476}, 0.2}},
+                     {-2, 2}, {-2, 2});
+  REQUIRE(partial.has_value());
+  REQUIRE(full.has_value());
+  REQUIRE(horizontal.has_value());
+  REQUIRE(oblique.has_value());
+
+  const Result<SsiResult> partial_cut =
+      ssi(partial.value(), horizontal.value(), SsiOptions{1e-9});
+  const Result<SsiResult> oblique_cut =
+      ssi(full.value(), oblique.value(), SsiOptions{1e-9});
+  REQUIRE(partial_cut.has_value());
+  REQUIRE(oblique_cut.has_value());
+  CHECK(partial_cut.value().candidate_pairs > 0);
+  CHECK(oblique_cut.value().candidate_pairs > 0);
+  CHECK_FALSE(partial_cut.value().curves.empty());
+}
+
 TEST_CASE("ssi: the analytic sphere-plane cut is exact and order independent") {
   // A translated sphere with a tilted axis and a plane perpendicular to that
   // axis: the exact path must emit the latitude circle without tessellation.
@@ -885,8 +912,10 @@ TEST_CASE("ssi: rejected segments report the saturated extracted-vs-accepted sur
     worst_residual = std::max(worst_residual, segment.residual);
   }
   CHECK(sphere_result.value().max_residual == worst_residual);
-  // The analytic circle is exact, so the gap-only residual is exactly zero.
-  CHECK(sphere_result.value().max_residual == 0.0);
+  // The analytic circle is exact in real arithmetic; the reported residual is
+  // the floating-point gap measured on the reconstructed points.
+  CHECK(sphere_result.value().max_residual > 0.0);
+  CHECK(sphere_result.value().max_residual <= 1e-12);
 
   // Cylinder/plane: two open lines; the saturated surplus is reported.
   const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
