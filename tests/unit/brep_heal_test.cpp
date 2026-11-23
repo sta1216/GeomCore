@@ -22,6 +22,7 @@
 #include <geom/brep/validate.hpp>
 
 #include "brep_heal_fixture.hpp"
+#include "m4a_curved_heal_fixture.hpp"
 
 using namespace geom;
 
@@ -1048,14 +1049,15 @@ TEST_CASE("heal: weld chains collapse to one live keep") {
   CHECK_FALSE(apply_editor.brep().vertex_alive(dead));
 }
 
-TEST_CASE("heal: a curved face is rejected before planning") {
-  const Brep cylinder =
-      make_cylinder({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 1.0, 1.0, 0.0).value();
-  const auto healed = heal_brep(cylinder, cylinder.solid_ids().front(), {});
+TEST_CASE("heal: an unsupported face is rejected before planning") {
+  const test::m4a::UnsupportedFaceSolid fixture =
+      test::m4a::make_nurbs_face_solid();
+  const auto healed = heal_brep(fixture.brep, fixture.solid, {});
   REQUIRE_FALSE(healed.has_value());
   CHECK(healed.error().code == Errc::unsupported);
   CHECK(std::string_view(healed.error().message) ==
-        "heal_brep: curved geometry is not supported yet");
+        "heal_brep: surface type is not supported yet");
+  CHECK(healed.error().context_a == fixture.face.index());
 }
 
 TEST_CASE("heal: unknown solid handles are index errors") {
@@ -1321,27 +1323,29 @@ TEST_CASE("heal: a closed box is unchanged and has no counters") {
   CHECK(heal_fingerprint(result.brep) == fingerprint);
 }
 
-TEST_CASE("heal: a curved operand is rejected and left untouched") {
-  const Brep cylinder =
-      make_cylinder({0.0, 0.0, 0.0}, {0.0, 0.0, 1.0}, 1.0, 1.0, 0.0).value();
-  const std::string fingerprint = heal_fingerprint(cylinder);
+TEST_CASE("heal: an unsupported surface is rejected and left untouched") {
+  const test::m4a::UnsupportedFaceSolid fixture =
+      test::m4a::make_nurbs_face_solid();
+  const std::string fingerprint = heal_fingerprint(fixture.brep);
 
-  const auto healed = heal_brep(cylinder, cylinder.solid_ids().front(), {});
+  const auto healed = heal_brep(fixture.brep, fixture.solid, {});
   REQUIRE_FALSE(healed.has_value());
   CHECK(healed.error().code == Errc::unsupported);
   CHECK(std::string_view(healed.error().message) ==
-        "heal_brep: curved geometry is not supported yet");
-  CHECK(heal_fingerprint(cylinder) == fingerprint);
+        "heal_brep: surface type is not supported yet");
+  CHECK(heal_fingerprint(fixture.brep) == fingerprint);
 }
 
-TEST_CASE("heal: a curved incident edge is rejected even with planar faces") {
+TEST_CASE("heal: a NURBS incident edge is rejected even with planar faces") {
   const test::CrackedBox cracked = test::make_cracked_box(1e-6);
   std::vector<EdgeId> boundary =
       detail::heal_boundary_edges(cracked.brep, cracked.solid);
   REQUIRE(!boundary.empty());
 
   SolidEditor editor(cracked.brep);
-  const std::uint32_t curve = editor.add_curve(CircleCurve3{});
+  const std::uint32_t curve = editor.add_curve(
+      NurbsCurve(1, {0.0, 0.0, 1.0, 1.0},
+                 {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}}, {1.0, 1.0}));
   REQUIRE(editor.set_edge_geometry(boundary.front(), curve, 0.0, 1.0).has_value());
   const Brep brep = editor.commit().value();
 
@@ -1349,7 +1353,7 @@ TEST_CASE("heal: a curved incident edge is rejected even with planar faces") {
   REQUIRE_FALSE(healed.has_value());
   CHECK(healed.error().code == Errc::unsupported);
   CHECK(std::string_view(healed.error().message) ==
-        "heal_brep: curved geometry is not supported yet");
+        "heal_brep: curve type is not supported yet");
 }
 
 TEST_CASE("heal: a second solid is not touched") {

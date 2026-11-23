@@ -46,6 +46,7 @@ set(GEOM_TEST_SOURCES
   unit/curved_boolean_qa18_test.cpp
     unit/brep_arc_heal_test.cpp
   unit/brep_heal_test.cpp
+  unit/brep_heal_curved_test.cpp
   unit/brep_editor_heal_test.cpp
   unit/brep_assemble_curved_test.cpp
   unit/brep_box_test.cpp

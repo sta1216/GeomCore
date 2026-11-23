@@ -667,10 +667,19 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
     for (const FaceId face_id : brep.shell_faces(shell)) {
       if (!brep.face_alive(face_id)) continue;
       const Face& face = brep.face(face_id);
-      if (face.surface == kNoGeometry || face.surface >= surfaces.size() ||
-          std::get_if<Plane3>(&surfaces[face.surface]) == nullptr) {
+      if (face.surface == kNoGeometry || face.surface >= surfaces.size()) {
+        return Error{Errc::invalid_topology, "heal_brep: face has no surface",
+                     face_id.index(), 0};
+      }
+      const SurfaceGeometry& surface = surfaces[face.surface];
+      if (!std::holds_alternative<Plane3>(surface) &&
+          !std::holds_alternative<Cylinder3>(surface) &&
+          !std::holds_alternative<Cone3>(surface) &&
+          !std::holds_alternative<Sphere3>(surface) &&
+          !std::holds_alternative<Torus3>(surface)) {
         return Error{Errc::unsupported,
-                     "heal_brep: curved geometry is not supported yet", 0, 0};
+                     "heal_brep: surface type is not supported yet",
+                     face_id.index(), 0};
       }
       LoopId loop_id = face.first_loop;
       std::size_t loops_seen = 0;
@@ -686,10 +695,10 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
               const Edge& edge = brep.edge(coedge.edge);
               if (edge.curve != kNoGeometry &&
                   (edge.curve >= curves.size() ||
-                   std::get_if<LineCurve3>(&curves[edge.curve]) == nullptr)) {
+                   (!std::holds_alternative<LineCurve3>(curves[edge.curve]) &&
+                    !std::holds_alternative<CircleCurve3>(curves[edge.curve])))) {
                 return Error{Errc::unsupported,
-                             "heal_brep: curved geometry is not supported yet",
-                             0, 0};
+                             "heal_brep: curve type is not supported yet", 0, 0};
               }
             }
             if (coedge.next == loop.start) break;
