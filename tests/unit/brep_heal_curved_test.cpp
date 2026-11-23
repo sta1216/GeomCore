@@ -646,8 +646,9 @@ TEST_CASE("heal: analytic curved gaps are accepted") {
     REQUIRE(accepted.brep.face_count() == 4u);
 
     // Each lune chart is the uv rectangle u in [0, pi], v in [eps, pi/2] (or
-    // the mirrored south band): four positive areas summing to 2*pi^2 minus
-    // the 4*pi*asin(eps) equatorial sliver (6.3e-6 here).
+    // the mirrored south band). Its area differs from pi^2/2 by +/- pi*eps; the
+    // north and south shifts cancel, so the uv sum is 2*pi^2 (the 4*pi*asin(eps)
+    // sliver is an equatorial surface-area deficit, not a uv-area deficit).
     double uv_area_sum = 0.0;
     for (const FaceId face_id : accepted.brep.face_ids()) {
       const auto loops = face_loops_uv(accepted.brep, face_id, 1e-9);
