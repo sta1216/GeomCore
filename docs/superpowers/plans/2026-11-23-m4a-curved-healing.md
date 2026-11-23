@@ -363,9 +363,17 @@ Also assert `validate_topology(...).ok()`, `euler_characteristic == 2`,
 
 ## Self-review
 
-- [ ] Each task has a RED test that fails for the intended reason.
-- [ ] No test asserts only counts where a value/message is available.
-- [ ] Tie-break cannot turn a genuine ambiguity into a weld.
-- [ ] Rejections leave the input bit-identical.
-- [ ] Fast-lane commands are given; milestone full-suite run is explicit.
-- [ ] Torus/apex/NURBS deferrals are stated, not implied.
+- [x] Each task has a RED test that fails for the intended reason.
+- [x] No test asserts only counts where a value/message is available.
+- [x] Tie-break cannot turn a genuine ambiguity into a weld.
+- [x] Rejections leave the input bit-identical.
+- [x] Fast-lane commands are given; milestone full-suite run is explicit.
+- [x] Torus/apex/NURBS deferrals are stated, not implied.
+
+
+## Results (2026-11-24)
+
+- Branch `sdd/m4a`: `260f8fe`, `f5b9ef3`, `d7d7ac7`, `c3f6595`, `205bbf0`, `dcb4a68`, `524ef35`, `1e0ff63`, `e0fcc6e`, `81a90a4`.
+- Full Debug and Release: 1068 cases / 680273 assertions, 0 failures, 0 warnings.
+- Accept volumes: cylinder 6.2831884487723997 (pi*(2+gap), gap 9.9999999991773336e-7); sphere 4.1887902047863808 (4*pi/3); cone 2.0943951023931864 (2*pi/3, axial gap 8e-7).
+- Planar QA-12 fixture unchanged; NURBS, torus gap, apex gap, and closed-rim pairing remain deferred (closed rims return the documented diagnostic).
