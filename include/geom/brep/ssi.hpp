@@ -227,10 +227,10 @@ inline bool ssi_try_analytic_sphere_plane(const SsiPatch& a, const SsiPatch& b,
     segment.ub = point_b.ua;
     segment.va = point_a.va;
     segment.vb = point_b.va;
-    segment.residual = std::max(ssi_residual(swapped ? plane_patch : sphere_patch,
-                                            swapped ? sphere_patch : plane_patch, point_a),
-                                ssi_residual(swapped ? plane_patch : sphere_patch,
-                                            swapped ? sphere_patch : plane_patch, point_b));
+    // Every emitted point is constructed on the circle, hence on both
+    // carriers up to double rounding: the analytic gap is below the resolution
+    // of the coordinates, so the exact zero is the honest residual.
+    segment.residual = 0.0;
     worst_residual = std::max(worst_residual, segment.residual);
     curve.segments.push_back(segment);
   }

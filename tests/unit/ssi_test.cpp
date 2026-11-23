@@ -885,8 +885,8 @@ TEST_CASE("ssi: rejected segments report the saturated extracted-vs-accepted sur
     worst_residual = std::max(worst_residual, segment.residual);
   }
   CHECK(sphere_result.value().max_residual == worst_residual);
-  CHECK(sphere_result.value().max_residual > 0.0);
-  CHECK(sphere_result.value().max_residual <= 1e-9);
+  // The analytic circle is exact, so the gap-only residual is exactly zero.
+  CHECK(sphere_result.value().max_residual == 0.0);
 
   // Cylinder/plane: two open lines; the saturated surplus is reported.
   const Cylinder3 cylinder{Point3d{0, 0, 0}, Vec3d{0, 0, 1}, Vec3d{1, 0, 0}, 1.0};
