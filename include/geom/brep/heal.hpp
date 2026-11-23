@@ -1273,6 +1273,22 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
     }
   }
 
+  // A closed rim edge (one vertex, v0 == v1) cannot be paired: welding would
+  // collapse both ends onto the same point, leaving no traversal direction for
+  // the orientation check. heal_plan's zero-length guard below is meant for two
+  // distinct vertices that happen to coincide. Report the closed-rim case
+  // explicitly and leave splitting to split_solid (collapse_circular_chains).
+  // This runs on the immutable input before any SolidEditor mutation.
+  for (const EdgeId edge_id : boundary) {
+    const Edge& edge = brep.edge(edge_id);
+    if (edge.v0 == edge.v1) {
+      return Error{Errc::unsupported,
+                   "heal_brep: closed gap edge cannot be paired; split the rim "
+                   "first",
+                   edge_id.index(), 0};
+    }
+  }
+
   HealReport report;
   report.boundary_edges = static_cast<std::uint32_t>(boundary.size());
   const std::int64_t euler_before = euler_characteristic(brep, solid);

@@ -1379,6 +1379,10 @@ ADR-0030。Debug 与 Release 各 949 个用例、659,600 条断言全绿，
 
 **M3.5a 性能切片（2026-11-23，Release 实测）：** QA-4 BVH 构建 1,372→287–300 ms（单次分箱 + SoA + 顶层确定性并行）；raycast 0.45→0.66–0.67 Mray/s（约 1.5×；0.9 与 8 Mray/s 未达，单射线延迟下限实测 0.87–0.91，packet 留后续；节点 224 B，盒子剪枝用 `best*(1+1e-12)` 保守松弛，浮点子盒因 1 ulp 漏命中被否决）；QA-10 盒网格化 0.22→1.46–1.65 Mtri/s（7–7.6×，盒快路径与通用路径逐位一致）；QA-1 未改动代码，实测 887–1,037 ms（仍 FAIL 80 ms）；QA-9 未改动 9.6–19.5 ms（仍 FAIL 100 µs）。ADR-0039、`docs/benchmarks/m3-5.md`。
 
+### 16.4 M4a 曲面缝隙愈合（2026-11-24）
+
+**M4a（解析曲面缝隙：支持；torus 缝隙与 apex/pole gap 延后）**：`heal_brep` 在平面事务之上接受面类型 `Plane3`/`Cylinder3`/`Cone3`/`Sphere3`/`Torus3` 与边曲线 `kNoGeometry`/`LineCurve3`/`CircleCurve3`，其他类型（含 NURBS）在修改前以固定 `unsupported` 消息拒绝；配对仍按 `max_gap` 与 `(gap,sum,keep,drop)` 互近邻，载体由 `detail::heal_surfaces_coincide` 在 `max(options.tolerance, 1e-12*surface_scale)` 内比较（平面恒相容；圆柱比半径/轴/轴线偏移，球比半径/球心，锥比半径/半角/轴/顶点，torus 比双半径/轴/中心），并检查边界边三点落在各自所属面的曲面上、保留曲线穿过焊后端点；中心对称载体上的 gap 并列只在邻面非 `Plane3` 时用焊后遍历方向挑出唯一相容候选，否则仍报 `ambiguous_gap`，平面行为不变。焊接后对目标实体的每个面重建 pcurve：三维路径投影并按 `previous_u`/周期展开，反向 coedge 反向、极点/锥顶借用邻点 u、周期缝整周回描平移 2π、圆弧至少保留一个内点，每条 coedge 至少两点；三维载体保留。闭合整圆 rim（`v0 == v1`）在边界表与白名单已知后、`heal_plan`/修改前返回 `unsupported "heal_brep: closed gap edge cannot be paired; split the rim first"`（context 为边索引与 0），`detail::heal_plan` 对直接调用者仍保留零长 `invalid_topology`，heal 内不拆分。三个 Release 验收：圆柱（gap `1e-6`，V/E/F `8/10/4→6/8/4`）体积 `6.2831884487723997` 对 `π*(2+gap)` 相对 `2.5e-14`、`max_closed_gap=9.9999999991773336e-07`；四片 lune 球（赤道分离 `1e-6`，`6/8/4→4/6/4`）`4.1887902047863808` 对 `4π/3` 相对 `2.3e-15`；锥带终止于顶点（斜缝 `8.9442719102563569e-07`，`7/8/3→5/6/3`，5 顶点且恰一顶点在 `(0,0,2)`）`2.0943951023931864` 对 `2π/3` 相对 `4.2e-15`；三者 `chi == 2`、`validate_topology` 干净、4 条边界边→2 焊点/2 缝合边、二次 heal 幂等、重复运行逐位一致。Release 目标过滤 `heal:*,curved volume:*,tessellate:*,validate:*` 为 68 用例、4,274 条断言、0 失败、1,000 跳过；全量 Debug/Release 只在里程碑评审运行。平面 QA-12 数值与消息均未变，未新增全局 epsilon。torus 缝隙（v 周期、双半径）、顶点/极点缩成一点的 apex/pole gap、NURBS 与曲面重拟合仍延后（torus 仅通过面类型白名单）；本行只关闭 M4a 的解析曲面缝隙范围，不得据此声称 M4b 或全部曲面缝隙完成。契约见 ADR-0026 补遗，实测见 `docs/benchmarks/m4a-healing.md`。
+
 ---
 
 ## 17. 附录

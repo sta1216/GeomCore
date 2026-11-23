@@ -29,6 +29,8 @@ constexpr std::string_view kOffSurfaceMessage =
     "heal_brep: gap edge is not on its face surface";
 constexpr std::string_view kKeptCurveMessage =
     "heal_brep: kept edge curve does not match its welded vertices";
+constexpr std::string_view kClosedRimMessage =
+    "heal_brep: closed gap edge cannot be paired; split the rim first";
 
 bool contains(std::string_view text, std::string_view needle) {
   return text.find(needle) != std::string_view::npos;
@@ -316,6 +318,20 @@ TEST_CASE("heal: a kept curve must pass through its welded vertices") {
   CHECK(std::string_view(healed.error().message) == kKeptCurveMessage);
   CHECK(healed.error().context_a == 2u);
   CHECK(healed.error().context_b == 4u);
+  CHECK(brep_fingerprint(cylinder.brep) == before);
+}
+
+TEST_CASE("heal: a closed gap rim is reported instead of a zero-length edge") {
+  const test::m4a::CurvedSolid cylinder =
+      test::m4a::make_cylinder_closed_rims_gap(1e-6);
+  const std::vector<double> before = brep_fingerprint(cylinder.brep);
+
+  const auto healed = heal_brep(cylinder.brep, cylinder.solid, {});
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::unsupported);
+  CHECK(std::string_view(healed.error().message) == kClosedRimMessage);
+  CHECK(healed.error().context_a == 1u);
+  CHECK(healed.error().context_b == 0u);
   CHECK(brep_fingerprint(cylinder.brep) == before);
 }
 

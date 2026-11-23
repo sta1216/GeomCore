@@ -93,3 +93,79 @@ T 型/竞争配对、方向翻转、pcurve 失效和容差爆炸上产生不可�
 M4 加入小边/小面折叠、曲面重拟合、多实体缝合或曲面缝隙桥接时；或出现需要
 逐次容差 provenance 的审计/交换场景时；或 QA-12 语料扩展到非均匀缝隙、
 T 型接缝与多壳实体时。
+
+---
+
+## 补遗（2026-11-24）：M4a 曲面缝隙愈合
+
+M4a 保持上文平面契约（配对、方向、容差与 staged 事务）不变，把同一
+`SolidEditor` 事务扩展到解析曲面与圆弧边；以下是新增的契约。
+
+- **支持类别（白名单）。** 目标实体的每个面必须是 `Plane3`、`Cylinder3`、
+  `Cone3`、`Sphere3` 或 `Torus3`；每条被使用的边曲线必须是 `kNoGeometry`、
+  `LineCurve3` 或 `CircleCurve3`。其他曲面/曲线（含 NURBS）在修改前分别以
+  `unsupported "heal_brep: surface type is not supported yet"` /
+  `"heal_brep: curve type is not supported yet"` 拒绝。`Torus3` 只通过类型门
+  （允许同一实体中的 torus 邻面），torus 缝隙的 v 周期与双半径配对尚未验收，
+  愈合本身延后到 M4b；不得据此声称支持 torus 缝隙。
+- **载体判据。** `detail::heal_surfaces_coincide` 要求两个候选面是同一解析类型，
+  并在 `check_tolerance = max(options.tolerance, 1e-12 * surface_scale)` 内比较：
+  平面之间恒相容（平面缝合不依赖放置）；圆柱比较半径、轴方向与轴线偏移；球比较
+  半径与球心；锥比较半径、半角、轴方向与顶点；torus 比较主/次半径、轴与中心。
+  类型不同、或已支持解析量超出该带，报
+  `unsupported "heal_brep: gap faces do not share the same surface"`，context 为
+  (keep 边, drop 边)。每条边界边还要在 `t0`、参数中点与 `t1` 三点落在自己所属面
+  的曲面上（残差 ≤ 同一带），否则报
+  `"heal_brep: gap edge is not on its face surface"`；被保留边的三维曲线必须穿过
+  焊后两个端点，否则报
+  `"heal_brep: kept edge curve does not match its welded vertices"`。这些门都在
+  `SolidEditor` 第一次修改之前运行。
+- **方向 tie-break（仅非平面）。** 半径/纬线关于中心对称的载体上，两个候选的端点
+  距离可以逐位相同，仅靠 `(gap, sum, keep, drop)` 无法分辨真缝与对称诱饵。对差距
+  在 `1e-12 * max(1, best_gap)` 内的候选，只有当该边界边首个 coedge 所在面不是
+  `Plane3` 时，才用 `SolidEditor::merge_edges` 将来采用的同一方向谓词（焊后遍历
+  起点相同）挑出唯一方向相容的候选；方向相容候选不是恰好一个时仍报
+  `ambiguous_gap`。缺失几何按平面处理，因此四条 `make_ambiguous_rims` 的
+  `ambiguous_gap` 期望与消息完全不变。
+- **逐面 pcurve 契约。** 焊接后对目标实体的每个面（不止缝隙面）重建 pcurve：
+  按面/环/coedge 顺序取三维路径（直线两端点；圆按不超过 0.1 rad 的密集采样，
+  闭合边取 ±2π 全周），用 `previous_u` 提示投影到该面图卡并展开周期 u/v；反向
+  coedge 反向遍历采样；极点/锥顶样本保持精确 v、u 借用相邻非奇异样本，避免扇形
+  积分成零；周期缝的整周回描在 |Δu| > π 时平移整数个 2π 以闭合图卡；去掉共线
+  内点，但圆弧段至少保留一个内点使弧向可判。每条 coedge 写入至少两点，否则报
+  `Errc::degenerate "heal_brep: pcurve has fewer than two points"`（context 为
+  coedge 索引）。三维边载体不清除，`CircleCurve3`/`LineCurve3` 仍可供后续操作使用。
+- **pcurve 读取规则。** `face_uv` 优先使用存储的 pcurve（反向 coedge 反向读取），
+  否则采样三维边再投影；每段圆弧的扫角必须落在 ±π 内（|sweep| ≥ π-1e-6 报
+  `numeric_failure "face_loops_uv: circular arc direction is ambiguous"`）；点偏离
+  圆的程度超过 `max(tolerance, 1e-12*max(1,radius))` 报
+  `"face_loops_uv: point is off its circle"`；环在三维中判闭合、去掉闭合重复点后
+  不足三点报 `"face_loops_uv: loop has fewer than three points"`。
+- **闭合 rim 诊断。** 若边界边的 `v0 == v1`（`make_cylinder` 式的单条整圆边），
+  它无法配对：焊接会把两端塌到同一点，方向检查也没有遍历起点。`heal_brep` 在
+  边界表与白名单已知之后、`heal_plan`/任何修改之前返回
+  `Errc::unsupported "heal_brep: closed gap edge cannot be paired; split the rim
+  first"`，context 为 (edge 索引, 0)。`detail::heal_plan` 对直接调用者仍保留
+  `invalid_topology "heal_plan: boundary edge has zero length"`（两个不同顶点
+  恰好重合的零长边仍走该门）。`heal_brep` 内部不拆分 rim；拆分是 `split_solid`
+  的职责（`collapse_circular_chains` 是 M4b 的复用件）。
+- **无限直线限制。** `heal_curve_residual` 对 `LineCurve3` 取点到无限载体直线的
+  距离，不是到线段 `[t0,t1]` 的距离；`heal_edge_lies_on_surface` 在 `t0`、中点、
+  `t1` 三点取样，因此它验证载体直线与这三个参数点，边端与顶点的一致性由
+  kept-curve 门禁另行保证。不要把它当作线段范围校验。
+- **延期项。** torus 缝隙愈合（v 周期、双半径、缝配对）延后到 M4b；顶点/极点
+  缩成一点的 apex/pole gap 不在本里程碑范围（锥带终止于顶点、边界仍是有限半径
+  圆的用例已接受）；NURBS 曲面/曲线、曲面重拟合与多实体缝合仍不支持。
+- **平面 QA-12 不变。** 本补遗没有改变任何平面数值：裂盒体积 1（误差
+  `1.11e-16`）、4 焊点/4 缝合边、`max_closed_gap=max_tolerance=1e-6`、1e-3 缝隙
+  仍在 `(0,0,0.5005)` 拒绝（边 16/20）、幂等指纹不变；四条 `ambiguous_gap` 与
+  既有消息均保持。新增的唯一行为是闭合 rim 的显式 `unsupported`。
+- **测试证据（截至 Task 6）。** 新增
+  `heal: a closed gap rim is reported instead of a zero-length edge`：在旧树上
+  RED（`invalid_topology` 与 `"heal_plan: boundary edge has zero length"`），实现后
+  GREEN，且输入指纹不变。Release 目标过滤
+  `heal:*,curved volume:*,tessellate:*,validate:*` 实测 68 个用例、4,274 条断言、
+  0 失败、1,000 跳过；全量 Debug/Release 只在里程碑评审运行。三个验收值
+  （Release）：圆柱 `π*(2+1e-6)` rel 2.5e-14、球 `4π/3` rel 2.3e-15、锥 `2π/3`
+  rel 4.2e-15；`chi == 2`；细节见 `docs/benchmarks/m4a-healing.md` 与
+  architecture §16.4。
