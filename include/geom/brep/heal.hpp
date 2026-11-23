@@ -1482,6 +1482,10 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
       continue;
     }
     const CurveGeometry& curve = editor.brep().geometry().curves[edge.curve];
+    // NOTE: heal_curve_residual checks a LineCurve3 against the infinite line,
+    // not against the segment covered by [t0, t1]. A carrier whose parameter
+    // span no longer covers a welded endpoint therefore still passes; only the
+    // direction is repaired by the flip handling above.
     for (const VertexId endpoint : {edge.v0, edge.v1}) {
       const Point3d mapped =
           editor.brep().vertices()[root_of(endpoint.index())].point;

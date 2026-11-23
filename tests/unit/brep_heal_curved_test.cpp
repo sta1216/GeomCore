@@ -586,3 +586,58 @@ TEST_CASE("heal: a reversed inherited carrier keeps the edge direction") {
   // arc: eval_reversed(t) == eval(t0 + t1 - t).
   CHECK(norm2(carrier.eval(0.5) - circle.eval(test::m4a::kPi - 0.5)) <= 1e-12);
 }
+
+TEST_CASE("heal: a flipped inherited carrier is reversed into the keep direction") {
+  const test::FlippedRimBox box = test::make_flipped_rim_box();
+
+  // The fixture stores the upper rim edges opposite to the lower ones, so the
+  // plan must pick the crossed weld mapping for every rim pair.
+  const std::vector<EdgeId> boundary =
+      detail::heal_boundary_edges(box.brep, box.solid);
+  REQUIRE(boundary.size() == 8u);
+  const Result<detail::HealPlan> plan =
+      detail::heal_plan(box.brep, boundary, 1e-6);
+  REQUIRE(plan.has_value());
+  REQUIRE(plan.value().pairs.size() == 4u);
+  for (const detail::HealEdgePair& pair : plan.value().pairs) {
+    CHECK_FALSE(pair.same_direction);
+    const Edge& keep_edge = box.brep.edge(pair.keep);
+    const Edge& drop_edge = box.brep.edge(pair.drop);
+    const Point3d k0 = box.brep.vertex(keep_edge.v0).point;
+    const Point3d k1 = box.brep.vertex(keep_edge.v1).point;
+    const Point3d d0 = box.brep.vertex(drop_edge.v0).point;
+    const Point3d d1 = box.brep.vertex(drop_edge.v1).point;
+    CHECK(norm2(k0 - d1) == 0.0);
+    CHECK(norm2(k1 - d0) == 0.0);
+  }
+
+  const auto healed = heal_brep(box.brep, box.solid, {});
+  REQUIRE(healed.has_value());
+  const HealResult& healed_result = healed.value();
+  CHECK(healed_result.report.changed);
+  CHECK(healed_result.report.issues.empty());
+
+  // The inherited line starts at the dropped edge's v0. Without the flip repair
+  // that is the keep edge's v1, so eval(t0) would land on the wrong endpoint.
+  for (const EdgeId rim : box.lower_rim) {
+    const Edge& edge = healed_result.brep.edge(rim);
+    CHECK(edge.curve != kNoGeometry);
+    if (edge.curve == kNoGeometry) continue;
+    const auto* line = std::get_if<LineCurve3>(
+        &healed_result.brep.geometry().curves[edge.curve]);
+    REQUIRE(line != nullptr);
+    CHECK(norm2(line->eval(edge.t0) -
+                healed_result.brep.vertex(edge.v0).point) <= 1e-12);
+    CHECK(norm2(line->eval(edge.t1) -
+                healed_result.brep.vertex(edge.v1).point) <= 1e-12);
+    CHECK(std::fabs(norm2(healed_result.brep.vertex(edge.v0).point -
+                          healed_result.brep.vertex(edge.v1).point) -
+                    1.0) <= 1e-12);
+  }
+
+  // The welded box is closed and has the unit volume of the two half boxes.
+  const auto volume =
+      detail::curved_solid_volume(healed_result.brep, box.solid, 1e-9);
+  REQUIRE(volume.has_value());
+  CHECK(std::fabs(volume.value() - 1.0) <= 1e-12);
+}

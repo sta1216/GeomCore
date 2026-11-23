@@ -425,4 +425,133 @@ inline CrackedBox make_cracked_box(double gap, double chain_tol = 0.0) {
   return {editor.commit().value(), solid};
 }
 
+// A unit box cut at z = 0.5 where the two halves touch: the upper rim uses its
+// own vertices at the same positions as the lower rim, so the eight rim edges
+// are the only boundary edges and each pair has zero gap. The upper rim edges
+// are stored opposite to the lower ones (their side loops read them reversed),
+// so `heal_plan` selects the flipped weld mapping. Only the upper rim edges
+// carry a line; the lower rim edges are curve-less and inherit that line through
+// `merge_edges`, which must reverse it into the keep edge direction. All other
+// edges carry no curve and are skipped by the post-merge guard.
+struct FlippedRimBox {
+  Brep brep;
+  SolidId solid{};
+  std::array<EdgeId, 4> lower_rim{};
+  std::array<EdgeId, 4> upper_rim{};
+};
+
+inline FlippedRimBox make_flipped_rim_box() {
+  SolidEditor editor;
+
+  const VertexId b00 = editor.add_vertex({0.0, 0.0, 0.0}, 0).value();
+  const VertexId b10 = editor.add_vertex({1.0, 0.0, 0.0}, 0).value();
+  const VertexId b11 = editor.add_vertex({1.0, 1.0, 0.0}, 0).value();
+  const VertexId b01 = editor.add_vertex({0.0, 1.0, 0.0}, 0).value();
+  const VertexId l00 = editor.add_vertex({0.0, 0.0, 0.5}, 0).value();
+  const VertexId l10 = editor.add_vertex({1.0, 0.0, 0.5}, 0).value();
+  const VertexId l11 = editor.add_vertex({1.0, 1.0, 0.5}, 0).value();
+  const VertexId l01 = editor.add_vertex({0.0, 1.0, 0.5}, 0).value();
+  const VertexId u00 = editor.add_vertex({0.0, 0.0, 0.5}, 0).value();
+  const VertexId u10 = editor.add_vertex({1.0, 0.0, 0.5}, 0).value();
+  const VertexId u11 = editor.add_vertex({1.0, 1.0, 0.5}, 0).value();
+  const VertexId u01 = editor.add_vertex({0.0, 1.0, 0.5}, 0).value();
+  const VertexId t00 = editor.add_vertex({0.0, 0.0, 1.0}, 0).value();
+  const VertexId t10 = editor.add_vertex({1.0, 0.0, 1.0}, 0).value();
+  const VertexId t11 = editor.add_vertex({1.0, 1.0, 1.0}, 0).value();
+  const VertexId t01 = editor.add_vertex({0.0, 1.0, 1.0}, 0).value();
+
+  const VertexId b_ring[] = {b00, b10, b11, b01};
+  const VertexId l_ring[] = {l00, l10, l11, l01};
+  const VertexId u_ring[] = {u00, u10, u11, u01};
+  const VertexId t_ring[] = {t00, t10, t11, t01};
+
+  const EdgeId b0 = editor.add_edge(b_ring[0], b_ring[1], kNoGeometry, 0, 1, 0).value();
+  const EdgeId b1 = editor.add_edge(b_ring[1], b_ring[2], kNoGeometry, 0, 1, 0).value();
+  const EdgeId b2 = editor.add_edge(b_ring[2], b_ring[3], kNoGeometry, 0, 1, 0).value();
+  const EdgeId b3 = editor.add_edge(b_ring[3], b_ring[0], kNoGeometry, 0, 1, 0).value();
+  const EdgeId t0 = editor.add_edge(t_ring[0], t_ring[1], kNoGeometry, 0, 1, 0).value();
+  const EdgeId t1 = editor.add_edge(t_ring[1], t_ring[2], kNoGeometry, 0, 1, 0).value();
+  const EdgeId t2 = editor.add_edge(t_ring[2], t_ring[3], kNoGeometry, 0, 1, 0).value();
+  const EdgeId t3 = editor.add_edge(t_ring[3], t_ring[0], kNoGeometry, 0, 1, 0).value();
+  const EdgeId lv0 = editor.add_edge(b_ring[0], l_ring[0], kNoGeometry, 0, 1, 0).value();
+  const EdgeId lv1 = editor.add_edge(b_ring[1], l_ring[1], kNoGeometry, 0, 1, 0).value();
+  const EdgeId lv2 = editor.add_edge(b_ring[2], l_ring[2], kNoGeometry, 0, 1, 0).value();
+  const EdgeId lv3 = editor.add_edge(b_ring[3], l_ring[3], kNoGeometry, 0, 1, 0).value();
+  const EdgeId uv0 = editor.add_edge(u_ring[0], t_ring[0], kNoGeometry, 0, 1, 0).value();
+  const EdgeId uv1 = editor.add_edge(u_ring[1], t_ring[1], kNoGeometry, 0, 1, 0).value();
+  const EdgeId uv2 = editor.add_edge(u_ring[2], t_ring[2], kNoGeometry, 0, 1, 0).value();
+  const EdgeId uv3 = editor.add_edge(u_ring[3], t_ring[3], kNoGeometry, 0, 1, 0).value();
+
+  const std::array<EdgeId, 4> lower_rim{
+      editor.add_edge(l_ring[0], l_ring[1], kNoGeometry, 0, 1, 0).value(),
+      editor.add_edge(l_ring[1], l_ring[2], kNoGeometry, 0, 1, 0).value(),
+      editor.add_edge(l_ring[2], l_ring[3], kNoGeometry, 0, 1, 0).value(),
+      editor.add_edge(l_ring[3], l_ring[0], kNoGeometry, 0, 1, 0).value()};
+
+  // Upper rim edges run opposite to the lower ones: ur0 goes from u10 to u00.
+  const std::uint32_t line_u0 =
+      editor.add_curve(LineCurve3{{1.0, 0.0, 0.5}, {-1.0, 0.0, 0.0}});
+  const std::uint32_t line_u1 =
+      editor.add_curve(LineCurve3{{1.0, 1.0, 0.5}, {0.0, -1.0, 0.0}});
+  const std::uint32_t line_u2 =
+      editor.add_curve(LineCurve3{{0.0, 1.0, 0.5}, {1.0, 0.0, 0.0}});
+  const std::uint32_t line_u3 =
+      editor.add_curve(LineCurve3{{0.0, 0.0, 0.5}, {0.0, 1.0, 0.0}});
+  const std::array<EdgeId, 4> upper_rim{
+      editor.add_edge(u_ring[1], u_ring[0], line_u0, 0.0, 1.0, 0).value(),
+      editor.add_edge(u_ring[2], u_ring[1], line_u1, 0.0, 1.0, 0).value(),
+      editor.add_edge(u_ring[3], u_ring[2], line_u2, 0.0, 1.0, 0).value(),
+      editor.add_edge(u_ring[0], u_ring[3], line_u3, 0.0, 1.0, 0).value()};
+
+  const std::array<fixture_detail::CoedgeUse, 4> bottom_loop{{
+      {b3, true}, {b2, true}, {b1, true}, {b0, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> top_loop{{
+      {t0, false}, {t1, false}, {t2, false}, {t3, false}}};
+  const std::array<fixture_detail::CoedgeUse, 4> lower_south_loop{{
+      {b0, false}, {lv1, false}, {lower_rim[0], true}, {lv0, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> lower_east_loop{{
+      {b1, false}, {lv2, false}, {lower_rim[1], true}, {lv1, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> lower_north_loop{{
+      {b2, false}, {lv3, false}, {lower_rim[2], true}, {lv2, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> lower_west_loop{{
+      {b3, false}, {lv0, false}, {lower_rim[3], true}, {lv3, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> upper_south_loop{{
+      {upper_rim[0], true}, {uv1, false}, {t0, true}, {uv0, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> upper_east_loop{{
+      {upper_rim[1], true}, {uv2, false}, {t1, true}, {uv1, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> upper_north_loop{{
+      {upper_rim[2], true}, {uv3, false}, {t2, true}, {uv2, true}}};
+  const std::array<fixture_detail::CoedgeUse, 4> upper_west_loop{{
+      {upper_rim[3], true}, {uv0, false}, {t3, true}, {uv3, true}}};
+
+  const auto add_face = [&](const Plane3& plane,
+                            std::span<const fixture_detail::CoedgeUse> loop) {
+    return fixture_detail::add_pcurved_face(editor, plane, 0.0, loop);
+  };
+
+  const FaceId bottom = add_face(Plane3{{0.0, 0.0, -1.0}, 0.0}, bottom_loop);
+  const FaceId top = add_face(Plane3{{0.0, 0.0, 1.0}, 1.0}, top_loop);
+  const FaceId lower_south = add_face(Plane3{{0.0, -1.0, 0.0}, 0.0}, lower_south_loop);
+  const FaceId lower_east = add_face(Plane3{{1.0, 0.0, 0.0}, 1.0}, lower_east_loop);
+  const FaceId lower_north = add_face(Plane3{{0.0, 1.0, 0.0}, 1.0}, lower_north_loop);
+  const FaceId lower_west = add_face(Plane3{{-1.0, 0.0, 0.0}, 0.0}, lower_west_loop);
+  const FaceId upper_south = add_face(Plane3{{0.0, -1.0, 0.0}, 0.0}, upper_south_loop);
+  const FaceId upper_east = add_face(Plane3{{1.0, 0.0, 0.0}, 1.0}, upper_east_loop);
+  const FaceId upper_north = add_face(Plane3{{0.0, 1.0, 0.0}, 1.0}, upper_north_loop);
+  const FaceId upper_west = add_face(Plane3{{-1.0, 0.0, 0.0}, 0.0}, upper_west_loop);
+
+  const std::array<FaceId, 10> faces{bottom, top,      lower_south, lower_east,
+                                     lower_north, lower_west, upper_south, upper_east,
+                                     upper_north, upper_west};
+  const ShellId shell = editor.add_shell(faces, false).value();
+  const std::array<ShellId, 1> shells{shell};
+  const SolidId solid = editor.add_solid(shells, 0.0).value();
+  FlippedRimBox box;
+  box.brep = editor.commit().value();
+  box.solid = solid;
+  box.lower_rim = lower_rim;
+  box.upper_rim = upper_rim;
+  return box;
+}
+
 }  // namespace geom::test
