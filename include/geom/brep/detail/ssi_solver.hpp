@@ -21,7 +21,8 @@ inline namespace v1 {
 // the refined seeds, p is the point on surface A at (ua[0], ua[1]), and residual
 // is ssi_residual for those parameters. Periodic parameters are stored folded
 // into [-pi, pi), so ua/va always name the same parameter value the patch
-// domain uses.
+// domain uses. Closed analytic curves are the exception: they may store one
+// monotone lap (for example u = 0..2*pi); patch_contains folds on lookup.
 struct SsiPoint {
   std::array<double, 2> ua{};
   std::array<double, 2> va{};

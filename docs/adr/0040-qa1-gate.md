@@ -18,7 +18,7 @@ ms under load). The stage split for one union call (914 ms instrumented run) is:
 
 | stage | ms | notes |
 | --- | ---: | --- |
-| `split_segments` | 534 | bbox enumeration 242; cheap disjoint reject 120; 44,462 proper crossings 77; shared-endpoint handling, setup, sorts, emit 83 |
+| `split_segments` | 534 | bbox enumeration 242; cheap disjoint reject 120; 44,462 proper crossings 77; shared-endpoint handling, setup, sorts, emit 83; clock/remainder 12 |
 | arrangement (DCEL) | 340 | edges 93, fan 73, faces 64, vertices 49, winding 38, rest 23 |
 | `boolean2` post-build | 41 | classify, trace, assemble |
 | total | 915 (914.1 unrounded) | 100,000 input segments |
@@ -59,7 +59,7 @@ part of this slice. This is recorded so the next slice does not repeat it.
   remaining optimization path (flat DCEL, sweep, threading) is tracked as
   future work rather than silently bundled into a gate change.
 - The QA-9 gate is closed separately by the exact analytic sphere-plane path
-  (median 83.1–93.6 us, measured in `docs/benchmarks/m3-5.md`).
+  (median 62.8-97.7 us, measured in `docs/benchmarks/m3-5.md`). A noisy runner can flake the 100 us gate; recorded as a risk.
 
 ## Alternatives considered
 
