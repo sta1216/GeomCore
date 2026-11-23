@@ -481,6 +481,42 @@ inline Result<FaceUvRun> face_uv_coedge_run(const Brep& brep, const Coedge& coed
   return run;
 }
 
+// Two chart parameters that agree to this many radians describe the same
+// stored chart point. The slack only absorbs floating point noise; it is not a
+// geometric length, so it does not scale with the model.
+inline constexpr double kFaceUvAngleTolerance = 1e-12;
+
+// True when `position` projects to a singular chart point: a sphere pole or a
+// cone apex, where the azimuth is not defined. Two different chart columns can
+// meet at such a point, so a 3D-coincident junction there is not necessarily a
+// duplicate. Mirrors the singular branches of face_uv_project_sphere and
+// face_uv_project_cone.
+inline bool face_uv_singular_chart_point(const FaceUvProjection& projection,
+                                         const Point3d& position) {
+  if (projection.surface == nullptr) return false;
+  if (const Sphere3* sphere = std::get_if<Sphere3>(projection.surface)) {
+    const Vec3d offset = position - sphere->center;
+    const Vec3d radial = offset - sphere->axis * dot(offset, sphere->axis);
+    return norm2(radial) <= sphere->radius * 1e-12;
+  }
+  if (const Cone3* cone = std::get_if<Cone3>(projection.surface)) {
+    const double v_apex = cone->radius / std::tan(cone->half_angle);
+    const double v = dot(position - cone->origin, cone->axis);
+    return std::fabs(v - v_apex) <= 1e-9 * std::max(1.0, v_apex);
+  }
+  return false;
+}
+
+// True when `delta` is zero or a whole number of parameter turns, within
+// `tolerance`. Parameter values are angles, so the tolerance acts as an angular
+// slack; at a seam the same chart point may be stored on either side of a
+// period boundary.
+inline bool face_uv_period_shift(double delta, double tolerance) {
+  const double turn = 2.0 * kFaceUvPi;
+  const double turns = delta / turn;
+  return std::fabs(turns - std::round(turns)) * turn <= tolerance;
+}
+
 inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, LoopId loop_id,
                                             const Loop& loop, const FaceUvProjection& projection,
                                             double tolerance) {
@@ -496,6 +532,7 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
   Point3d last_position{};
   double extent = 0.0;
   bool previous_from_pcurve = false;
+  Point2d previous_raw{};
 
   CoedgeId current = loop.start;
   std::size_t steps = 0u;
@@ -517,6 +554,7 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
 
     for (std::size_t i = 0; i < run.points.size(); ++i) {
       Point2d uv = run.points[i];
+      const Point2d raw = uv;
       if (!face_uv_point2d_finite(uv) || !face_uv_point3d_finite(run.positions[i])) {
         return Error{Errc::non_finite, "face_loops_uv: loop point is not finite", 0u, 0u};
       }
@@ -533,14 +571,45 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
                                    uv[0] == previous[0] && uv[1] == previous[1];
           const bool position_junction =
               face_uv_distance(run.positions[i], last_position) <= tolerance;
-          if (uv_junction || position_junction) continue;
-          return Error{Errc::invalid_topology, "face_loops_uv: coedge chain is not continuous",
-                       current.index(), 0u};
+          if (position_junction &&
+              face_uv_singular_chart_point(projection, run.positions[i])) {
+            // A pole or apex has no azimuth: a run may arrive on one chart
+            // column and leave on another while the 3D point is identical. A
+            // copy at the same stored angle is the seam retracing itself and is
+            // still dropped; a different column is a genuine chart corner and
+            // must survive, or a lune chart loses a whole side.
+            const bool same_stored_angle =
+                std::fabs(raw[0] - previous_raw[0]) <= kFaceUvAngleTolerance &&
+                std::fabs(raw[1] - previous_raw[1]) <= kFaceUvAngleTolerance;
+            if (same_stored_angle) continue;
+            // Keep the run's own azimuth: unwrapping against the previous
+            // column would fold the new column back onto the old one.
+            uv = raw;
+          } else if (uv_junction ||
+                     (projection.periodic_u() &&
+                      face_uv_period_shift(raw[0] - previous_raw[0], kFaceUvAngleTolerance)) ||
+                     (projection.periodic_v() &&
+                      face_uv_period_shift(raw[1] - previous_raw[1], kFaceUvAngleTolerance)) ||
+                     (std::fabs(raw[0] - previous_raw[0]) <= kFaceUvAngleTolerance &&
+                      std::fabs(raw[1] - previous_raw[1]) <= kFaceUvAngleTolerance)) {
+            continue;
+          } else {
+            return Error{Errc::invalid_topology, "face_loops_uv: coedge chain is not continuous",
+                         current.index(), 0u};
+          }
         }
       }
       result.points.push_back(uv);
+      previous_raw = raw;
       // The segment ending at this point starts at the previous loop point.
-      if (i > 0u) result.arcs.push_back(run.segments[i - 1u]);
+      if (i > 0u) {
+        result.arcs.push_back(run.segments[i - 1u]);
+      } else if (started) {
+        // A second chart column meeting the previous run at a pole/apex starts
+        // a degenerate 3D segment. It carries no circle arc, but the provenance
+        // array must stay aligned with the point array.
+        result.arcs.push_back(std::nullopt);
+      }
       if (!started) {
         first_position = run.positions[i];
         started = true;

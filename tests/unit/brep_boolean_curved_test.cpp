@@ -2741,7 +2741,9 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
       max_v = std::max(max_v, point[1]);
       if (std::abs(point[1] - 0.5 * kPi) <= 1e-9) ++poles;
     }
-    CHECK(poles == 1);
+    // The chart is the full plate carree image: the rim wraps the whole 2*pi
+    // band, so the pole appears once per seam column (u = 2*pi and u = 0).
+    CHECK(poles == 2);
     CHECK(std::abs(max_v - 0.5 * kPi) <= 1e-9);
     CHECK(std::abs(min_v - rim_latitude) <= 1e-9);
   }

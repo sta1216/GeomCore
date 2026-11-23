@@ -1305,6 +1305,56 @@ TEST_CASE("a two point semicircle pcurve has no resolvable arc direction") {
   }
 }
 
+TEST_CASE("a plane junction needs matching chart angles even when it is close") {
+  geom::SolidEditor editor;
+  const std::uint32_t surface =
+      editor.add_surface(geom::Plane3{geom::Vec3d{0.0, 0.0, 1.0}, 0.0});
+  const std::uint32_t first_curve =
+      editor.add_curve(geom::LineCurve3{geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{1.0, 0.0, 0.0}});
+  const std::uint32_t second_curve =
+      editor.add_curve(geom::LineCurve3{geom::Point3d{2.0, 0.0, 0.0}, geom::Vec3d{-1.0, 0.0, 0.0}});
+  const geom::VertexId a = editor.add_vertex(geom::Point3d{0.0, 0.0, 0.0}, 0.0).value();
+  const geom::VertexId b = editor.add_vertex(geom::Point3d{1.0, 0.0, 0.0}, 0.0).value();
+  const geom::VertexId c = editor.add_vertex(geom::Point3d{2.0, 0.0, 0.0}, 0.0).value();
+  const geom::EdgeId first = editor.add_edge(a, b, first_curve, 0.0, 1.0, 0.0).value();
+  const geom::EdgeId second = editor.add_edge(c, a, second_curve, 0.0, 2.0, 0.0).value();
+  const geom::FaceId face = editor.add_face(surface, false, 0.0).value();
+  const std::array<geom::CoedgeSpec, 2> coedges{
+      geom::CoedgeSpec{first, false, geom::kNoGeometry, 0.0},
+      geom::CoedgeSpec{second, false, geom::kNoGeometry, 0.0}};
+  REQUIRE(editor.add_loop(face, coedges, true).has_value());
+
+  // The tolerance makes the 3D distance of 1.0 count as coincident. A plane has
+  // no singular point where two chart columns may meet, so the junction is a
+  // genuine discontinuity, not a seam copy.
+  const auto loops = geom::face_loops_uv(editor.brep(), face, 1.5);
+  REQUIRE_FALSE(loops.has_value());
+  CHECK(loops.error().code == geom::Errc::invalid_topology);
+  CHECK(std::string_view(loops.error().message) ==
+        "face_loops_uv: coedge chain is not continuous");
+}
+
+TEST_CASE("canonical sphere and cone charts keep their point counts") {
+  const auto sphere = geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 2.0, kTolerance);
+  REQUIRE(sphere.has_value());
+  const geom::FaceId sphere_face = face_with_surface<geom::Sphere3>(sphere.value());
+  REQUIRE_FALSE(sphere_face.is_null());
+  const auto sphere_loops = geom::face_loops_uv(sphere.value(), sphere_face, kTolerance);
+  REQUIRE(sphere_loops.has_value());
+  REQUIRE(sphere_loops.value().size() == 1u);
+  CHECK(sphere_loops.value().front().points.size() == 64u);
+
+  const auto cone = geom::make_cone(geom::Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0},
+                                    1.0, 2.0, kTolerance);
+  REQUIRE(cone.has_value());
+  const geom::FaceId cone_face = face_with_surface<geom::Cone3>(cone.value());
+  REQUIRE_FALSE(cone_face.is_null());
+  const auto cone_loops = geom::face_loops_uv(cone.value(), cone_face, kTolerance);
+  REQUIRE(cone_loops.has_value());
+  REQUIRE(cone_loops.value().size() == 1u);
+  CHECK(cone_loops.value().front().points.size() == 34u);
+}
+
 TEST_CASE("curved boolean: the sphere face exposes a synthetic boundary") {
   const double tolerance = 1e-9;
   const geom::Result<geom::Brep> sphere =
