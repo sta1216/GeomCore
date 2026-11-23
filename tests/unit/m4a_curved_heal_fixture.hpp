@@ -70,9 +70,12 @@ struct CurvedSolid {
 // cylinder, so the two carriers disagree while the rim vertices stay within
 // max_gap.
 // ---------------------------------------------------------------------------
+// `lower_top_circle_z` can lift the kept lower rim's curve without moving its
+// vertices, which models a corrupt kept edge for the kept-curve guard.
 inline CurvedSolid make_cylinder_bands(double radius, double gap,
                                        double upper_radius, bool off_surface,
-                                       bool shifted_chart) {
+                                       bool shifted_chart,
+                                       double lower_top_circle_z = 1.0) {
   SolidEditor editor;
   const std::uint32_t cylinder = editor.add_surface(Cylinder3{
       m4a_point(0.0, 0.0, 0.0), {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}, radius});
@@ -95,8 +98,9 @@ inline CurvedSolid make_cylinder_bands(double radius, double gap,
 
   const std::uint32_t circle_bottom = editor.add_curve(
       CircleCurve3{m4a_point(0.0, 0.0, 0.0), {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, radius});
-  const std::uint32_t circle_lower_top = editor.add_curve(
-      CircleCurve3{m4a_point(0.0, 0.0, 1.0), {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, radius});
+  const std::uint32_t circle_lower_top = editor.add_curve(CircleCurve3{
+      m4a_point(0.0, 0.0, lower_top_circle_z), {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0},
+      radius});
   const std::uint32_t circle_upper_bottom = editor.add_curve(CircleCurve3{
       m4a_point(0.0, 0.0, 1.0 + gap), {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, upper_radius});
   const std::uint32_t circle_upper_top = editor.add_curve(CircleCurve3{
@@ -165,6 +169,13 @@ inline CurvedSolid make_two_band_cylinder(double radius, double gap) {
 // case and 1 + 2e-7 for the carrier-rejected case.
 inline CurvedSolid make_cylinder_radius_gap(double gap, double upper_radius) {
   return make_cylinder_bands(1.0, gap, upper_radius, false, false);
+}
+
+// Case 4e: both carriers agree and every rim curve lies on the shared cylinder,
+// but the kept lower rim curve is lifted to z = 1.5 while its vertices stay at
+// z = 1. Only the kept-curve-versus-welded-vertices guard can catch this.
+inline CurvedSolid make_cylinder_kept_curve_gap(double gap) {
+  return make_cylinder_bands(1.0, gap, 1.0, false, false, 1.5);
 }
 
 // Case 4d: both bands claim the same base cylinder but the upper band's rims

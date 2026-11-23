@@ -122,6 +122,11 @@ struct HealEdgePair {
 
 struct HealPlan {
   std::vector<HealEdgePair> pairs;
+  // Best candidate pair for every boundary edge, including edges whose pairing
+  // stayed ambiguous. Geometric validation (coincident carriers, on-surface
+  // rims) uses this so a corrupt input is rejected even when the tie-break
+  // cannot pick a seam.
+  std::vector<HealEdgePair> considered;
   std::vector<HealIssue> issues;
 };
 
@@ -542,6 +547,21 @@ inline Result<HealPlan> heal_plan(const Brep& brep,
     plan.issues.push_back(issue);
   }
 
+  // Record the best candidate for every boundary edge, ambiguous or not, so the
+  // geometric guards can reject a bad carrier before the ambiguity is reported.
+  for (std::size_t index = 0; index < boundary.size(); ++index) {
+    if (accepted[index].empty()) continue;
+    const HealEdgePair& best = candidates[accepted[index][0]].pair;
+    bool seen = false;
+    for (const HealEdgePair& known : plan.considered) {
+      if (known.keep == best.keep && known.drop == best.drop) {
+        seen = true;
+        break;
+      }
+    }
+    if (!seen) plan.considered.push_back(best);
+  }
+
   const std::size_t no_candidate = std::numeric_limits<std::size_t>::max();
   std::vector<std::size_t> preferred(boundary.size(), no_candidate);
   for (std::size_t index = 0; index < boundary.size(); ++index) {
@@ -641,6 +661,179 @@ inline std::vector<EdgeId> heal_boundary_edges(const Brep& brep, SolidId solid) 
     if (id.index() < uses.size() && uses[id.index()] == 1u) boundary.push_back(id);
   }
   return boundary;
+}
+
+// Largest radius/centre/origin magnitude of a surface. Multiplied by 1e-12 it
+// supplies the geometric floor for the coincidence and on-surface guards.
+inline double heal_surface_scale(const SurfaceGeometry& surface) {
+  double scale = 0.0;
+  const auto include_point = [&scale](const Point3d& point) {
+    scale = std::max(scale, std::hypot(point[0], point[1], point[2]));
+  };
+  if (const auto* plane = std::get_if<Plane3>(&surface)) {
+    scale = std::max(scale,
+                     std::hypot(plane->normal[0], plane->normal[1],
+                                plane->normal[2]));
+    scale = std::max(scale, std::fabs(plane->offset));
+  } else if (const auto* cylinder = std::get_if<Cylinder3>(&surface)) {
+    include_point(cylinder->origin);
+    scale = std::max(scale, cylinder->radius);
+  } else if (const auto* sphere = std::get_if<Sphere3>(&surface)) {
+    include_point(sphere->center);
+    scale = std::max(scale, sphere->radius);
+  } else if (const auto* cone = std::get_if<Cone3>(&surface)) {
+    include_point(cone->origin);
+    scale = std::max(scale, cone->radius);
+  } else if (const auto* torus = std::get_if<Torus3>(&surface)) {
+    include_point(torus->center);
+    scale = std::max(scale, torus->major_radius);
+    scale = std::max(scale, torus->minor_radius);
+  }
+  return scale;
+}
+
+// True when `a` and `b` describe the same carrier surface to `tolerance`.
+// Planes are always compatible: planar healing never depended on their exact
+// placement, and the planar tests rely on that. Mixed kinds and NURBS are not
+// coincident.
+inline bool heal_surfaces_coincide(const SurfaceGeometry& a,
+                                   const SurfaceGeometry& b,
+                                   double tolerance) {
+  const bool a_plane = std::holds_alternative<Plane3>(a);
+  const bool b_plane = std::holds_alternative<Plane3>(b);
+  if (a_plane && b_plane) return true;
+
+  if (const auto* cylinder_a = std::get_if<Cylinder3>(&a)) {
+    const auto* cylinder_b = std::get_if<Cylinder3>(&b);
+    if (cylinder_b == nullptr) return false;
+    if (std::fabs(cylinder_a->radius - cylinder_b->radius) > tolerance) {
+      return false;
+    }
+    if (norm2(cross(cylinder_a->axis, cylinder_b->axis)) > tolerance) {
+      return false;
+    }
+    const Vec3d delta = cylinder_a->origin - cylinder_b->origin;
+    const Vec3d offset =
+        delta - cylinder_b->axis * dot(delta, cylinder_b->axis);
+    return norm2(offset) <= tolerance;
+  }
+
+  if (const auto* sphere_a = std::get_if<Sphere3>(&a)) {
+    const auto* sphere_b = std::get_if<Sphere3>(&b);
+    if (sphere_b == nullptr) return false;
+    return std::fabs(sphere_a->radius - sphere_b->radius) <= tolerance &&
+           norm2(sphere_a->center - sphere_b->center) <= tolerance;
+  }
+
+  if (const auto* cone_a = std::get_if<Cone3>(&a)) {
+    const auto* cone_b = std::get_if<Cone3>(&b);
+    if (cone_b == nullptr) return false;
+    if (std::fabs(cone_a->radius - cone_b->radius) > tolerance ||
+        std::fabs(cone_a->half_angle - cone_b->half_angle) > tolerance ||
+        norm2(cross(cone_a->axis, cone_b->axis)) > tolerance) {
+      return false;
+    }
+    const double tan_a = std::tan(cone_a->half_angle);
+    const double tan_b = std::tan(cone_b->half_angle);
+    if (!(tan_a > 0.0) || !(tan_b > 0.0)) return false;
+    const Point3d apex_a =
+        cone_a->origin + cone_a->axis * (cone_a->radius / tan_a);
+    const Point3d apex_b =
+        cone_b->origin + cone_b->axis * (cone_b->radius / tan_b);
+    return norm2(apex_a - apex_b) <= tolerance;
+  }
+
+  if (const auto* torus_a = std::get_if<Torus3>(&a)) {
+    const auto* torus_b = std::get_if<Torus3>(&b);
+    if (torus_b == nullptr) return false;
+    return norm2(cross(torus_a->axis, torus_b->axis)) <= tolerance &&
+           norm2(torus_a->center - torus_b->center) <= tolerance &&
+           std::fabs(torus_a->major_radius - torus_b->major_radius) <=
+               tolerance &&
+           std::fabs(torus_a->minor_radius - torus_b->minor_radius) <=
+               tolerance;
+  }
+
+  return false;
+}
+
+// Distance from `point` to the implicit surface of `surface`. An unsupported
+// kind returns infinity; heal_brep rejects those kinds before calling this.
+inline double heal_surface_residual(const SurfaceGeometry& surface,
+                                    const Point3d& point) {
+  if (const auto* plane = std::get_if<Plane3>(&surface)) {
+    return std::fabs(plane->signed_distance(point));
+  }
+  if (const auto* cylinder = std::get_if<Cylinder3>(&surface)) {
+    const Vec3d delta = point - cylinder->origin;
+    const Vec3d radial = delta - cylinder->axis * dot(delta, cylinder->axis);
+    return std::fabs(norm2(radial) - cylinder->radius);
+  }
+  if (const auto* sphere = std::get_if<Sphere3>(&surface)) {
+    return std::fabs(norm2(point - sphere->center) - sphere->radius);
+  }
+  if (const auto* cone = std::get_if<Cone3>(&surface)) {
+    const double tan_half = std::tan(cone->half_angle);
+    const Vec3d delta = point - cone->origin;
+    const double axial = dot(delta, cone->axis);
+    const Vec3d radial = delta - cone->axis * axial;
+    const double expected = cone->radius - axial * tan_half;
+    return std::fabs(norm2(radial) - expected) /
+           std::sqrt(1.0 + tan_half * tan_half);
+  }
+  if (const auto* torus = std::get_if<Torus3>(&surface)) {
+    const Vec3d delta = point - torus->center;
+    const double axial = dot(delta, torus->axis);
+    const Vec3d radial = delta - torus->axis * axial;
+    const double ring = norm2(radial) - torus->major_radius;
+    return std::fabs(std::hypot(ring, axial) - torus->minor_radius);
+  }
+  return std::numeric_limits<double>::infinity();
+}
+
+// Distance from `point` to a line or circle curve; infinity for a kind the
+// caller does not understand (NURBS is rejected by the heal_brep guards).
+inline double heal_curve_residual(const CurveGeometry& curve,
+                                  const Point3d& point) {
+  if (const auto* line = std::get_if<LineCurve3>(&curve)) {
+    const Vec3d offset = point - line->origin;
+    return norm2(offset - line->direction * dot(offset, line->direction));
+  }
+  if (const auto* circle = std::get_if<CircleCurve3>(&curve)) {
+    const Vec3d normal = cross(circle->x_axis, circle->y_axis);
+    const Vec3d delta = point - circle->center;
+    const double axial = dot(delta, normal);
+    const Vec3d radial = delta - normal * axial;
+    return std::hypot(norm2(radial) - circle->radius, axial);
+  }
+  return std::numeric_limits<double>::infinity();
+}
+
+// Samples the edge curve at t0, the parameter midpoint and t1 and requires every
+// sample to sit on `surface` within `tolerance`. Edges without geometry, and
+// curve kinds without an on-surface test here, pass through.
+inline bool heal_edge_lies_on_surface(const Brep& brep, const Edge& edge,
+                                      const SurfaceGeometry& surface,
+                                      double tolerance) {
+  if (edge.curve == kNoGeometry ||
+      edge.curve >= brep.geometry().curves.size()) {
+    return true;
+  }
+  const CurveGeometry& curve = brep.geometry().curves[edge.curve];
+  for (int sample = 0; sample < 3; ++sample) {
+    const double fraction = 0.5 * static_cast<double>(sample);
+    const double t = edge.t0 + (edge.t1 - edge.t0) * fraction;
+    Point3d point;
+    if (const auto* line = std::get_if<LineCurve3>(&curve)) {
+      point = line->eval(t);
+    } else if (const auto* circle = std::get_if<CircleCurve3>(&curve)) {
+      point = circle->eval(t);
+    } else {
+      return true;
+    }
+    if (!(heal_surface_residual(surface, point) <= tolerance)) return false;
+  }
+  return true;
 }
 
 }  // namespace detail
@@ -779,6 +972,107 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
     return HealResult{brep, std::move(rejected)};
   };
 
+  // The geometric guards below run on the immutable input after the plan is
+  // known and before any SolidEditor mutation, so a rejection leaves the brep
+  // exactly as it arrived.
+  double surface_scale = 0.0;
+  for (const SurfaceGeometry& surface : surfaces) {
+    surface_scale = std::max(surface_scale, detail::heal_surface_scale(surface));
+  }
+  const double check_tolerance =
+      std::max(options.tolerance, 1e-12 * surface_scale);
+
+  // The first coedge use of a boundary edge belongs to the target solid (the
+  // shared-solid check above guarantees it), so it names the face whose surface
+  // the edge is expected to lie on.
+  const auto edge_surface = [&](EdgeId edge_id) -> const SurfaceGeometry* {
+    for (const CoedgeId coedge_id : edge_coedges[edge_id.index()]) {
+      const FaceId face_id = brep.coedge(coedge_id).face;
+      if (!brep.face_alive(face_id)) continue;
+      const Face& face = brep.face(face_id);
+      if (face.surface != kNoGeometry && face.surface < surfaces.size()) {
+        return &surfaces[face.surface];
+      }
+    }
+    return nullptr;
+  };
+
+  for (const detail::HealEdgePair& pair : plan.considered) {
+    const SurfaceGeometry* keep_surface = edge_surface(pair.keep);
+    const SurfaceGeometry* drop_surface = edge_surface(pair.drop);
+    if (keep_surface == nullptr || drop_surface == nullptr) continue;
+    if (!detail::heal_surfaces_coincide(*keep_surface, *drop_surface,
+                                        check_tolerance)) {
+      return Error{Errc::unsupported,
+                   "heal_brep: gap faces do not share the same surface",
+                   pair.keep.index(), pair.drop.index()};
+    }
+  }
+
+  for (const detail::HealEdgePair& pair : plan.considered) {
+    const SurfaceGeometry* keep_surface = edge_surface(pair.keep);
+    const SurfaceGeometry* drop_surface = edge_surface(pair.drop);
+    const Edge& keep_edge = brep.edge(pair.keep);
+    const Edge& drop_edge = brep.edge(pair.drop);
+    const bool keep_off_surface =
+        keep_surface != nullptr &&
+        !detail::heal_edge_lies_on_surface(brep, keep_edge, *keep_surface,
+                                           check_tolerance);
+    const bool drop_off_surface =
+        drop_surface != nullptr &&
+        !detail::heal_edge_lies_on_surface(brep, drop_edge, *drop_surface,
+                                           check_tolerance);
+    if (keep_off_surface || drop_off_surface) {
+      return Error{Errc::unsupported,
+                   "heal_brep: gap edge is not on its face surface",
+                   pair.keep.index(), pair.drop.index()};
+    }
+  }
+
+  // The kept edge's curve survives merge_edges, so after welding it must still
+  // pass through both of the edge's final keep vertices. Resolve chains to the
+  // single surviving vertex before measuring.
+  const Result<std::vector<detail::HealVertexWeld>> welds_result =
+      detail::heal_dedup_welds(brep, plan.pairs);
+  if (!welds_result) return welds_result.error();
+
+  std::vector<std::uint32_t> final_keep(brep.vertices().size());
+  for (std::size_t index = 0; index < final_keep.size(); ++index) {
+    final_keep[index] = static_cast<std::uint32_t>(index);
+  }
+  for (const detail::HealVertexWeld& weld : welds_result.value()) {
+    if (weld.keep.index() < final_keep.size() &&
+        weld.drop.index() < final_keep.size()) {
+      final_keep[weld.drop.index()] = weld.keep.index();
+    }
+  }
+  const auto root_of = [&final_keep](std::uint32_t index) {
+    std::uint32_t root = index;
+    while (final_keep[root] != root) {
+      final_keep[root] = final_keep[final_keep[root]];
+      root = final_keep[root];
+    }
+    return root;
+  };
+
+  for (const detail::HealEdgePair& pair : plan.pairs) {
+    const Edge& keep_edge = brep.edge(pair.keep);
+    if (keep_edge.curve == kNoGeometry ||
+        keep_edge.curve >= curves.size()) {
+      continue;
+    }
+    const CurveGeometry& curve = curves[keep_edge.curve];
+    for (const VertexId endpoint : {keep_edge.v0, keep_edge.v1}) {
+      const Point3d mapped = brep.vertices()[root_of(endpoint.index())].point;
+      if (!(detail::heal_curve_residual(curve, mapped) <= check_tolerance)) {
+        return Error{Errc::unsupported,
+                     "heal_brep: kept edge curve does not match its welded "
+                     "vertices",
+                     pair.keep.index(), pair.drop.index()};
+      }
+    }
+  }
+
   if (plan.pairs.empty()) {
     report.issues = plan.issues;
     if (!boundary.empty() && report.issues.empty()) {
@@ -802,10 +1096,6 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
       }
     }
   }
-
-  const Result<std::vector<detail::HealVertexWeld>> welds_result =
-      detail::heal_dedup_welds(brep, plan.pairs);
-  if (!welds_result) return welds_result.error();
 
   SolidEditor editor(brep);
   const Result<std::vector<detail::HealVertexWeld>> applied_result =

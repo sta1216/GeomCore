@@ -20,9 +20,31 @@ constexpr std::string_view kSurfaceKindMessage =
     "heal_brep: surface type is not supported yet";
 constexpr std::string_view kCurveKindMessage =
     "heal_brep: curve type is not supported yet";
+constexpr std::string_view kCarrierMessage =
+    "heal_brep: gap faces do not share the same surface";
+constexpr std::string_view kOffSurfaceMessage =
+    "heal_brep: gap edge is not on its face surface";
+constexpr std::string_view kKeptCurveMessage =
+    "heal_brep: kept edge curve does not match its welded vertices";
 
 bool contains(std::string_view text, std::string_view needle) {
   return text.find(needle) != std::string_view::npos;
+}
+
+// Counts plus every vertex position, so a rejection that mutated the input
+// would be visible even if the entity counts stayed the same.
+std::vector<double> brep_fingerprint(const Brep& brep) {
+  std::vector<double> fingerprint{
+      static_cast<double>(brep.vertex_count()),
+      static_cast<double>(brep.edge_count()),
+      static_cast<double>(brep.face_count())};
+  for (const VertexId id : brep.vertex_ids()) {
+    const Point3d point = brep.vertex(id).point;
+    fingerprint.push_back(point[0]);
+    fingerprint.push_back(point[1]);
+    fingerprint.push_back(point[2]);
+  }
+  return fingerprint;
 }
 
 std::size_t count_issues(const detail::HealPlan& plan, HealIssueKind kind) {
@@ -118,4 +140,74 @@ TEST_CASE("heal: planar ambiguous rims keep ambiguous_gap through the tie-break"
     ambiguous_edges.push_back(issue.entity_a);
   }
   CHECK(ambiguous_edges == std::vector<std::uint32_t>{0, 1, 2, 3});
+}
+
+TEST_CASE("heal: a cylinder gap with mismatched carriers is rejected") {
+  const test::m4a::CurvedSolid cylinder =
+      test::m4a::make_cylinder_radius_gap(2e-7, 1.0 + 2e-7);
+  const std::vector<double> before = brep_fingerprint(cylinder.brep);
+
+  const auto healed = heal_brep(cylinder.brep, cylinder.solid, {});
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::unsupported);
+  CHECK(std::string_view(healed.error().message) == kCarrierMessage);
+  CHECK(healed.error().context_a == 2u);
+  CHECK(healed.error().context_b == 4u);
+  CHECK(brep_fingerprint(cylinder.brep) == before);
+}
+
+TEST_CASE("heal: a plane lid over a cylinder wall is rejected") {
+  const test::m4a::CurvedSolid cylinder =
+      test::m4a::make_cylinder_plane_gap(2e-7);
+  const std::vector<double> before = brep_fingerprint(cylinder.brep);
+
+  const auto healed = heal_brep(cylinder.brep, cylinder.solid, {});
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::unsupported);
+  CHECK(std::string_view(healed.error().message) == kCarrierMessage);
+  CHECK(healed.error().context_a == 2u);
+  CHECK(healed.error().context_b == 4u);
+  CHECK(brep_fingerprint(cylinder.brep) == before);
+}
+
+TEST_CASE("heal: gap rims floating off their cylinder are rejected") {
+  const test::m4a::CurvedSolid cylinder =
+      test::m4a::make_cylinder_off_surface_gap(2e-7);
+  const std::vector<double> before = brep_fingerprint(cylinder.brep);
+
+  const auto healed = heal_brep(cylinder.brep, cylinder.solid, {});
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::unsupported);
+  CHECK(std::string_view(healed.error().message) == kOffSurfaceMessage);
+  CHECK(healed.error().context_a == 2u);
+  CHECK(healed.error().context_b == 4u);
+  CHECK(brep_fingerprint(cylinder.brep) == before);
+}
+
+TEST_CASE("heal: a kept curve must pass through its welded vertices") {
+  const test::m4a::CurvedSolid cylinder =
+      test::m4a::make_cylinder_kept_curve_gap(2e-7);
+  const std::vector<double> before = brep_fingerprint(cylinder.brep);
+
+  const auto healed = heal_brep(cylinder.brep, cylinder.solid, {});
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::unsupported);
+  CHECK(std::string_view(healed.error().message) == kKeptCurveMessage);
+  CHECK(healed.error().context_a == 2u);
+  CHECK(healed.error().context_b == 4u);
+  CHECK(brep_fingerprint(cylinder.brep) == before);
+}
+
+TEST_CASE("heal: a radius mismatch beyond max_gap stays a gap_too_large report") {
+  const test::m4a::CurvedSolid cylinder =
+      test::m4a::make_cylinder_radius_gap(1e-3, 1.001);
+
+  const auto healed = heal_brep(cylinder.brep, cylinder.solid, {});
+  REQUIRE(healed.has_value());
+  CHECK_FALSE(healed.value().report.changed);
+  REQUIRE_FALSE(healed.value().report.issues.empty());
+  const HealIssue& issue = healed.value().report.issues.front();
+  CHECK(issue.kind == HealIssueKind::gap_too_large);
+  CHECK(issue.entity_a == 2u);
+  CHECK(issue.entity_b == 4u);
 }
