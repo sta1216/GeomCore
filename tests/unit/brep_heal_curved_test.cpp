@@ -1,7 +1,9 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 #include <vector>
 
@@ -51,6 +53,96 @@ std::size_t count_issues(const detail::HealPlan& plan, HealIssueKind kind) {
   return static_cast<std::size_t>(std::count_if(
       plan.issues.begin(), plan.issues.end(),
       [kind](const HealIssue& issue) { return issue.kind == kind; }));
+}
+
+// Signed uv area of a closed polygon (shoelace formula).
+double shoelace_area(const std::vector<Point2d>& points) {
+  double twice = 0.0;
+  for (std::size_t i = 0; i < points.size(); ++i) {
+    const Point2d& a = points[i];
+    const Point2d& b = points[(i + 1) % points.size()];
+    twice += a[0] * b[1] - b[0] * a[1];
+  }
+  return 0.5 * twice;
+}
+
+struct UvBounds {
+  double u_min = std::numeric_limits<double>::infinity();
+  double u_max = -std::numeric_limits<double>::infinity();
+  double v_min = std::numeric_limits<double>::infinity();
+  double v_max = -std::numeric_limits<double>::infinity();
+};
+
+UvBounds uv_bounds(const std::vector<Point2d>& points) {
+  UvBounds bounds;
+  for (const Point2d& point : points) {
+    bounds.u_min = std::min(bounds.u_min, point[0]);
+    bounds.u_max = std::max(bounds.u_max, point[0]);
+    bounds.v_min = std::min(bounds.v_min, point[1]);
+    bounds.v_max = std::max(bounds.v_max, point[1]);
+  }
+  return bounds;
+}
+
+// A sphere lune is a parameter rectangle, so its area is the exact integral of
+// the surface metric over the loop's uv bounds. Summing the uv polygon instead
+// would drop the polar sliver where the pcurve chord meets the pole.
+double sphere_area(const std::vector<FaceUvLoop>& loops, double radius) {
+  double area = 0.0;
+  for (const FaceUvLoop& loop : loops) {
+    const UvBounds bounds = uv_bounds(loop.points);
+    area += radius * radius * (bounds.u_max - bounds.u_min) *
+            (std::sin(bounds.v_max) - std::sin(bounds.v_min));
+  }
+  return area;
+}
+
+// Every coedge of `face_id` must carry a pcurve, circle edges must be sampled
+// with interior points, and every stored uv point must evaluate back onto its
+// carrier curve and re-project to the same parameter.
+void check_face_pcurves(const Brep& brep, FaceId face_id) {
+  const Result<detail::FaceUvProjection> projection =
+      detail::face_uv_projection(brep, brep.face(face_id), 1e-9);
+  REQUIRE(projection.has_value());
+  const Result<std::vector<FaceUvLoop>> loops =
+      face_loops_uv(brep, face_id, 1e-9);
+  REQUIRE(loops.has_value());
+
+  std::size_t coedges = 0;
+  for (const CoedgeId coedge_id : brep.coedge_ids()) {
+    const Coedge& coedge = brep.coedge(coedge_id);
+    if (coedge.face != face_id) continue;
+    ++coedges;
+    REQUIRE(coedge.pcurve != kNoGeometry);
+    REQUIRE(coedge.pcurve < brep.geometry().pcurves.size());
+    const Pcurve2d& pcurve = brep.geometry().pcurves[coedge.pcurve];
+    REQUIRE(pcurve.points.size() >= 2u);
+
+    const Edge& edge = brep.edge(coedge.edge);
+    REQUIRE(edge.curve != kNoGeometry);
+    REQUIRE(edge.curve < brep.geometry().curves.size());
+    const CurveGeometry& curve = brep.geometry().curves[edge.curve];
+    if (std::get_if<CircleCurve3>(&curve) != nullptr) {
+      CHECK(pcurve.points.size() > 2u);
+      for (const Point2d& uv : pcurve.points) {
+        const Point3d point = detail::face_uv_eval(projection.value(), uv);
+        CHECK(detail::heal_curve_residual(curve, point) <= 1e-9);
+        const Result<Point2d> back =
+            detail::face_uv_project(projection.value(), point, uv[0], true);
+        REQUIRE(back.has_value());
+        double u = back.value()[0];
+        if (projection.value().periodic_u()) {
+          u = detail::face_uv_unwrap(u, uv[0]);
+        }
+        CHECK(std::fabs(u - uv[0]) <= 1e-9);
+        CHECK(std::fabs(back.value()[1] - uv[1]) <= 1e-9);
+      }
+    } else {
+      CHECK(std::get_if<LineCurve3>(&curve) != nullptr);
+      CHECK(pcurve.points.size() == 2u);
+    }
+  }
+  CHECK(coedges > 0u);
 }
 
 }  // namespace
@@ -210,4 +302,169 @@ TEST_CASE("heal: a radius mismatch beyond max_gap stays a gap_too_large report")
   CHECK(issue.kind == HealIssueKind::gap_too_large);
   CHECK(issue.entity_a == 2u);
   CHECK(issue.entity_b == 4u);
+}
+
+TEST_CASE("heal: a curved gap rebuilds arc pcurves") {
+  constexpr double gap = 1e-6;
+
+  SUBCASE("cylinder") {
+    const test::m4a::CurvedSolid fixture =
+        test::m4a::make_two_band_cylinder(1.0, gap);
+    const auto healed = heal_brep(fixture.brep, fixture.solid, {});
+    REQUIRE(healed.has_value());
+    CHECK(healed.value().report.changed);
+    CHECK(healed.value().report.issues.empty());
+    const Brep& brep = healed.value().brep;
+
+    std::size_t rebuilt = 0;
+    for (const FaceId face_id : brep.face_ids()) {
+      bool any = false;
+      bool all = true;
+      for (const CoedgeId coedge_id : brep.coedge_ids()) {
+        if (brep.coedge(coedge_id).face != face_id) continue;
+        const bool has = brep.coedge(coedge_id).pcurve != kNoGeometry;
+        any = any || has;
+        all = all && has;
+      }
+      CHECK(any == all);
+      if (any) {
+        ++rebuilt;
+        check_face_pcurves(brep, face_id);
+      }
+    }
+    CHECK(rebuilt == 2u);
+
+    std::size_t circles = 0;
+    std::size_t lines = 0;
+    for (const EdgeId edge_id : brep.edge_ids()) {
+      const Edge& edge = brep.edge(edge_id);
+      REQUIRE(edge.curve != kNoGeometry);
+      const CurveGeometry& curve = brep.geometry().curves[edge.curve];
+      if (std::get_if<CircleCurve3>(&curve) != nullptr) {
+        ++circles;
+      } else {
+        REQUIRE(std::get_if<LineCurve3>(&curve) != nullptr);
+        ++lines;
+      }
+    }
+    CHECK(circles == 6u);
+    CHECK(lines == 2u);
+
+
+    std::size_t lateral_points = 0;
+    std::size_t cap_points = 0;
+    double radius = 0.0;
+    double lateral_uv_area = 0.0;
+    for (const FaceId face_id : brep.face_ids()) {
+      const auto loops = face_loops_uv(brep, face_id, 1e-9);
+      REQUIRE(loops.has_value());
+      REQUIRE(loops.value().size() == 1u);
+      const std::vector<Point2d>& points = loops.value().front().points;
+      const SurfaceGeometry& surface =
+          brep.geometry().surfaces[brep.face(face_id).surface];
+      if (const auto* cylinder = std::get_if<Cylinder3>(&surface)) {
+        lateral_points = points.size();
+        radius = cylinder->radius;
+        lateral_uv_area += std::fabs(shoelace_area(points));
+      } else {
+        cap_points = points.size();
+      }
+    }
+    // Collinear simplification leaves one interior sample per circle coedge, so
+    // the rebuilt lateral chart is compact (3+3+2+3+3+2 minus five junction
+    // drops and the closing duplicate). The cap stores no pcurves and keeps the
+    // sampled resolution of its two half circles.
+    CHECK(lateral_points == 10u);
+    CHECK(cap_points == 64u);
+    CHECK(std::fabs(radius - 1.0) <= 1e-12);
+
+    const double area = radius * lateral_uv_area;
+    const double expected = test::m4a::kTwoPi * 2.0;
+    CHECK(std::fabs(area - expected) <= 1e-6 * expected);
+    CHECK(std::fabs(area - test::m4a::kTwoPi * (2.0 + gap)) <= 1e-9);
+  }
+
+  SUBCASE("sphere") {
+    constexpr double eps = 5e-7;
+    const test::m4a::CurvedSolid fixture = test::m4a::make_sphere_gap(eps);
+    const auto healed = heal_brep(fixture.brep, fixture.solid, {});
+    REQUIRE(healed.has_value());
+    CHECK(healed.value().report.changed);
+    CHECK(healed.value().report.issues.empty());
+    const Brep& brep = healed.value().brep;
+    REQUIRE(brep.face_count() == 4u);
+
+    double area = 0.0;
+    for (const FaceId face_id : brep.face_ids()) {
+      check_face_pcurves(brep, face_id);
+      const auto loops = face_loops_uv(brep, face_id, 1e-9);
+      REQUIRE(loops.has_value());
+      REQUIRE(loops.value().size() == 1u);
+      const std::vector<Point2d>& points = loops.value().front().points;
+      CHECK(shoelace_area(points) > 0.0);
+      const auto* sphere = std::get_if<Sphere3>(
+          &brep.geometry().surfaces[brep.face(face_id).surface]);
+      REQUIRE(sphere != nullptr);
+      area += sphere_area(loops.value(), sphere->radius);
+    }
+    CHECK(std::fabs(area - 4.0 * test::m4a::kPi) <= 1e-6);
+
+    // The south-west lune sits on the negative-u side of the sphere: after the
+    // gap is sewn its equator coedge belongs to the kept north circle, and the
+    // chart must unwrap to [-pi, 0] instead of [0, 2*pi].
+    const std::vector<FaceId> faces = brep.face_ids();
+    REQUIRE(faces.size() == 4u);
+    const auto southwest = face_loops_uv(brep, faces[3], 1e-9);
+    REQUIRE(southwest.has_value());
+    REQUIRE(southwest.value().size() == 1u);
+    const UvBounds bounds = uv_bounds(southwest.value().front().points);
+    CHECK(bounds.u_min >= -test::m4a::kPi - 1e-9);
+    CHECK(bounds.u_max <= 1e-9);
+  }
+
+  SUBCASE("cone") {
+    // The upper cone band ends exactly at the apex, so this subcase exercises
+    // the apex fallback of face_uv_project: the apex projection is undefined
+    // from its own coordinates and reuses the previous u.
+    constexpr double cone_gap = 1e-7;
+    const test::m4a::CurvedSolid fixture = test::m4a::make_cone_gap(cone_gap);
+    const auto healed = heal_brep(fixture.brep, fixture.solid, {});
+    REQUIRE(healed.has_value());
+    CHECK(healed.value().report.changed);
+    CHECK(healed.value().report.issues.empty());
+    const Brep& brep = healed.value().brep;
+
+    std::size_t rebuilt = 0;
+    for (const FaceId face_id : brep.face_ids()) {
+      bool any = false;
+      bool all = true;
+      for (const CoedgeId coedge_id : brep.coedge_ids()) {
+        if (brep.coedge(coedge_id).face != face_id) continue;
+        const bool has = brep.coedge(coedge_id).pcurve != kNoGeometry;
+        any = any || has;
+        all = all && has;
+      }
+      CHECK(any == all);
+      if (any) {
+        ++rebuilt;
+        check_face_pcurves(brep, face_id);
+      }
+    }
+    CHECK(rebuilt == 2u);
+
+    for (const FaceId face_id : brep.face_ids()) {
+      const auto loops = face_loops_uv(brep, face_id, 1e-9);
+      REQUIRE(loops.has_value());
+      REQUIRE(loops.value().size() == 1u);
+      const auto* cone = std::get_if<Cone3>(
+          &brep.geometry().surfaces[brep.face(face_id).surface]);
+      if (cone == nullptr) continue;
+      // The apex fan stays on the upper cone chart: every projected point is
+      // inside the cone parameter box v in [0, height].
+      for (const Point2d& uv : loops.value().front().points) {
+        CHECK(uv[1] >= -1e-9);
+        CHECK(uv[1] <= 2.0 + 1e-9);
+      }
+    }
+  }
 }

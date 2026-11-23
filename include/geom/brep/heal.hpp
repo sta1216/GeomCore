@@ -836,6 +836,227 @@ inline bool heal_edge_lies_on_surface(const Brep& brep, const Edge& edge,
   return true;
 }
 
+// Samples the 3D path of `coedge` in traversal order, from the coedge's start
+// vertex to its end vertex. The endpoint samples come from the vertices, so a
+// vertex that was just welded projects at its new position. Line and circle
+// carriers are supported; a circle segment spans at most a tenth of a turn and
+// the sample count is capped so a closed rim stays bounded.
+inline Result<std::vector<Point3d>> heal_coedge_path(const Brep& brep,
+                                                     const Coedge& coedge) {
+  if (!brep.edge_alive(coedge.edge)) {
+    return Error{Errc::invalid_topology, "heal_brep: coedge edge is not alive",
+                 coedge.edge.index(), 0u};
+  }
+  const Edge& edge = brep.edge(coedge.edge);
+  const Point3d start = brep.vertex(coedge.reversed ? edge.v1 : edge.v0).point;
+  const Point3d end = brep.vertex(coedge.reversed ? edge.v0 : edge.v1).point;
+  std::vector<Point3d> path{start, end};
+  if (edge.curve == kNoGeometry) return path;
+  if (edge.curve >= brep.geometry().curves.size()) {
+    return Error{Errc::invalid_topology,
+                 "heal_brep: edge curve index is out of range", edge.curve, 0u};
+  }
+  const CurveGeometry& curve = brep.geometry().curves[edge.curve];
+  if (std::get_if<LineCurve3>(&curve) != nullptr) return path;
+  const auto* circle = std::get_if<CircleCurve3>(&curve);
+  if (circle == nullptr) {
+    return Error{Errc::unsupported, "heal_brep: curve type is not supported yet",
+                 edge.curve, 0u};
+  }
+
+  double span = coedge.reversed ? edge.t0 - edge.t1 : edge.t1 - edge.t0;
+  if (edge.v0 == edge.v1) {
+    span = span < 0.0 ? -2.0 * kFaceUvPi : 2.0 * kFaceUvPi;
+  } else {
+    while (span > 2.0 * kFaceUvPi) span -= 2.0 * kFaceUvPi;
+    while (span <= -2.0 * kFaceUvPi) span += 2.0 * kFaceUvPi;
+  }
+  if (span == 0.0) return path;
+
+  std::size_t count =
+      static_cast<std::size_t>(std::ceil(std::fabs(span) / 0.1)) + 1u;
+  count = std::max<std::size_t>(count, 3u);
+  count = std::min<std::size_t>(count, 257u);
+  const double first = coedge.reversed ? edge.t1 : edge.t0;
+  std::vector<Point3d> samples;
+  samples.reserve(count);
+  samples.push_back(start);
+  for (std::size_t i = 1; i + 1 < count; ++i) {
+    const double fraction =
+        static_cast<double>(i) / static_cast<double>(count - 1);
+    samples.push_back(circle->eval(first + span * fraction));
+  }
+  samples.push_back(end);
+  return samples;
+}
+
+// Rebuilds every pcurve of `face` by walking its loops in coedge order and
+// projecting one polyline per coedge with the previous parameter as the unwrap
+// hint. The edge carriers are never touched. All loop runs are projected and
+// simplified before the first pcurve is written, but SolidEditor has no
+// transaction: a write failure leaves the editor partially updated and the
+// caller must propagate the error without committing.
+inline Result<void> heal_rebuild_face_pcurves(SolidEditor& editor, FaceId face_id,
+                                              double tolerance) {
+  const Brep& brep = editor.brep();
+  if (!brep.face_alive(face_id)) {
+    return Error{Errc::invalid_topology, "heal_brep: face is not alive",
+                 face_id.index(), 0u};
+  }
+  const Result<FaceUvProjection> projection_result =
+      face_uv_projection(brep, brep.face(face_id), tolerance);
+  if (!projection_result) return projection_result.error();
+  const FaceUvProjection& projection = projection_result.value();
+
+  struct Run {
+    CoedgeId coedge;
+    bool curved = false;
+    std::vector<Point2d> points;
+  };
+  std::vector<Run> runs;
+  double extent = 1.0;
+
+  const std::size_t coedge_limit = brep.coedge_count() + 1u;
+  const std::size_t loop_limit = brep.loop_count() + 1u;
+  std::size_t loop_steps = 0u;
+  for (LoopId loop_id = brep.face(face_id).first_loop; !loop_id.is_null();
+       loop_id = brep.loop(loop_id).next) {
+    if (!brep.loop_alive(loop_id)) {
+      return Error{Errc::invalid_topology,
+                   "heal_brep: face uses a loop that is not alive",
+                   loop_id.index(), 0u};
+    }
+    const Loop& loop = brep.loop(loop_id);
+    if (loop.face != face_id) {
+      return Error{Errc::invalid_topology,
+                   "heal_brep: loop belongs to a different face",
+                   loop_id.index(), 0u};
+    }
+    if (++loop_steps > loop_limit) {
+      return Error{Errc::invalid_topology,
+                   "heal_brep: face loop chain does not terminate",
+                   loop_id.index(), 0u};
+    }
+
+    double previous_u = 0.0;
+    double previous_v = 0.0;
+    Point3d previous_sample{};
+    bool has_previous = false;
+    bool closed = false;
+    CoedgeId coedge_id = loop.start;
+    for (std::size_t step = 0; step <= coedge_limit; ++step) {
+      if (!brep.coedge_alive(coedge_id)) {
+        return Error{Errc::invalid_topology,
+                     "heal_brep: loop uses a coedge that is not alive",
+                     coedge_id.index(), 0u};
+      }
+      const Coedge& coedge = brep.coedge(coedge_id);
+      if (coedge.face != face_id) {
+        return Error{Errc::invalid_topology,
+                     "heal_brep: coedge belongs to a different face",
+                     coedge_id.index(), 0u};
+      }
+      const Result<std::vector<Point3d>> path_result =
+          heal_coedge_path(brep, coedge);
+      if (!path_result) return path_result.error();
+      const std::vector<Point3d>& path = path_result.value();
+
+      Run run;
+      run.coedge = coedge_id;
+      const Edge& edge = brep.edge(coedge.edge);
+      run.curved = edge.curve != kNoGeometry &&
+                   edge.curve < brep.geometry().curves.size() &&
+                   std::get_if<CircleCurve3>(&brep.geometry().curves[edge.curve]) !=
+                       nullptr;
+
+      run.points.reserve(path.size());
+      for (std::size_t i = 0; i < path.size(); ++i) {
+        Result<Point2d> projected =
+            face_uv_project(projection, path[i], previous_u, has_previous);
+        if (!projected && has_previous) {
+          // A pole or apex is singular at the exact sample; step a hair back
+          // along the path and keep the previous parameter.
+          const Point3d nudged =
+              previous_sample + (path[i] - previous_sample) * (1.0 - 1e-9);
+          projected = face_uv_project(projection, nudged, previous_u, true);
+        }
+        if (!projected) return projected.error();
+        double u = projected.value()[0];
+        double v = projected.value()[1];
+        if (has_previous) {
+          if (projection.periodic_u()) u = face_uv_unwrap(u, previous_u);
+          if (projection.periodic_v()) v = face_uv_unwrap(v, previous_v);
+        }
+        previous_u = u;
+        previous_v = v;
+        previous_sample = path[i];
+        has_previous = true;
+        run.points.push_back(Point2d{u, v});
+        extent = std::max({extent, std::fabs(u), std::fabs(v)});
+      }
+      if (coedge.reversed) {
+        std::reverse(run.points.begin(), run.points.end());
+      }
+      runs.push_back(std::move(run));
+
+      if (coedge.next == loop.start) {
+        closed = true;
+        break;
+      }
+      coedge_id = coedge.next;
+    }
+    if (!closed) {
+      return Error{Errc::invalid_topology,
+                   "heal_brep: loop coedge chain does not terminate",
+                   loop.start.index(), 0u};
+    }
+  }
+  if (runs.empty()) {
+    return Error{Errc::invalid_topology, "heal_brep: face has no loops",
+                 face_id.index(), 0u};
+  }
+
+  const double cross_tolerance = 1e-12 * extent * extent;
+  for (Run& run : runs) {
+    if (run.points.size() < 3u) continue;
+    std::vector<Point2d> simplified;
+    simplified.reserve(run.points.size());
+    simplified.push_back(run.points.front());
+    for (std::size_t i = 1; i + 1 < run.points.size(); ++i) {
+      const Point2d& a = simplified.back();
+      const Point2d& b = run.points[i];
+      const Point2d& c = run.points[i + 1];
+      const double cross = (b[0] - a[0]) * (c[1] - a[1]) -
+                           (b[1] - a[1]) * (c[0] - a[0]);
+      const double between =
+          (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1]);
+      if (std::fabs(cross) <= cross_tolerance && between >= 0.0) continue;
+      simplified.push_back(b);
+    }
+    simplified.push_back(run.points.back());
+    // A circle keeps one interior sample so its arc direction stays defined and
+    // the polyline can still be read as an arc.
+    if (run.curved && simplified.size() < 3u) {
+      simplified.insert(simplified.begin() + 1,
+                        run.points[run.points.size() / 2u]);
+    }
+    run.points = std::move(simplified);
+  }
+
+  for (const Run& run : runs) {
+    if (run.points.size() < 2u) {
+      return Error{Errc::degenerate, "heal_brep: pcurve has fewer than two points",
+                   run.coedge.index(), 0u};
+    }
+    Pcurve2d pcurve;
+    pcurve.points = run.points;
+    const std::uint32_t index = editor.add_pcurve(std::move(pcurve));
+    const Result<void> stored = editor.set_coedge_pcurve(run.coedge, index);
+    if (!stored) return stored.error();
+  }
+  return {};
+}
+
 }  // namespace detail
 
 inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
@@ -1130,32 +1351,25 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
       incident[edge_id.index()] = 1;
     }
   }
+  std::vector<char> dirty_faces(editor.brep().faces().size(), 0);
   for (const CoedgeId coedge_id : editor.brep().coedge_ids()) {
     const Coedge& coedge = editor.brep().coedge(coedge_id);
     if (coedge.edge.index() >= incident.size() ||
         incident[coedge.edge.index()] == 0) {
       continue;
     }
-    const Face& face = editor.brep().face(coedge.face);
-    const Result<detail::FaceUvProjection> projection =
-        detail::face_uv_projection(editor.brep(), face, options.tolerance);
-    if (!projection) return reject(projection.error().message, true);
-    const EdgeId edge_id = coedge.edge;
-    const Edge& edge = editor.brep().edge(edge_id);
-    const Result<Point2d> uv0 = detail::face_uv_project(
-        projection.value(), editor.brep().vertex(edge.v0).point, 0.0, false);
-    if (!uv0) return reject(uv0.error().message, true);
-    const Result<Point2d> uv1 = detail::face_uv_project(
-        projection.value(), editor.brep().vertex(edge.v1).point, 0.0, false);
-    if (!uv1) return reject(uv1.error().message, true);
-    const std::uint32_t pcurve =
-        editor.add_pcurve(Pcurve2d{uv0.value(), uv1.value()});
-    const Result<void> set_pcurve =
-        editor.set_coedge_pcurve(coedge_id, pcurve);
-    if (!set_pcurve) return reject(set_pcurve.error().message, true);
-    const Result<void> set_geometry =
-        editor.set_edge_geometry(edge_id, kNoGeometry, 0.0, 1.0);
-    if (!set_geometry) return reject(set_geometry.error().message, true);
+    if (coedge.face.index() < dirty_faces.size()) {
+      dirty_faces[coedge.face.index()] = 1;
+    }
+  }
+  for (const FaceId face_id : editor.brep().face_ids()) {
+    if (face_id.index() >= dirty_faces.size() ||
+        dirty_faces[face_id.index()] == 0) {
+      continue;
+    }
+    const Result<void> rebuilt = detail::heal_rebuild_face_pcurves(
+        editor, face_id, options.tolerance);
+    if (!rebuilt) return reject(rebuilt.error().message, true);
   }
 
   for (const ShellId shell : editor.brep().solid_shells(solid)) {
