@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <geom/brep/heal.hpp>
+#include <geom/brep/detail/curved_volume.hpp>
 
 #include "brep_heal_fixture.hpp"
 #include "m4a_curved_heal_fixture.hpp"
@@ -95,6 +96,34 @@ double sphere_area(const std::vector<FaceUvLoop>& loops, double radius) {
             (std::sin(bounds.v_max) - std::sin(bounds.v_min));
   }
   return area;
+}
+
+// Concatenates the stored pcurves of the face's first loop in coedge order and
+// returns the uv polygon those pcurves describe. Junction points are kept: the
+// chart reader merges a pole/apex revisit by 3D position, which cuts the uv
+// image of a closed lune, so the stored pcurves are the honest uv chart.
+std::vector<Point2d> pcurve_loop_points(const Brep& brep, FaceId face_id) {
+  const Face& face = brep.face(face_id);
+  if (face.first_loop.is_null()) return {};
+  const Loop& loop = brep.loop(face.first_loop);
+  std::vector<Point2d> points;
+  CoedgeId coedge_id = loop.start;
+  for (std::size_t step = 0; step <= brep.coedge_count(); ++step) {
+    if (!brep.coedge_alive(coedge_id)) return {};
+    const Coedge& coedge = brep.coedge(coedge_id);
+    if (coedge.pcurve == kNoGeometry) return {};
+    const Pcurve2d& pcurve = brep.geometry().pcurves[coedge.pcurve];
+    if (coedge.reversed) {
+      for (auto it = pcurve.points.rbegin(); it != pcurve.points.rend(); ++it) {
+        points.push_back(*it);
+      }
+    } else {
+      points.insert(points.end(), pcurve.points.begin(), pcurve.points.end());
+    }
+    if (coedge.next == loop.start) break;
+    coedge_id = coedge.next;
+  }
+  return points;
 }
 
 // Every coedge of `face_id` must carry a pcurve, circle edges must be sampled
@@ -395,6 +424,7 @@ TEST_CASE("heal: a curved gap rebuilds arc pcurves") {
     REQUIRE(brep.face_count() == 4u);
 
     double area = 0.0;
+    double pcurve_area = 0.0;
     for (const FaceId face_id : brep.face_ids()) {
       check_face_pcurves(brep, face_id);
       const auto loops = face_loops_uv(brep, face_id, 1e-9);
@@ -406,8 +436,25 @@ TEST_CASE("heal: a curved gap rebuilds arc pcurves") {
           &brep.geometry().surfaces[brep.face(face_id).surface]);
       REQUIRE(sphere != nullptr);
       area += sphere_area(loops.value(), sphere->radius);
+      // A lune chart is a rectangle u in [0, pi], v in [eps, pi/2] (or the
+      // mirrored south band): the stored pcurves must cover it, including both
+      // corners of the pole, so the uv area is pi^2/2 per lune.
+      const std::vector<Point2d> pcurve_points = pcurve_loop_points(brep, face_id);
+      CHECK(pcurve_points.size() >= 3u);
+      const double lune_area = shoelace_area(pcurve_points);
+      CHECK(std::fabs(lune_area - 0.5 * test::m4a::kPi * test::m4a::kPi) <= 1e-5);
+      pcurve_area += lune_area;
     }
     CHECK(std::fabs(area - 4.0 * test::m4a::kPi) <= 1e-6);
+    CHECK(std::fabs(pcurve_area - 2.0 * test::m4a::kPi * test::m4a::kPi) <= 1e-5);
+
+    // Closing the pole corners must also leave the closed solid integrable: the
+    // old cut chart made this fail with Errc::degenerate.
+    const auto volume =
+        detail::curved_solid_volume(brep, fixture.solid, 1e-9);
+    REQUIRE(volume.has_value());
+    const double expected_volume = 4.0 / 3.0 * test::m4a::kPi;
+    CHECK(std::fabs(volume.value() - expected_volume) <= 1e-12 * expected_volume);
 
     // The south-west lune sits on the negative-u side of the sphere: after the
     // gap is sewn its equator coedge belongs to the kept north circle, and the
@@ -465,6 +512,67 @@ TEST_CASE("heal: a curved gap rebuilds arc pcurves") {
         CHECK(uv[1] >= -1e-9);
         CHECK(uv[1] <= 2.0 + 1e-9);
       }
+      // The seam runs up to the apex and back down the same column, so the
+      // stored pcurve polygon closes as the full 2*pi x band rectangle; the
+      // chart reader drops the retraced apex and reports only pi.
+      const std::vector<Point2d> pcurve_points = pcurve_loop_points(brep, face_id);
+      CHECK(pcurve_points.size() >= 3u);
+      CHECK(std::fabs(shoelace_area(pcurve_points) - test::m4a::kTwoPi) <= 1e-9);
     }
   }
+}
+
+TEST_CASE("heal: an inherited carrier must still pass through its welded vertices") {
+  const test::m4a::CurvedSolid fixture =
+      test::m4a::make_two_band_cylinder(1.0, 1e-6);
+  SolidEditor editor(fixture.brep);
+  // Edges 2 and 3 are the lower rims (lower_top0/lower_top1); the fixture
+  // allocates them in creation order.
+  const std::vector<EdgeId> edge_ids = fixture.brep.edge_ids();
+  REQUIRE(edge_ids.size() == 10u);
+  const Result<void> cleared_lower =
+      editor.set_edge_geometry(edge_ids[2], kNoGeometry, 0.0, 1.0);
+  const Result<void> cleared_upper =
+      editor.set_edge_geometry(edge_ids[3], kNoGeometry, 0.0, 1.0);
+  REQUIRE(cleared_lower.has_value());
+  REQUIRE(cleared_upper.has_value());
+  const Result<Brep> committed = editor.commit();
+  REQUIRE(committed.has_value());
+
+  // merge_edges hands the dropped rim's circle to the curve-less keep rim, but
+  // the inherited circle sits at the dropped rim's height: it no longer passes
+  // through the keep vertices and the heal must reject instead of storing a
+  // pcurve that leaves the chart.
+  const auto healed = heal_brep(committed.value(), fixture.solid, {});
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::unsupported);
+  CHECK(std::string_view(healed.error().message) ==
+        "heal_brep: kept edge curve does not match its welded vertices");
+}
+
+TEST_CASE("heal: a reversed inherited carrier keeps the edge direction") {
+  Brep brep;
+  SolidEditor editor(brep);
+  const Result<VertexId> start = editor.add_vertex(Point3d{1.0, 0.0, 0.0}, 0.0);
+  const Result<VertexId> end = editor.add_vertex(Point3d{-1.0, 0.0, 0.0}, 0.0);
+  REQUIRE(start.has_value());
+  REQUIRE(end.has_value());
+  CircleCurve3 circle;
+  circle.center = Point3d{0.0, 0.0, 0.0};
+  circle.radius = 1.0;
+  const std::uint32_t curve = editor.add_curve(circle);
+  const Result<EdgeId> edge = editor.add_edge(start.value(), end.value(), curve,
+                                              0.0, test::m4a::kPi, 0.0);
+  REQUIRE(edge.has_value());
+
+  const Result<std::uint32_t> reversed =
+      detail::heal_reverse_curve(editor, edge.value());
+  REQUIRE(reversed.has_value());
+  const auto& carrier = std::get<CircleCurve3>(
+      editor.brep().geometry().curves[reversed.value()]);
+  CHECK(norm2(carrier.eval(0.0) - circle.eval(test::m4a::kPi)) <= 1e-12);
+  CHECK(norm2(carrier.eval(test::m4a::kPi) - circle.eval(0.0)) <= 1e-12);
+  // Interior samples follow the same reversed parameterization, not a mirrored
+  // arc: eval_reversed(t) == eval(t0 + t1 - t).
+  CHECK(norm2(carrier.eval(0.5) - circle.eval(test::m4a::kPi - 0.5)) <= 1e-12);
 }

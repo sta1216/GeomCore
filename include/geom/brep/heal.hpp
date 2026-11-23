@@ -890,6 +890,59 @@ inline Result<std::vector<Point3d>> heal_coedge_path(const Brep& brep,
   return samples;
 }
 
+// True when `point` is the singular pole of a sphere or the apex of a cone,
+// where the azimuth is undefined and the projection has to borrow a neighbour's.
+inline bool heal_is_singular_sample(const SurfaceGeometry& surface,
+                                    const Point3d& point) {
+  if (const auto* sphere = std::get_if<Sphere3>(&surface)) {
+    const double sin_v =
+        std::clamp(dot(point - sphere->center, sphere->axis) / sphere->radius,
+                   -1.0, 1.0);
+    return std::fabs(std::fabs(sin_v) - 1.0) <= 1e-12;
+  }
+  if (const auto* cone = std::get_if<Cone3>(&surface)) {
+    const double v_apex = cone->radius / std::tan(cone->half_angle);
+    const Point3d apex = cone->origin + cone->axis * v_apex;
+    const double scale = std::max({1.0, std::fabs(v_apex), cone->radius});
+    return norm2(point - apex) <= 1e-9 * scale;
+  }
+  return false;
+}
+
+// Adds a carrier that traverses `curve` backwards over the same interval:
+// eval_reversed(t) = eval(t0 + t1 - t). `merge_edges` copies a dropped edge's
+// carrier into a curve-less keep edge without swapping t0/t1, so a flipped
+// welded correspondence would otherwise leave the keep edge running against its
+// own direction.
+inline Result<std::uint32_t> heal_reverse_curve(SolidEditor& editor,
+                                                EdgeId edge_id) {
+  const Edge& edge = editor.brep().edge(edge_id);
+  if (edge.curve == kNoGeometry ||
+      edge.curve >= editor.brep().geometry().curves.size()) {
+    return Error{Errc::invalid_topology,
+                 "heal_brep: edge curve index is out of range", edge_id.index(),
+                 0u};
+  }
+  const CurveGeometry& curve = editor.brep().geometry().curves[edge.curve];
+  const double sum = edge.t0 + edge.t1;
+  CurveGeometry reversed;
+  if (const auto* line = std::get_if<LineCurve3>(&curve)) {
+    reversed = LineCurve3{line->origin + line->direction * sum,
+                          line->direction * -1.0};
+  } else if (const auto* circle = std::get_if<CircleCurve3>(&curve)) {
+    const double c = std::cos(sum);
+    const double s = std::sin(sum);
+    reversed = CircleCurve3{circle->center,
+                            circle->x_axis * c + circle->y_axis * s,
+                            circle->x_axis * s - circle->y_axis * c,
+                            circle->radius};
+  } else {
+    return Error{Errc::unsupported, "heal_brep: curve type is not supported yet",
+                 edge.curve, 0u};
+  }
+  return editor.add_curve(std::move(reversed));
+}
+
 // Rebuilds every pcurve of `face` by walking its loops in coedge order and
 // projecting one polyline per coedge with the previous parameter as the unwrap
 // hint. The edge carriers are never touched. All loop runs are projected and
@@ -912,6 +965,9 @@ inline Result<void> heal_rebuild_face_pcurves(SolidEditor& editor, FaceId face_i
     CoedgeId coedge;
     bool curved = false;
     std::vector<Point2d> points;
+    // The 3D samples in the same (stored) order as `points`, used to recognise
+    // the sphere poles and the cone apex after the run has been oriented.
+    std::vector<Point3d> samples;
   };
   std::vector<Run> runs;
   double extent = 1.0;
@@ -943,6 +999,7 @@ inline Result<void> heal_rebuild_face_pcurves(SolidEditor& editor, FaceId face_i
     Point3d previous_sample{};
     bool has_previous = false;
     bool closed = false;
+    const std::size_t loop_first_run = runs.size();
     CoedgeId coedge_id = loop.start;
     for (std::size_t step = 0; step <= coedge_limit; ++step) {
       if (!brep.coedge_alive(coedge_id)) {
@@ -992,10 +1049,12 @@ inline Result<void> heal_rebuild_face_pcurves(SolidEditor& editor, FaceId face_i
         previous_sample = path[i];
         has_previous = true;
         run.points.push_back(Point2d{u, v});
+        run.samples.push_back(path[i]);
         extent = std::max({extent, std::fabs(u), std::fabs(v)});
       }
       if (coedge.reversed) {
         std::reverse(run.points.begin(), run.points.end());
+        std::reverse(run.samples.begin(), run.samples.end());
       }
       runs.push_back(std::move(run));
 
@@ -1010,10 +1069,54 @@ inline Result<void> heal_rebuild_face_pcurves(SolidEditor& editor, FaceId face_i
                    "heal_brep: loop coedge chain does not terminate",
                    loop.start.index(), 0u};
     }
+    // A seam that retraces itself across the periodic cut ends the loop one
+    // full turn away from its start, which leaves the stored uv polygon cut
+    // open (a cone apex fan then integrates to zero). Shift the closing
+    // constant-u run onto the loop's first column so the chart closes.
+    if (projection.periodic_u() && runs.size() > loop_first_run) {
+      const std::vector<Point2d>& first_points = runs[loop_first_run].points;
+      const std::vector<Point2d>& last_points = runs.back().points;
+      if (!first_points.empty() && !last_points.empty() &&
+          std::fabs(last_points.front()[0] - last_points.back()[0]) <= 1e-9) {
+        const double delta = last_points.back()[0] - first_points.front()[0];
+        if (std::fabs(delta) > kFaceUvPi) {
+          const double turns = std::round(delta / (2.0 * kFaceUvPi));
+          for (Point2d& point : runs.back().points) {
+            point[0] -= turns * 2.0 * kFaceUvPi;
+          }
+        }
+      }
+    }
   }
   if (runs.empty()) {
     return Error{Errc::invalid_topology, "heal_brep: face has no loops",
                  face_id.index(), 0u};
+  }
+
+  // At a sphere pole or a cone apex the azimuth is undefined, so the projection
+  // returns an arbitrary value (usually the raw atan2 of the rounded sample). A
+  // meridian or seam that ends at the pole would then leave the chart column of
+  // its own carrier. Borrow the azimuth from the adjacent sample in stored
+  // order: the previous point when there is one, otherwise the next point (the
+  // same value a probe a hair inside the path would project). The latitude stays
+  // exactly at the pole/apex.
+  const Face& face = brep.face(face_id);
+  if (face.surface != kNoGeometry &&
+      face.surface < brep.geometry().surfaces.size()) {
+    const SurfaceGeometry& surface = brep.geometry().surfaces[face.surface];
+    for (Run& run : runs) {
+      for (std::size_t i = 0; i < run.points.size(); ++i) {
+        if (!heal_is_singular_sample(surface, run.samples[i])) continue;
+        double u = run.points[i][0];
+        if (i > 0 && !heal_is_singular_sample(surface, run.samples[i - 1])) {
+          u = run.points[i - 1][0];
+        } else if (i + 1 < run.points.size() &&
+                   !heal_is_singular_sample(surface, run.samples[i + 1])) {
+          u = run.points[i + 1][0];
+        }
+        run.points[i][0] = u;
+      }
+    }
   }
 
   const double cross_tolerance = 1e-12 * extent * extent;
@@ -1331,9 +1434,28 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
         !editor.brep().edge_alive(pair.drop)) {
       return reject("heal_brep: an edge disappeared during stitching", true);
     }
+    const Edge keep_before = editor.brep().edge(pair.keep);
+    const Edge drop_before = editor.brep().edge(pair.drop);
+    const bool inherits_curve = keep_before.curve == kNoGeometry &&
+                                drop_before.curve != kNoGeometry;
+    // heal_apply_welds already rewired the dropped edge endpoints, so the
+    // dropped edge's v0 now names the surviving keep vertex at its traversal
+    // start. When that is the keep edge's v1 the welded correspondence is
+    // flipped: merge_edges still copies the dropped carrier, which then runs
+    // against the keep edge's own direction.
+    const bool flipped = keep_before.v0 != drop_before.v0;
     const Result<void> merged = editor.merge_edges(pair.keep, pair.drop);
     if (!merged) return reject(merged.error().message, true);
     ++sewn_edges;
+    if (inherits_curve && flipped) {
+      const Result<std::uint32_t> reversed =
+          detail::heal_reverse_curve(editor, pair.keep);
+      if (!reversed) return reject(reversed.error().message, true);
+      const Edge& inherited = editor.brep().edge(pair.keep);
+      const Result<void> restored = editor.set_edge_geometry(
+          pair.keep, reversed.value(), inherited.t0, inherited.t1);
+      if (!restored) return reject(restored.error().message, true);
+    }
   }
 
   std::vector<char> welded_vertices(editor.brep().vertices().size(), 0);
@@ -1343,6 +1465,35 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
       welded_vertices[weld.keep.index()] = 1;
     }
   }
+  // merge_edges can hand a curve-less keep edge the dropped edge's carrier. That
+  // copy follows the dropped edge's parameterization and direction, which the
+  // pre-merge guard cannot see. Re-check every curve that now touches a welded
+  // vertex: it must still pass through the surviving endpoints. The Brep here is
+  // already mutated, so a failure returns an error instead of silently keeping a
+  // curve that does not match its vertices.
+  for (const EdgeId edge_id : editor.brep().edge_ids()) {
+    const Edge& edge = editor.brep().edge(edge_id);
+    if (edge.curve == kNoGeometry ||
+        edge.curve >= editor.brep().geometry().curves.size()) {
+      continue;
+    }
+    if (!welded_vertices[edge.v0.index()] &&
+        !welded_vertices[edge.v1.index()]) {
+      continue;
+    }
+    const CurveGeometry& curve = editor.brep().geometry().curves[edge.curve];
+    for (const VertexId endpoint : {edge.v0, edge.v1}) {
+      const Point3d mapped =
+          editor.brep().vertices()[root_of(endpoint.index())].point;
+      if (!(detail::heal_curve_residual(curve, mapped) <= check_tolerance)) {
+        return Error{Errc::unsupported,
+                     "heal_brep: kept edge curve does not match its welded "
+                     "vertices",
+                     edge_id.index(), 0u};
+      }
+    }
+  }
+
   std::vector<char> incident(editor.brep().edges().size(), 0);
   for (const EdgeId edge_id : editor.brep().edge_ids()) {
     const Edge& edge = editor.brep().edge(edge_id);
