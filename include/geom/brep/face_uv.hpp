@@ -481,9 +481,9 @@ inline Result<FaceUvRun> face_uv_coedge_run(const Brep& brep, const Coedge& coed
   return run;
 }
 
-// Two chart parameters that agree to this many radians describe the same
-// stored chart point. The slack only absorbs floating point noise; it is not a
-// geometric length, so it does not scale with the model.
+// Two chart parameters that agree to this many (radians on a periodic u, chart
+// units on v) describe the same stored chart point. The slack only absorbs
+// floating point noise; it is never used for welding or carrier checks.
 inline constexpr double kFaceUvAngleTolerance = 1e-12;
 
 // True when `position` projects to a singular chart point: a sphere pole or a

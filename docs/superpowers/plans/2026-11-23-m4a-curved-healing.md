@@ -16,7 +16,7 @@ messages. Torus gap healing and apex/pole gap fixtures are deferred to M4b.
 
 `heal_brep` stays a whole-solid transaction: plan matching (weld vertices, pair
 edges), apply welds, merge edges, rebuild pcurves, close shells, raise
-tolerances, validate. The existing planar path must remain bit-identical.
+tolerances, validate. The existing planar path must remain value-identical (pcurve arena handles may differ).
 
 Three model changes:
 
@@ -280,7 +280,7 @@ Result<void> heal_rebuild_face_pcurves(SolidEditor& editor, FaceId face,
   west lune's u band is `[-pi, 0]` (not `[0, 2pi]`); total volume is
   `4*pi/3` rel 1e-12.
 - After cylinder/cone heal, every face projects through `face_loops_uv` and the
-  cap charts have 64 points, the lateral chart 130 points.
+  cap charts have 64 points, the lateral chart has 10 points after collinear simplification (the pre-simplification sampling is 130).
 - The 3D circle/line curve survives: `edge.curve != kNoGeometry` after healing.
 
 **Step 2 — run**: red (`curved_solid_volume: face triangulation failed` for the

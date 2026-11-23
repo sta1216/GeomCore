@@ -57,10 +57,7 @@ T 型/竞争配对、方向翻转、pcurve 失效和容差爆炸上产生不可�
   仍未闭合、Euler 特征变化或任何 primitive 失败都返回**原输入** `Brep`
   （`changed=false`，计数为 0），绝不发布部分缝合结果。成功时报告
   `max_closed_gap`、`max_tolerance`、唯一焊点数与缝合边数。
-- **pcurve 修复。** 焊接会移动端点，因此不仅缝合边，**所有与焊后存活顶点
-  相邻的边**都要重投影：按升序 coedge 索引，在每个面自己的 uv 中写入
-  `{project(v0), project(v1)}` 两点 pcurve，并把边的曲线清为 `kNoGeometry`、
-  `t0/t1` 复位为 0/1。投影失败即拒绝整个 heal。
+- **pcurve 修复。** 焊接会移动端点，因此**每个脏面（拥有与焊后存活顶点相邻的边的面）**上的所有 coedge 都要重投影：按升序 coedge 索引，在面自己的 uv 中写入逐段折线 pcurve（圆弧保留内点、周期缝展开、极点/锥顶借用邻点方位），三维载体保留；投影失败即拒绝整个 heal。（本节的两点 pcurve + `kNoGeometry` 契约已被 2026-11-24 补遗取代。）
 - **拒绝诊断。** 无接受候选且最近候选超过 `max_gap` 时，全局只报一条
   `gap_too_large`，带最近距离、最近端点对中点与两条边的索引；竞争候选只产生
   `ambiguous_gap`，不会同时产生 `gap_too_large`。只有共享顶点、没有互近邻时
@@ -169,3 +166,4 @@ M4a 保持上文平面契约（配对、方向、容差与 staged 事务）不�
   （Release）：圆柱 `π*(2+1e-6)` rel 2.5e-14、球 `4π/3` rel 2.3e-15、锥 `2π/3`
   rel 4.2e-15；`chi == 2`；细节见 `docs/benchmarks/m4a-healing.md` 与
   architecture §16.4。
+- **缺少曲面。** `surface == kNoGeometry` 的面在修改前返回 `invalid_topology "heal_brep: face has no surface"`（Task 1 起的诊断，未单独测试）。
