@@ -532,6 +532,167 @@ TEST_CASE("heal: a curved gap rebuilds arc pcurves") {
   }
 }
 
+namespace {
+
+// Distance between two fixture vertices, in creation order. The healer reports
+// these distances as HealReport::max_closed_gap, so the acceptance checks can
+// compare the report against the geometry instead of the nominal gap.
+double vertex_gap(const Brep& brep, std::size_t first, std::size_t second) {
+  const std::vector<VertexId> ids = brep.vertex_ids();
+  REQUIRE(first < ids.size());
+  REQUIRE(second < ids.size());
+  return norm2(brep.vertex(ids[first]).point - brep.vertex(ids[second]).point);
+}
+
+struct CurvedAcceptance {
+  Brep brep;
+  double volume = 0.0;
+};
+
+// Shared acceptance gate for a closed curved solid: the report must describe a
+// healed, valid, chi == 2 solid whose volume matches the analytic value, and a
+// second heal of the input must be deterministic while a heal of the result is
+// a no-op.
+CurvedAcceptance check_closed_curved_heal(
+    const test::m4a::CurvedSolid& fixture, const HealOptions& options,
+    double expected_volume, double relative_tolerance, double measured_gap) {
+  const std::vector<double> input_fingerprint = brep_fingerprint(fixture.brep);
+
+  const auto healed = heal_brep(fixture.brep, fixture.solid, options);
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK(result.report.changed);
+  CHECK(result.report.issues.empty());
+  CHECK(result.report.boundary_edges == 4u);
+  CHECK(result.report.welded_vertices == 2u);
+  CHECK(result.report.sewn_edges == 2u);
+  CHECK(result.report.max_closed_gap == measured_gap);
+  CHECK(result.report.max_tolerance <= 1e-6);
+  CHECK(brep_fingerprint(fixture.brep) == input_fingerprint);
+  CHECK(euler_characteristic(result.brep, fixture.solid) == 2);
+  CHECK(validate_topology(result.brep).ok());
+
+  const auto volume =
+      detail::curved_solid_volume(result.brep, fixture.solid, 1e-9);
+  REQUIRE(volume.has_value());
+  CHECK(std::fabs(volume.value() - expected_volume) <=
+        relative_tolerance * expected_volume);
+
+  // Repeating the heal on the same input must produce the same brep bitwise
+  // (counts and every vertex position) and the identical volume.
+  const auto repeated = heal_brep(fixture.brep, fixture.solid, options);
+  REQUIRE(repeated.has_value());
+  CHECK(brep_fingerprint(repeated.value().brep) ==
+        brep_fingerprint(result.brep));
+  CHECK(repeated.value().report.max_closed_gap == result.report.max_closed_gap);
+  const auto repeated_volume =
+      detail::curved_solid_volume(repeated.value().brep, fixture.solid, 1e-9);
+  REQUIRE(repeated_volume.has_value());
+  CHECK(repeated_volume.value() == volume.value());
+
+  // A closed result has no boundary left to stitch: the second heal is a
+  // no-op and leaves the geometry bitwise unchanged.
+  const auto second = heal_brep(result.brep, fixture.solid, options);
+  REQUIRE(second.has_value());
+  CHECK_FALSE(second.value().report.changed);
+  CHECK(second.value().report.issues.empty());
+  CHECK(second.value().report.welded_vertices == 0u);
+  CHECK(second.value().report.sewn_edges == 0u);
+  CHECK(brep_fingerprint(second.value().brep) == brep_fingerprint(result.brep));
+  const auto second_volume =
+      detail::curved_solid_volume(second.value().brep, fixture.solid, 1e-9);
+  REQUIRE(second_volume.has_value());
+  CHECK(second_volume.value() == volume.value());
+  CHECK(validate_topology(second.value().brep).ok());
+
+  return CurvedAcceptance{result.brep, volume.value()};
+}
+
+}  // namespace
+
+TEST_CASE("heal: analytic curved gaps are accepted") {
+  SUBCASE("cylinder") {
+    constexpr double gap = 1e-6;
+    const test::m4a::CurvedSolid fixture =
+        test::m4a::make_two_band_cylinder(1.0, gap);
+    // Vertices are created b0, b1, t0, t1, u0, u1, v0, v1; the sewn pair joins
+    // t0/ t1 to u0/u1.
+    const double measured_gap = vertex_gap(fixture.brep, 2, 4);
+
+    const CurvedAcceptance accepted = check_closed_curved_heal(
+        fixture, {}, test::m4a::kPi * (2.0 + gap), 1e-12, measured_gap);
+
+    // The healer repeats the input height 2+gap instead of shrinking the gap,
+    // which is the 5e-7 relative difference from the ideal two-unit cylinder.
+    CHECK(std::fabs(accepted.volume - test::m4a::kTwoPi) <=
+          1e-6 * test::m4a::kTwoPi);
+    // The brief's decimal is the measured quadrature value; it equals the
+    // double product kPi*(2+gap) to 2.5e-14 relative.
+    CHECK(std::fabs(accepted.volume - 6.2831884487723997) <=
+          1e-12 * 6.2831884487723997);
+  }
+
+  SUBCASE("sphere") {
+    // The fixture puts the two boundary circles at v = +/-eps, so the equator
+    // vertex separation is 2*eps = 1e-6.
+    constexpr double eps = 5e-7;
+    const test::m4a::CurvedSolid fixture = test::m4a::make_sphere_gap(eps);
+    // Vertices are created n0, n1, np, s0, s1, sp; the sewn pair joins n0/s0
+    // and n1/s1.
+    const double measured_gap = vertex_gap(fixture.brep, 0, 3);
+
+    const CurvedAcceptance accepted = check_closed_curved_heal(
+        fixture, {}, 4.0 / 3.0 * test::m4a::kPi, 1e-12, measured_gap);
+    REQUIRE(accepted.brep.face_count() == 4u);
+
+    // Each lune chart is the uv rectangle u in [0, pi], v in [eps, pi/2] (or
+    // the mirrored south band): four positive areas summing to 2*pi^2 minus
+    // the 4*pi*asin(eps) equatorial sliver (6.3e-6 here).
+    double uv_area_sum = 0.0;
+    for (const FaceId face_id : accepted.brep.face_ids()) {
+      const auto loops = face_loops_uv(accepted.brep, face_id, 1e-9);
+      REQUIRE(loops.has_value());
+      REQUIRE(loops.value().size() == 1u);
+      const double lune_area = shoelace_area(loops.value().front().points);
+      CHECK(lune_area > 0.0);
+      CHECK(std::fabs(lune_area - 0.5 * test::m4a::kPi * test::m4a::kPi) <=
+            1e-5);
+      uv_area_sum += lune_area;
+    }
+    CHECK(std::fabs(uv_area_sum - 2.0 * test::m4a::kPi * test::m4a::kPi) <=
+          1e-5);
+  }
+
+  SUBCASE("cone") {
+    // The band-to-apex fixture's slant gap is gap*sqrt(1.25) = 8.944e-7, which
+    // stays inside the default 1e-6 max_gap and max_tolerance caps.
+    constexpr double gap = 8e-7;
+    const test::m4a::CurvedSolid fixture = test::m4a::make_cone_gap(gap);
+    // Vertices are created b0, b1, t0, t1, u0, u1, apex; the sewn pair joins
+    // t0/t1 to u0/u1.
+    const double measured_gap = vertex_gap(fixture.brep, 2, 4);
+
+    const CurvedAcceptance accepted = check_closed_curved_heal(
+        fixture, {}, 2.0943951023931864, 1e-12, measured_gap);
+    CHECK(std::fabs(accepted.volume -
+                    2.0 / 3.0 * test::m4a::kPi) <=
+          1e-12 * (2.0 / 3.0 * test::m4a::kPi));
+    REQUIRE(accepted.brep.face_count() == 3u);
+
+    // Seven input vertices minus the two welded rim vertices; the apex is one
+    // vertex, never split into a fan.
+    CHECK(accepted.brep.vertex_count() == 5u);
+    std::size_t apex_vertices = 0;
+    for (const VertexId vertex_id : accepted.brep.vertex_ids()) {
+      const Point3d point = accepted.brep.vertex(vertex_id).point;
+      if (norm2(point - Point3d{0.0, 0.0, 2.0}) <= 1e-12) {
+        ++apex_vertices;
+      }
+    }
+    CHECK(apex_vertices == 1u);
+  }
+}
+
 TEST_CASE("heal: an inherited carrier must still pass through its welded vertices") {
   const test::m4a::CurvedSolid fixture =
       test::m4a::make_two_band_cylinder(1.0, 1e-6);
