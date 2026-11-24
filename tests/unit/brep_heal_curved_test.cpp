@@ -733,6 +733,107 @@ TEST_CASE("heal: analytic curved gaps are accepted") {
   }
 }
 
+TEST_CASE("heal: torus band gaps are accepted") {
+  // M4b-1 acceptance for torus bands whose gap runs along u (around the axis)
+  // or v (around the tube), including a band pair that straddles the torus v
+  // seam. The gap becomes material, so each healed volume is the volume of the
+  // un-gapped shape: Pappus for the sector, a meridian integral for the barrels.
+  // Every reference below is the brief's quadrature decimal; each differs from
+  // the closed form by at most 7e-15 relative, far inside the 1e-9 pin.
+  SUBCASE("u gap on a 3 rad sector") {
+    constexpr double gap = 1e-6;
+    // Closed form: V = theta * R * pi * r^2 = 3*pi/4 = 2.356194490192345...
+    constexpr double expected = 2.3561944901923608;
+    const test::m4a::CurvedSolid fixture = test::m4a::make_torus_u_gap(gap);
+    // Vertices are created a0,a1,b0,b1,c0,c1,d0,d1: b0/c0 are the v = 0 ends of
+    // the two open rims; their chord is exactly `gap` at the outer equator while
+    // the v = pi ends sit (R - r)/(R + r) times closer.
+    const double measured_gap = vertex_gap(fixture.brep, 2, 4);
+
+    const CurvedAcceptance accepted =
+        check_closed_curved_heal(fixture, {}, expected, 1e-9, measured_gap);
+    // The two rim welds pull the upper band's rim onto the lower one at
+    // u = 1.5 - delta/2, so the sector spans exactly [0, 3].
+    CHECK(accepted.brep.vertex_count() == 6u);
+    CHECK(accepted.brep.edge_count() == 8u);
+    CHECK(accepted.brep.face_count() == 4u);
+    const auto shells = accepted.brep.solid_shells(fixture.solid);
+    REQUIRE(shells.size() == 1u);
+    CHECK(accepted.brep.shell(shells.front()).closed);
+    CHECK(detail::heal_boundary_edges(accepted.brep, fixture.solid).empty());
+  }
+
+  SUBCASE("outer branch v gap") {
+    constexpr double gap = 1e-6;
+    // Closed form, rho(z) = R + sqrt(r^2 - z^2), c = r*sin(1):
+    //   V = pi * [2*R^2*c + 2*R*(c*s + r^2*asin(c/r)) + 2*r^2*c - (2/3)*c^3]
+    // with s = sqrt(r^2 - c^2) and asin(c/r) = 1.
+    constexpr double expected = 5.4334195273316128;
+    const test::m4a::CurvedSolid fixture = test::m4a::make_torus_outer_v_gap(gap);
+    // Vertices are created a0,a1,b0,b1,c0,c1,d0,d1: b0/c0 are the u = 0 ends of
+    // the two open rims, 2*r*sin(delta/2) = gap apart.
+    const double measured_gap = vertex_gap(fixture.brep, 2, 4);
+
+    const CurvedAcceptance accepted =
+        check_closed_curved_heal(fixture, {}, expected, 1e-9, measured_gap);
+    CHECK(accepted.brep.vertex_count() == 6u);
+    CHECK(accepted.brep.edge_count() == 8u);
+    CHECK(accepted.brep.face_count() == 4u);
+    const auto shells = accepted.brep.solid_shells(fixture.solid);
+    REQUIRE(shells.size() == 1u);
+    CHECK(accepted.brep.shell(shells.front()).closed);
+    CHECK(detail::heal_boundary_edges(accepted.brep, fixture.solid).empty());
+  }
+
+  SUBCASE("inner branch band across the v seam") {
+    constexpr double gap = 1e-6;
+    // Closed form, rho(z) = R - sqrt(r^2 - z^2), c = r*sin(1):
+    //   V = pi * [2*R^2*c - 2*R*(c*s + r^2*asin(c/r)) + 2*r^2*c - (2/3)*c^3].
+    constexpr double expected = 0.8635058157199863;
+    const test::m4a::CurvedSolid fixture =
+        test::m4a::make_torus_inner_v_seam_gap(gap);
+    // Vertices are created a0,a1,b0,b1,c0,c1,d0,d1: b0/c0 are the u = 0 ends of
+    // the two open rims. The chart v of the two halves is on opposite sides of
+    // the surface's chart seam (v_origin = pi), so the projection puts one half
+    // near v = 0 and the other near v = -2*pi.
+    const double measured_gap = vertex_gap(fixture.brep, 2, 4);
+
+    const CurvedAcceptance accepted =
+        check_closed_curved_heal(fixture, {}, expected, 1e-9, measured_gap);
+    CHECK(accepted.brep.vertex_count() == 6u);
+    CHECK(accepted.brep.edge_count() == 8u);
+    CHECK(accepted.brep.face_count() == 4u);
+    const auto shells = accepted.brep.solid_shells(fixture.solid);
+    REQUIRE(shells.size() == 1u);
+    CHECK(accepted.brep.shell(shells.front()).closed);
+    CHECK(detail::heal_boundary_edges(accepted.brep, fixture.solid).empty());
+
+    // A pcurve rebuild that let the chart seam wrap mid-face would still give
+    // the right volume (the torus is periodic in v), so pin the chart window
+    // per face instead: every healed face spans less than a half turn in v.
+    for (const FaceId face_id : accepted.brep.face_ids()) {
+      const auto loops = face_loops_uv(accepted.brep, face_id, 1e-9);
+      REQUIRE(loops.has_value());
+      double v_min = 0.0;
+      double v_max = 0.0;
+      bool first = true;
+      for (const FaceUvLoop& loop : loops.value()) {
+        for (const Point2d& point : loop.points) {
+          if (first) {
+            v_min = point[1];
+            v_max = point[1];
+            first = false;
+          } else {
+            v_min = std::min(v_min, point[1]);
+            v_max = std::max(v_max, point[1]);
+          }
+        }
+      }
+      CHECK(v_max - v_min < 2.0);
+    }
+  }
+}
+
 TEST_CASE("heal: an inherited carrier must still pass through its welded vertices") {
   const test::m4a::CurvedSolid fixture =
       test::m4a::make_two_band_cylinder(1.0, 1e-6);
