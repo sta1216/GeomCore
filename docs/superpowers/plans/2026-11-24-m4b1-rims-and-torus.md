@@ -145,9 +145,8 @@ Pre-lock baseline at T5 was `*heal*` 90/1,847, `*torus*` 59/10,754, combined
 144/12,421. The Task 6 lock adds exactly 1 case / 19 assertions, so the growth is
 accounted for by the rejection test and no other test changed.
 
-**Full Debug and Release suites were not run during M4b-1 task work.** Both are
-still to be run at milestone close, before ff merge/push and CI. This plan records
-only the targeted fast lane above.
+**Full Debug and Release suites were run at milestone close:** 1074 cases /
+680,503 assertions each, 0 failed, 0 warnings, before ff merge/push and CI.
 
 Corrections recorded during Task 6: torus halves are `chi == 0` (the brief and the
 original Task 5 step said 2); Task 3's `V=6/E=8/F=4` is the post-split working copy

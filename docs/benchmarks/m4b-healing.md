@@ -33,7 +33,7 @@
   `euler_characteristic` 的 `V-E+F-(L-F)` 计算亦为 0）。
 - **boundary_edges**：`HealReport::boundary_edges` 是拆分后的工作边界边数（圆柱
   闭合 rim 4、torus 半体 8），不是输入的闭合 rim 条数（2/4）。
-- **volume**：`detail::curved_solid_volume(brep, solid, 1e-9)` 的返回值；相对误差按
+- **volume**：`detail::curved_solid_volume(brep, solid, 1e-9)` 的返回值；锚相对闭式误差按
   `|实测-解析| / |解析|`，torus 半体为绝对误差。
 - **fingerprint**：拒绝路径用完整指纹（实体/几何存储计数、顶点位置/容差、边端点/
   曲线/参数域/容差、面曲面/反向/容差、coedge 边/面/环/反向/pcurve/next/prev/
@@ -41,13 +41,21 @@
 
 ## 验收结果
 
-| 用例 | 输入（边界边） | V/E/F（前 → 后） | welded / sewn | max_closed_gap | 体积（实测） | 解析值 | 相对误差 | chi |
+| 用例 | 输入（边界边） | V/E/F（前 → 后） | welded / sewn | max_closed_gap | 体积（验收锚） | 解析值 | 锚相对闭式误差 | chi |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 圆柱闭合 rim | `make_cylinder_closed_rims_gap(1e-6)`，2 条闭合缝边（拆分后 4 条） | 4/6/4 → 4/6/4（拆分后 6/8/4） | 2 / 2 | `9.9999999991773336e-07` | `6.2831884487723997` | `π*(2+1e-6) = 6.2831884487722407` | 2.5e-14 | 2 |
-| torus u 向开缝带 | `make_torus_u_gap(1e-6)`，2 条闭合缝边（拆分后 4 条边界边） | 8/10/4 → 6/8/4 | 2 / 2 | `9.999999901566576e-07` | `2.3561944901923608` | `3π/4 = 2.356194490192345` | 6.7e-15 | 2 |
+| torus u 向开缝带 | `make_torus_u_gap(1e-6)`，2 条闭合缝边（拆分后 4 条边界边） | 8/10/4 → 6/8/4 | 2 / 2 | `9.999999901566576e-07` | `2.3561944901923608` | `3π/4 = 2.356194490192345` | 1.0e-14 | 2 |
 | torus 外支 v 缝带 | `make_torus_outer_v_gap(1e-6)`，2 条闭合缝边（拆分后 4 条） | 8/10/4 → 6/8/4 | 2 / 2 | `9.9999998999999992e-07` | `5.4334195273316128` | `5.433419527331613` | 3.7e-17 | 2 |
 | torus 内支跨 v 缝带 | `make_torus_inner_v_seam_gap(1e-6)`，2 条闭合缝边（拆分后 4 条） | 8/10/4 → 6/8/4 | 2 / 2 | `9.9999998992555949e-07` | `0.8635058157199863` | `0.8635058157199873` | 1.2e-15 | 2 |
 | torus 闭合 rim 半体 | `make_torus_closed_rims_gap(1e-6)`，4 条闭合缝边（拆分后 8 条） | 4/6/2 → 4/6/2（拆分后 8/10/2） | 4 / 4 | `9.9999999030728907e-07` | `4.934802200544679` | `π²/2 = 4.934802200544679` | ≤1e-12（绝对） | **0** |
+
+Measured returns from the same Release binary (`detail::curved_solid_volume(brep, solid, 1e-9)`):
+cylinder `6.2831884487724015` (2.56e-14 vs `pi*(2+1e-6)`), torus u band
+`2.3561944901923297` (6.41e-15), outer v band `5.433419527331667` (9.97e-15),
+inner v-seam band `0.86350581571999063` (5.0e-15), closed-rim halves
+`4.9348022005446222` (5.7e-14 absolute vs `pi^2/2`). The table column above is the
+**acceptance anchor** used by the tests (brief quadrature reference), not the
+implementation return; both stay inside the 1e-9 gate.
 
 所有接受用例共用验收门：`report.changed == true`、`report.issues.empty()`、
 `report.boundary_edges` 等于拆分后的工作计数、焊点/缝合边数符合上表、
