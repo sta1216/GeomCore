@@ -317,3 +317,51 @@ C++20; CMake 4.x with the existing presets; MSVC 19.44, GCC 15.2, Clang 21.1 in 
 - [ ] Multi-shell point gap is explicitly deferred.
 - [ ] Fast-lane commands are given; full suites run once at the end.
 - [ ] Docs separate analytic anchors from measured returns.
+
+## Results
+
+2026-11-24, branch `sdd/m4b2`, base `feb257b`; docs land as `docs(heal): record the pole and
+point-gap contract` (this commit).
+
+**Commits**
+
+- `f7f277f` fix(face_uv): measure the sphere latitude away from the pole
+- `68b0a43` test(face_uv): cover the remaining sphere pole-gap cases
+- `dd1d76a` feat(solid_editor): dissolve an edge from its loops
+- `8af9474` feat(heal): weld collapsed boundary points before pairing
+- `feb257b` fix(heal): reject analytic surfaces with an invalid frame
+- `faf0b70` test(heal): compare heal issue messages by value
+
+**Fixtures.** All builders used by Tasks 1–4 live in `tests/unit/m4b_heal_fixture.hpp`
+(`make_sphere_pole_gap`, `make_malformed_sphere_pole_gap`, `add_cone_pinhole`,
+`add_cone_pinch`); a grep over `tests/unit/*.cpp` and `*.hpp` found no local duplicates, so no
+file had to move. `tests/unit/m4a_curved_heal_fixture.hpp` is untouched.
+
+**Measured (Release, clean rebuild).** Pole `(1e-8, 5e-9)` and `(5e-8, 2.5e-8)` with default
+options, `(1e-4, 5e-5)` with `{1e-9, 1e-4, 1e-4}`: boundary 4, welded 2 / sewn 2, chi 2, one
+closed shell, volume `2*pi/3`; `max_closed_gap` = `5e-9` / `2.5e-8` /
+`4.9999999994791671e-05`; volume deviations `1.19904e-14` / `4.88498e-15` / `1.95399e-14`.
+Pinholes r0=0 (`{1e-9, 1e-9, 1e-9}`) and r0=1e-6 (`{1e-9, 1e-5, 1e-4}`): boundary 0, welded 2,
+sewn 0, collapsed 2, V/E/F `3/3/2`, chi 2, volume deviations `1.33227e-15` / `4.44089e-15`.
+r0=1e-6 with `{1e-9, 1e-9, 1e-4}`: `changed == false`, boundary 2, one `invalid_result
+"heal_brep: no mutual pair"`, input fingerprint unchanged. Invalid frame: `unsupported
+"heal_brep: surface is invalid"` with `context_a == 1` (surface store index), fingerprint
+unchanged.
+
+**Lanes (Release, clean rebuild).** `*heal*` 95/2,002; `*torus*` 59/10,754; merged
+149/12,576 (936 skipped); `*uv*` 9/388; 0 failed.
+
+**Full suites.** Release (`--clean-first` rebuild after the header edits): 1085 cases /
+680,741 assertions, 0 failed (1074/680,503 before this task, i.e. +11 cases/+238 assertions).
+Debug full suite **PENDING — deferred to the milestone review**: sharded Debug runs covered
+1,077/1,085 cases and 553,598 assertions with 0 failures over about 5 hours; the 8 remaining
+cases are all `brep_boolean_curved_test.cpp` sphere/torus half-space booleans that take
+>20 min each under `/Od`, so the lead stopped the run rather than block the milestone. Debug
+lanes that did run: `*heal*` 95/2,002 and `*uv*` 9/388, both 0 failed. All Release lanes and
+the Debug heal lane used the freshly rebuilt binaries; no incremental objects were trusted.
+
+**Deviations.** The full Debug suite was not completed (see above; PENDING at the milestone).
+The fixture-move step was a no-op because the builders
+were already consolidated in M4b-2 Tasks 1–4. The point-weld `max_tolerance` gate has no direct
+rejection test (the tolerance-cap test at `tests/unit/brep_heal_curved_test.cpp:862` covers pair
+welds); the new cases constrain it only positively.

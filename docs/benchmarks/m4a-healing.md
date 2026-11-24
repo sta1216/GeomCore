@@ -20,8 +20,9 @@
 ## 测量定义
 
 - **gap**：`HealReport::max_closed_gap`，单位与模型一致。
-- **welded / sewn**：`HealReport::welded_vertices` / `sewn_edges`；前者按唯一
-  存活焊点根计数，后者是实际 `merge_edges` 的配对数。
+- **welded / sewn**：`HealReport::welded_vertices` / `sewn_edges`；M4a 语料只有
+  配对焊接，`welded_vertices` 按唯一存活焊点根计数；点隙焊接的簇成员计数与
+  `collapsed_edges` 见 M4b-2，M4a 语料不涉及。
 - **tolerance**：`HealReport::max_tolerance`；三个接受用例都等于 `max_closed_gap`，
   且不超过默认 `1e-6`。
 - **V/E/F**：`brep.vertex_count()` / `edge_count()` / `face_count()`，箭头左侧为

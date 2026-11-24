@@ -20,8 +20,9 @@
 
 - **gap**：成功时 `HealReport::max_closed_gap`；拒绝时
   `HealIssue::gap`（最近候选的实际端点距离）。
-- **welded / sewn**：`HealReport::welded_vertices` / `sewn_edges`；前者按唯一
-  存活焊点根计数，后者是实际 `merge_edges` 的配对数。
+- **welded / sewn**：`HealReport::welded_vertices` / `sewn_edges`；M3b-3 语料只有
+  配对焊接，`welded_vertices` 按唯一存活焊点根计数；点隙焊接的簇成员计数与
+  `collapsed_edges` 见 M4b-2，本文平面语料不涉及（恒为 0）。
 - **tolerance**：`HealReport::max_tolerance`，即提升操作返回值与最大焊点容差的
   较大者；另检查 `validate_tolerances` 与“所有顶点 tol ≤ cap”。
 - **volume / volume error**：`detail::curved_solid_volume(brep, solid, 1e-9)`

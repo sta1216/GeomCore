@@ -23,16 +23,21 @@
 
 - **gap**：`HealReport::max_closed_gap`，单位与模型一致。torus 夹具把目标弦长取为
   `gap*(1-1e-8)`，保证实测缝宽严格落在默认 `max_gap=1e-6` 内。
-- **welded / sewn**：`HealReport::welded_vertices` / `sewn_edges`；前者按唯一存活
-  焊点根计数，后者是实际 `merge_edges` 的配对数。
+- **welded / sewn**：`HealReport::welded_vertices` / `sewn_edges`；配对焊接按
+  唯一存活焊点根计数（torus 半体 4 个根即 4），点隙焊接按簇内成员计数
+  （M4b-2 的针孔把 2 个顶点合成 1 个存活焊点，记 2）；`sewn_edges` 是实际
+  `merge_edges` 的配对数。
 - **tolerance**：`HealReport::max_tolerance`；所有接受用例都等于 `max_closed_gap`，
   不超过默认 `1e-6`。
 - **V/E/F**：`brep.vertex_count()` / `edge_count()` / `face_count()`，箭头左侧为
   调用者输入、右侧为 `HealResult::brep`；括号内的“拆分后”是 `heal_brep` 私有
   工作副本的规模，即计划器实际看到的拓扑。`chi = V - E + F`（torus 半体按
   `euler_characteristic` 的 `V-E+F-(L-F)` 计算亦为 0）。
-- **boundary_edges**：`HealReport::boundary_edges` 是拆分后的工作边界边数（圆柱
-  闭合 rim 4、torus 半体 8），不是输入的闭合 rim 条数（2/4）。
+- **boundary_edges**：`HealReport::boundary_edges` 是闭合 rim 拆分后、再经点隙
+  焊接后的工作边界边数（圆柱闭合 rim 4、torus 半体 8），不是输入的闭合 rim
+  条数（2/4）；M4b-2 的 r0=0 针孔焊接后为 0，被 `max_gap` 拒绝时为 2。
+- **collapsed_edges**：`HealReport::collapsed_edges` 是点隙焊接消解掉的边界边数
+  （针孔 2 条 rim 边）；配对焊接不产生该项，M4b-1 语料恒为 0。
 - **volume**：`detail::curved_solid_volume(brep, solid, 1e-9)` 的返回值；锚相对闭式误差按
   `|锚-解析| / |解析|`，torus 半体为绝对误差。
 - **fingerprint**：拒绝路径用完整指纹（实体/几何存储计数、顶点位置/容差、边端点/
@@ -99,17 +104,18 @@ cmake --build build-rel --config Release --target geom_tests
 .\build-rel\tests\Release\geom_tests.exe --test-case="heal: a rejected closed-rim heal returns the caller's input"
 ```
 
-当前快速通道（Release）为 145 个用例、12,440 条断言、0 失败、929 跳过；其中
-`*heal*` 91 用例/1,866 断言、`*torus*` 59 用例/10,754 断言。Task 6 之前（T5）的
-基线是 `*heal*` 90/1,847、`*torus*` 59/10,754、合并 144/12,421；新增的 1 个用例/
-19 条断言全部来自上面的拒绝锁。
+当前快速通道（Release）为 149 个用例、12,576 条断言、0 失败、936 跳过；其中
+`*heal*` 95 用例/2,002 断言、`*torus*` 59 用例/10,754 断言。M4b-1 收尾（T5）的
+基线是 `*heal*` 91/1,866、`*torus*` 59/10,754、合并 145/12,440；M4b-2 新增的
+4 个 heal 用例/136 条断言来自球极点、两个锥针孔与无效解析面用例（见
+`docs/benchmarks/m4b2-healing.md`）。
 
 ## 范围与限制
 
 - 支持类别见 ADR-0026 补遗：面限 `Plane3`/`Cylinder3`/`Cone3`/`Sphere3`/`Torus3`，
   边限 `kNoGeometry`/`LineCurve3`/`CircleCurve3`；NURBS 与其他类型在修改前拒绝。
-- apex/pole gap（顶点/极点缩成一点）延后到 M4b-2；fillet/chamfer/shell 在更晚的
-  里程碑；NURBS 曲面/曲线与曲面重拟合仍不支持。
+- apex/pole gap 已在 M4b-2 关闭，见 `docs/benchmarks/m4b2-healing.md`；多壳点隙
+  延后。fillet/chamfer/shell 在更晚的里程碑；NURBS 曲面/曲线与曲面重拟合仍不支持。
 - partial-u 不做：本里程碑总是整条闭合边在参数中点拆分，不保留部分整圆边，也不
   处理 torus 的 u 周期多圈缠绕。
 - 拆分只发生在私有工作副本；拒绝时返回调用者输入，绝不把半拆分的拓扑泄漏给

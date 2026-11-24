@@ -261,3 +261,72 @@ M4b-1 取代 M4a 补遗中的两条结论：闭合整圆 rim 不再以 `unsuppor
   91 用例/1,866 断言、`-tc="*torus*"` 为 59/10,754、合并 145/12,440，0 失败；
   全量 Debug/Release 已运行：各 1074 用例 / 680,503 断言，0 失败。实测表见
   `docs/benchmarks/m4b-healing.md`，架构状态见 §16.4。
+
+## 补遗（2026-11-24）：M4b-2 极点与点隙
+
+M4b-2 关闭 M4b-1 延后的 apex/pole gap。实现由两条独立路径组成：球面反投影的
+极点纬度修复（图表修复，不放宽容差）与边界点簇焊接 pass（新拓扑操作，依赖
+`SolidEditor::dissolve_edge`）。适用范围仍是**单个目标实体的单壳**；多壳点隙
+明确延后。
+
+- **极点纬度用 atan2。** `face_uv_project_sphere` 的 `v` 改为
+  `atan2(dot(offset, axis), hypot(x, y))`（`x`/`y` 为径向分量），不再用
+  `asin(axial / radius)`：近极点时比值先舍入到 1，而径向长度仍可分辨，`asin`
+  会把整个极点邻域吸到图卡边界，导致 rim 在 pcurve 上不可分辨。方位角仍在
+  `hypot(x, y) > radius * 1e-12` 时取 `atan2(y, x)`，否则沿用 `previous_u`
+  （无历史则 0），因此极点本身不产生 NaN、环也不跳变。该修复是 M4b-1 极点
+  用例失败的直接原因，不是几何判定阈值的改变。
+- **`dissolve_edge` 语义。** `SolidEditor::dissolve_edge` 把一条边从它出现的
+  **所有** loop 中移除，保留两个端点顶点，并把每个 loop 的 `start` 重定位到
+  仍存活的 coedge；只接受边界边，移除 loop 最后一条 coedge 会被
+  `invalid_topology` 拒绝。它不删除面/壳/实体，也不做 interior（两侧都有面）
+  边的消解。锥 pinch 形体（顶点一个、seam 在同一 lateral loop 正反各用一次）
+  是该语义的验收形态。
+- **点隙焊接的顺序。** 固定顺序为：边界表/白名单/载体门禁 → 闭合 rim 拆分
+  （工作副本）→ **点隙焊接**（新的 work 副本，`detail::heal_weld_point_gaps`）
+  → `heal_plan`/Euler。点隙 pass 只在目标实体的边界顶点上做并查集聚类：
+  只合并 `point_distance(v0, v1) <= options.max_gap` 的边界边两端（严格门禁），
+  根取最小索引，簇是传递闭包；簇直径作为焊点容差带到保留顶点，若直径端点不含
+  保留顶点则先合并较高索引端点，使直径容差沿链传到保留顶点。若簇外还有边界
+  顶点落在 `max_gap` 内，该簇**留给配对焊接**（两条 rim 逐边配对，而不是塌缩），
+  避免把本可缝合的 rim 误判成点。
+- **限制。** 点隙 pass 只面向单壳、单目标实体；不跨越 shell 聚类，不 dissolve
+  interior 边，不改变面/壳数量。多壳点隙以及跨实体点隙不在本里程碑。
+- **容差门。** 点隙 pass 产生的所有保留顶点容差必须
+  `<= options.max_tolerance`；否则整个 heal 以
+  `invalid_result "heal_brep: tolerance cap exceeded"` 拒绝并返回调用者输入。
+  点隙容差也参与最终 `HealReport::max_tolerance`（与配对容差取最大）。
+- **诚实的 no-mutual-pair。** 点隙 pass 之后若仍有边界边且配对计划为空，不能把
+  “没焊上”报成成功：返回 `HealResult`、`changed == false`、`issues` 恰一条
+  `invalid_result "heal_brep: no mutual pair"`，`boundary_edges` 是点隙后的
+  工作计数（r0=1e-6、`max_gap=1e-9` 时为 2），返回 Brep 是原始输入。于是
+  “低于 `max_gap` 的针孔保持开口”成为显式、可观察的结果。
+- **报告计数语义（自 M4b-2 起）。** `welded_vertices` 对配对焊接仍数存活根，
+  对点焊接还要计入**每个点簇成员**：r0=0 与 r0=1e-6 的针孔都是两个边界顶点
+  合成一个存活焊点，故记 2 而非 1。`boundary_edges` 是闭合 rim 拆分后、再经
+  点隙焊接后的工作边界边数（针孔愈合后 0，被拒时 2）。`collapsed_edges` 统计
+  点隙 pass 消解的边界边数（每个针孔 2 条 rim 边）；配对焊接不产生该项。
+- **无效解析面拒绝。** 在规划/修改之前，对目标实体每个面引用的解析曲面做
+  `if constexpr (requires { candidate.is_valid(); })` 检查；只有提供
+  `is_valid()` 的 `Cylinder3`/`Cone3`/`Sphere3`/`Torus3` 会被校验，`Plane3`
+  没有 `is_valid()`，因此平面不做该校验。失败返回
+  `unsupported "heal_brep: surface is invalid"`，`context_a` 是**曲面存储
+  索引**（不是面索引），输入完整指纹不变，重复调用结果一致。
+- **验收。** 球极点缝隙三例：`(delta, gap) = (1e-8, 5e-9)` 与
+  `(5e-8, 2.5e-8)` 用默认 `HealOptions`，`(1e-4, 5e-5)` 显式
+  `{1e-9, 1e-4, 1e-4}`；均 changed、无 issue、`boundary_edges == 4`、
+  2 焊点/2 缝合边、`max_closed_gap` 等于 p0/c0 弦距、`chi == 2`、闭合单壳、
+  体积 `2π/3`。锥针孔 r0=0（`{1e-9, 1e-9, 1e-9}`）与 r0=1e-6
+  （`{1e-9, 1e-5, 1e-4}`）均 0 边界边、2 焊点、2 collapsed、V/E/F `3/3/2`、
+  `chi == 2`、体积 `2π/3`（容差分别 1e-12 与 1e-9）。r0=1e-6 改用
+  `{1e-9, 1e-9, 1e-4}` 必须得到 no-mutual-pair 而不是假成功。
+- **测试证据。** 新用例在 `tests/unit/brep_heal_curved_test.cpp`
+  （极点、针孔、无效面）与 `tests/unit/brep_face_uv_test.cpp`（极点纬度）；
+  夹具集中在 `tests/unit/m4b_heal_fixture.hpp`。Release 快速通道
+  `-tc="*heal*"` 为 95 用例/2,002 断言，`-tc="*uv*"` 为 9/388；全量 Release 为
+  1085 用例/680,741 断言，0 失败（较 M4b-1 +11 用例/+238 断言）。全量 Debug
+  未完成：分片跑到 1,077/1,085 用例、553,598 断言、0 失败，余下 8 个球体布尔
+  用例在 `/Od` 下超时，移交里程碑评审（PENDING）。实测表见
+  `docs/benchmarks/m4b2-healing.md`，架构状态见 §16.4。
+- **延期项。** 多壳点隙、跨实体点隙延后；partial-u、NURBS、fillet/chamfer/
+  shell 与曲面重拟合不变。
