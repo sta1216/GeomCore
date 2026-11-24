@@ -1467,8 +1467,9 @@ TEST_CASE("heal: a tiny pinhole rim welds only within max_gap") {
   CHECK(result.report.welded_vertices == 2u);
   CHECK(result.report.sewn_edges == 0u);
   CHECK(result.report.collapsed_edges == 2u);
-  // The merged rim vertices carry the 2e-6 rim diameter as tolerance.
-  CHECK(result.report.max_tolerance <= 1e-4);
+  // The merged rim vertices carry the 2e-6 rim diameter as tolerance, not the
+  // caller's cap.
+  CHECK(result.report.max_tolerance <= 2e-6);
   CHECK(brep_fingerprint(brep) == input_fingerprint);
 
   CHECK(result.brep.vertex_count() == 3u);
@@ -1512,4 +1513,24 @@ TEST_CASE("heal: a tiny pinhole rim welds only within max_gap") {
         "heal_brep: no mutual pair");
   CHECK(detail::heal_boundary_edges(rejected_result.brep, cone.solid).size() ==
         2u);
+
+  // A tolerant gap is not a licence to invent a larger tolerance: the merged
+  // cluster would need 2e-6, which the caller capped at 1e-9. The pass must
+  // refuse the whole plan and return the input bit for bit.
+  const std::vector<double> full_input_fingerprint = full_brep_fingerprint(brep);
+  const auto capped =
+      heal_brep(brep, cone.solid, HealOptions{1e-9, 1e-5, 1e-9});
+  REQUIRE(capped.has_value());
+  const HealResult& capped_result = capped.value();
+  CHECK_FALSE(capped_result.report.changed);
+  CHECK(capped_result.report.boundary_edges == 2u);
+  CHECK(capped_result.report.welded_vertices == 0u);
+  CHECK(capped_result.report.collapsed_edges == 0u);
+  CHECK(capped_result.report.max_tolerance == 0.0);
+  REQUIRE(capped_result.report.issues.size() == 1u);
+  CHECK(capped_result.report.issues.front().kind == HealIssueKind::invalid_result);
+  CHECK(std::string_view(capped_result.report.issues.front().message) ==
+        "heal_brep: tolerance cap exceeded");
+  CHECK(full_brep_fingerprint(capped_result.brep) == full_input_fingerprint);
+  CHECK(full_brep_fingerprint(brep) == full_input_fingerprint);
 }

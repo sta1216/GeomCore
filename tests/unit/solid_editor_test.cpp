@@ -353,31 +353,24 @@ TEST_CASE("solid editor: dissolve_edge of a twice-used edge relinks one loop") {
   CHECK(geom::validate_topology(committed.value()).ok());
 }
 
-TEST_CASE("solid editor: dissolve_edge shared by two loops relocates both starts") {
+TEST_CASE("solid editor: dissolve_edge rejects an edge shared by two loops") {
   geom::SolidEditor ed;
   const geom::test::m4b::ConePinhole cone =
       geom::test::m4b::add_cone_pinhole(ed, 0.0, 0.25, true);
-  const geom::CoedgeId lateral_start = ed.brep().loop(cone.lateral_loop).start;
-  const geom::CoedgeId base_start = ed.brep().loop(cone.base_loop).start;
-  REQUIRE(ed.brep().coedge(lateral_start).edge == cone.base0);
-  REQUIRE(ed.brep().coedge(base_start).edge == cone.base0);
+  REQUIRE(ed.brep().coedge_count() == 8u);
 
+  // base0 is used once by the lateral loop and once by the base loop. Splicing
+  // it out of both would leave each loop open (even though the edge count and
+  // handle checks would still pass), so the editor must refuse and stage
+  // nothing.
   const auto r = ed.dissolve_edge(cone.base0);
-  REQUIRE(r.has_value());
-
-  CHECK_FALSE(ed.brep().edge_alive(cone.base0));
-  CHECK(ed.brep().vertex_alive(cone.b0));
-  CHECK(ed.brep().vertex_alive(cone.b1));
-  CHECK(loop_coedge_count(ed.brep(), cone.lateral_loop) == 5u);
-  CHECK(loop_coedge_count(ed.brep(), cone.base_loop) == 1u);
-  const geom::CoedgeId new_lateral_start = ed.brep().loop(cone.lateral_loop).start;
-  const geom::CoedgeId new_base_start = ed.brep().loop(cone.base_loop).start;
-  CHECK(new_lateral_start != lateral_start);
-  CHECK(new_base_start != base_start);
-  CHECK(ed.brep().coedge(new_lateral_start).edge == cone.base1);
-  CHECK(ed.brep().coedge(new_base_start).edge == cone.base1);
-  CHECK(ed.brep().edge_count() == 4u);
-  CHECK(ed.brep().coedge_count() == 6u);
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(r.error().message) ==
+        "solid_editor: dissolve_edge requires all uses in one loop");
+  CHECK(r.error().context_a == cone.base0.index());
+  CHECK(ed.brep().edge_alive(cone.base0));
+  CHECK(ed.brep().coedge_count() == 8u);
   const auto committed = ed.commit();
   REQUIRE(committed.has_value());
   CHECK(geom::validate_topology(committed.value()).ok());
@@ -385,23 +378,25 @@ TEST_CASE("solid editor: dissolve_edge shared by two loops relocates both starts
 
 TEST_CASE("solid editor: dissolve_edge refuses to empty a loop") {
   geom::SolidEditor ed;
-  const geom::test::m4b::ConePinch cone = geom::test::m4b::add_cone_pinch(ed, 0.0);
-  REQUIRE(ed.dissolve_edge(cone.base0).has_value());
-  REQUIRE(loop_coedge_count(ed.brep(), cone.base_loop) == 1u);
-  REQUIRE(loop_coedge_count(ed.brep(), cone.lateral_loop) == 3u);
+  const std::uint32_t surface = ed.add_surface(geom::Plane3{{0.0, 0.0, 1.0}, 0.0});
+  const std::uint32_t curve = ed.add_curve(geom::LineCurve3{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}});
+  const geom::VertexId v0 = geom::test::m4a::m4a_vertex(ed, {0.0, 0.0, 0.0});
+  const geom::VertexId v1 = geom::test::m4a::m4a_vertex(ed, {1.0, 0.0, 0.0});
+  const geom::EdgeId edge = geom::test::m4a::m4a_edge(ed, v0, v1, curve, 0.0, 1.0);
+  const geom::FaceId face = geom::test::m4a::m4a_face(ed, surface);
+  // A single edge traversed once in each direction: removing its two uses would
+  // leave the loop with no coedge at all.
+  const std::array<geom::CoedgeSpec, 2> loop{{{edge, false}, {edge, true}}};
+  REQUIRE(ed.add_loop(face, loop, true).has_value());
 
-  const auto r = ed.dissolve_edge(cone.base1);
+  const auto r = ed.dissolve_edge(edge);
   REQUIRE_FALSE(r.has_value());
-  CHECK(r.error().code == geom::Errc::unsupported);
+  CHECK(r.error().code == geom::Errc::invalid_topology);
   CHECK(std::string_view(r.error().message) == "solid_editor: dissolve would empty a loop");
-  CHECK(r.error().context_a == cone.base1.index());
+  CHECK(r.error().context_a == edge.index());
   // The refused call staged nothing.
-  CHECK(ed.brep().edge_alive(cone.base1));
-  CHECK(loop_coedge_count(ed.brep(), cone.base_loop) == 1u);
-  CHECK(loop_coedge_count(ed.brep(), cone.lateral_loop) == 3u);
-  CHECK(ed.brep().edge_count() == 2u);
-  CHECK(ed.brep().coedge_count() == 4u);
-  CHECK(ed.commit().has_value());
+  CHECK(ed.brep().edge_alive(edge));
+  CHECK(ed.brep().coedge_count() == 2u);
 }
 
 TEST_CASE("solid editor: dissolve_edge rejects a dead edge") {

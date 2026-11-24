@@ -605,18 +605,21 @@ class SolidEditor {
     return {};
   }
 
-  // Removes `edge` from every loop that uses it, splicing each use out of its
+  // Removes `edge` from the loop that uses it, splicing each use out of the
   // loop's next/prev chain and releasing the coedge; the edge's vertices stay
-  // alive. Both pinhole topologies are handled: one loop may use the edge twice
-  // (the two directions of a collapsed-pole seam) and the edge may be used once
-  // in each of two loops (a boundary edge between two faces). loop.start is
-  // relocated to the next surviving coedge when it named a removed use. The edge
-  // is released last, after no coedge references it; loops, faces, shells and
-  // solids are otherwise unchanged.
+  // alive. The pinhole topology is handled: one loop may use the edge twice (the
+  // two directions of a collapsed-pole seam). loop.start is relocated to the
+  // next surviving coedge when it named a removed use. The edge is released
+  // last, after no coedge references it; loops, faces, shells and solids are
+  // otherwise unchanged.
   //
-  // A loop that would be left with no coedge is refused before anything is
-  // staged, because an empty loop is not a valid face boundary. A dead edge is
-  // rejected the same way erase_edge() rejects one.
+  // All uses must belong to one loop. An edge shared by two loops (a manifold
+  // edge between faces) is rejected with `unsupported`, because splicing it out
+  // of both loops would leave each loop open; a caller that wants to remove such
+  // an edge must rebuild both loops. A loop that would be left with no coedge is
+  // refused with `invalid_topology` before anything is staged, because an empty
+  // loop is not a valid face boundary. A dead edge is rejected the same way
+  // erase_edge() rejects one.
   Result<void> dissolve_edge(EdgeId edge) {
     if (!staged_.edge_alive(edge)) {
       return Error{Errc::index_out_of_range, "solid_editor: edge is not alive", edge.index(),
@@ -626,6 +629,14 @@ class SolidEditor {
     std::vector<CoedgeId> uses;
     for (const CoedgeId id : staged_.coedge_ids()) {
       if (staged_.coedges_[id.index()].edge == edge) uses.push_back(id);
+    }
+
+    for (const CoedgeId use : uses) {
+      if (staged_.coedges_[use.index()].loop != staged_.coedges_[uses.front().index()].loop) {
+        return Error{Errc::unsupported,
+                     "solid_editor: dissolve_edge requires all uses in one loop", edge.index(),
+                     0u};
+      }
     }
 
     // Group the uses by loop. The removal is all-or-nothing, so a loop whose
@@ -649,7 +660,7 @@ class SolidEditor {
         if (staged_.coedges_[id.index()].loop == loops[i]) ++live;
       }
       if (live == uses_per_loop[i]) {
-        return Error{Errc::unsupported, "solid_editor: dissolve would empty a loop",
+        return Error{Errc::invalid_topology, "solid_editor: dissolve would empty a loop",
                      edge.index(), 0u};
       }
     }
