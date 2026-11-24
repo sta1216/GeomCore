@@ -320,8 +320,8 @@ C++20; CMake 4.x with the existing presets; MSVC 19.44, GCC 15.2, Clang 21.1 in 
 
 ## Results
 
-2026-11-24, branch `sdd/m4b2`, base `feb257b`; docs land as `docs(heal): record the pole and
-point-gap contract` (this commit).
+2026-11-24, branch `sdd/m4b2`, base `3bad7e1`; docs land as `docs(heal): record the pole and
+point-gap contract` (`9496510`), followed by the post-review fixes `fbc1ea9` and `c41c6e2`.
 
 **Commits**
 
@@ -331,6 +331,9 @@ point-gap contract` (this commit).
 - `8af9474` feat(heal): weld collapsed boundary points before pairing
 - `feb257b` fix(heal): reject analytic surfaces with an invalid frame
 - `faf0b70` test(heal): compare heal issue messages by value
+- `9496510` docs(heal): record the pole and point-gap contract
+- `fbc1ea9` test(brep): format failure messages without error() on success
+- `c41c6e2` fix(brep): restrict dissolve_edge to a single loop
 
 **Fixtures.** All builders used by Tasks 1–4 live in `tests/unit/m4b_heal_fixture.hpp`
 (`make_sphere_pole_gap`, `make_malformed_sphere_pole_gap`, `add_cone_pinhole`,
@@ -344,15 +347,20 @@ closed shell, volume `2*pi/3`; `max_closed_gap` = `5e-9` / `2.5e-8` /
 Pinholes r0=0 (`{1e-9, 1e-9, 1e-9}`) and r0=1e-6 (`{1e-9, 1e-5, 1e-4}`): boundary 0, welded 2,
 sewn 0, collapsed 2, V/E/F `3/3/2`, chi 2, volume deviations `1.33227e-15` / `4.44089e-15`.
 r0=1e-6 with `{1e-9, 1e-9, 1e-4}`: `changed == false`, boundary 2, one `invalid_result
-"heal_brep: no mutual pair"`, input fingerprint unchanged. Invalid frame: `unsupported
+"heal_brep: no mutual pair"`, input fingerprint unchanged. r0=1e-6 with `{1e-9, 1e-5, 1e-9}`:
+`changed == false`, boundary 2, welded/collapsed 0, one `invalid_result
+"heal_brep: tolerance cap exceeded"`, input fingerprint unchanged (the cluster needs 2e-6 and the
+caller capped the tolerance at 1e-9). Invalid frame: `unsupported
 "heal_brep: surface is invalid"` with `context_a == 1` (surface store index), fingerprint
 unchanged.
 
-**Lanes (Release, clean rebuild).** `*heal*` 95/2,002; `*torus*` 59/10,754; merged
-149/12,576 (936 skipped); `*uv*` 9/388; 0 failed.
+**Lanes (Release, clean rebuild).** `*heal*` 95/2,013; `*torus*` 59/10,754; merged
+149/12,576 (936 skipped); `*uv*` 9/388; `*dissolve*` 6/75; `*pinhole*` 3/86; `*pole*` 17/1,389;
+0 failed.
 
 **Full suites.** Release (`--clean-first` rebuild after the header edits): 1085 cases /
-680,741 assertions, 0 failed (1074/680,503 before this task, i.e. +11 cases/+238 assertions).
+680,739 assertions, 0 failed (1074/680,503 before this milestone, i.e. +11 cases/+236
+assertions).
 Debug full suite **PENDING — deferred to the milestone review**: sharded Debug runs covered
 1,077/1,085 cases and 553,598 assertions with 0 failures over about 5 hours; the 8 remaining
 cases are all `brep_boolean_curved_test.cpp` sphere/torus half-space booleans that take
@@ -362,6 +370,12 @@ the Debug heal lane used the freshly rebuilt binaries; no incremental objects we
 
 **Deviations.** The full Debug suite was not completed (see above; PENDING at the milestone).
 The fixture-move step was a no-op because the builders
-were already consolidated in M4b-2 Tasks 1–4. The point-weld `max_tolerance` gate has no direct
-rejection test (the tolerance-cap test at `tests/unit/brep_heal_curved_test.cpp:862` covers pair
-welds); the new cases constrain it only positively.
+were already consolidated in M4b-2 Tasks 1–4. Final review found that the public
+`dissolve_edge` accepted an edge shared by two loops and could commit a solid whose loops no
+longer close (`validate_topology` does not check loop closure); `c41c6e2` now rejects that case
+with `unsupported`, returns `invalid_topology` for an emptied loop, and the corresponding test
+asserts rejection instead of the old relinking. The same commit adds the direct point-weld
+`max_tolerance` rejection test (`{1e-9, 1e-5, 1e-9}`), so the cap is no longer covered only
+positively. `fbc1ea9` fixes a Debug-only test bug (pointer comparison of `const char*` issue
+messages) and routes boolean test messages through a guarded helper, so `--success` runs no
+longer call `error()` on a success value.

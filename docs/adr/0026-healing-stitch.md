@@ -276,12 +276,13 @@ M4b-2 关闭 M4b-1 延后的 apex/pole gap。实现由两条独立路径组成�
   `hypot(x, y) > radius * 1e-12` 时取 `atan2(y, x)`，否则沿用 `previous_u`
   （无历史则 0），因此极点本身不产生 NaN、环也不跳变。该修复是 M4b-1 极点
   用例失败的直接原因，不是几何判定阈值的改变。
-- **`dissolve_edge` 语义。** `SolidEditor::dissolve_edge` 把一条边从它出现的
-  **所有** loop 中移除，保留两个端点顶点，并把每个 loop 的 `start` 重定位到
-  仍存活的 coedge；只接受边界边，移除 loop 最后一条 coedge 会被
-  `invalid_topology` 拒绝。它不删除面/壳/实体，也不做 interior（两侧都有面）
-  边的消解。锥 pinch 形体（顶点一个、seam 在同一 lateral loop 正反各用一次）
-  是该语义的验收形态。
+- **`dissolve_edge` 语义。** `SolidEditor::dissolve_edge` 只接受**同一个 loop
+  内**的边（pinch 形态：同一 loop 正反各用一次），把该 loop 中这条边的所有
+  coedge 移除，保留两个端点顶点，并把 loop 的 `start` 重定位到仍存活的
+  coedge。若边被两个不同 loop 各用一次（两侧都有面的流形边），移除会让两个
+  loop 都开口，因此以 `unsupported` 拒绝；调用者需要重建两个 loop。移除 loop
+  最后一条 coedge 会被 `invalid_topology` 拒绝。它不删除面/壳/实体。锥 pinch
+  形体（顶点一个、seam 在同一 lateral loop 正反各用一次）是该语义的验收形态。
 - **点隙焊接的顺序。** 固定顺序为：边界表/白名单/载体门禁 → 闭合 rim 拆分
   （工作副本）→ **点隙焊接**（新的 work 副本，`detail::heal_weld_point_gaps`）
   → `heal_plan`/Euler。点隙 pass 只在目标实体的边界顶点上做并查集聚类：
