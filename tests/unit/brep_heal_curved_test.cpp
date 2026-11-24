@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -29,8 +30,6 @@ constexpr std::string_view kOffSurfaceMessage =
     "heal_brep: gap edge is not on its face surface";
 constexpr std::string_view kKeptCurveMessage =
     "heal_brep: kept edge curve does not match its welded vertices";
-constexpr std::string_view kClosedRimMessage =
-    "heal_brep: closed gap edge cannot be paired; split the rim first";
 
 bool contains(std::string_view text, std::string_view needle) {
   return text.find(needle) != std::string_view::npos;
@@ -321,20 +320,6 @@ TEST_CASE("heal: a kept curve must pass through its welded vertices") {
   CHECK(brep_fingerprint(cylinder.brep) == before);
 }
 
-TEST_CASE("heal: a closed gap rim is reported instead of a zero-length edge") {
-  const test::m4a::CurvedSolid cylinder =
-      test::m4a::make_cylinder_closed_rims_gap(1e-6);
-  const std::vector<double> before = brep_fingerprint(cylinder.brep);
-
-  const auto healed = heal_brep(cylinder.brep, cylinder.solid, {});
-  REQUIRE_FALSE(healed.has_value());
-  CHECK(healed.error().code == Errc::unsupported);
-  CHECK(std::string_view(healed.error().message) == kClosedRimMessage);
-  CHECK(healed.error().context_a == 1u);
-  CHECK(healed.error().context_b == 0u);
-  CHECK(brep_fingerprint(cylinder.brep) == before);
-}
-
 TEST_CASE("heal: a radius mismatch beyond max_gap stays a gap_too_large report") {
   const test::m4a::CurvedSolid cylinder =
       test::m4a::make_cylinder_radius_gap(1e-3, 1.001);
@@ -575,6 +560,10 @@ CurvedAcceptance check_closed_curved_heal(
   const std::vector<double> input_fingerprint = brep_fingerprint(fixture.brep);
 
   const auto healed = heal_brep(fixture.brep, fixture.solid, options);
+  if (!healed.has_value()) {
+    MESSAGE("heal_brep rejected the closed solid: "
+            << std::string(healed.error().message));
+  }
   REQUIRE(healed.has_value());
   const HealResult& result = healed.value();
   CHECK(result.report.changed);
@@ -625,6 +614,26 @@ CurvedAcceptance check_closed_curved_heal(
 }
 
 }  // namespace
+
+TEST_CASE("heal: closed rim gaps are split and healed") {
+  constexpr double gap = 1e-6;
+  const test::m4a::CurvedSolid fixture =
+      test::m4a::make_cylinder_closed_rims_gap(gap);
+  // Vertices are created b0, t0, u0, v0; each closed rim is split at its
+  // opposite-seam midpoint, then t0/t1 are welded to u0/u1 across the gap.
+  const double measured_gap = vertex_gap(fixture.brep, 1, 2);
+
+  const CurvedAcceptance accepted = check_closed_curved_heal(
+      fixture, {}, test::m4a::kPi * (2.0 + gap), 1e-12, measured_gap);
+
+  // The healer keeps the input height 2 + gap instead of shrinking the gap, as
+  // in the open two-band case.
+  CHECK(accepted.brep.face_count() == 4u);
+  CHECK(std::fabs(accepted.volume - test::m4a::kTwoPi) <=
+        1e-6 * test::m4a::kTwoPi);
+  CHECK(std::fabs(accepted.volume - 6.2831884487723997) <=
+        1e-12 * 6.2831884487723997);
+}
 
 TEST_CASE("heal: analytic curved gaps are accepted") {
   SUBCASE("cylinder") {

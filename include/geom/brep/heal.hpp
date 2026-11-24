@@ -19,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -663,6 +664,41 @@ inline std::vector<EdgeId> heal_boundary_edges(const Brep& brep, SolidId solid) 
   return boundary;
 }
 
+// Splits every closed boundary rim of `solid` on a private copy of `brep`. A
+// closed edge (v0 == v1) has no traversal direction for heal_plan's orientation
+// check, and welding its single vertex to itself would collapse the rim, so the
+// planner can only pair the two open halves left by a midpoint split. Returns an
+// empty optional when the solid has no closed boundary edge, which keeps the
+// caller's existing path (and the input itself) untouched; on success the
+// optional holds the working copy with the split topology.
+inline Result<std::optional<Brep>> heal_split_closed_rims(const Brep& brep,
+                                                          SolidId solid) {
+  const std::vector<EdgeId> boundary = heal_boundary_edges(brep, solid);
+  bool has_closed_rim = false;
+  for (const EdgeId edge_id : boundary) {
+    const Edge& edge = brep.edge(edge_id);
+    if (edge.v0 == edge.v1) {
+      has_closed_rim = true;
+      break;
+    }
+  }
+  if (!has_closed_rim) return std::optional<Brep>{};
+
+  // split_edge rejects an edge without a carrier and leaves the staging copy
+  // untouched on failure, so a malformed rim never reaches the caller.
+  SolidEditor editor(brep);
+  for (const EdgeId edge_id : boundary) {
+    const Edge& edge = brep.edge(edge_id);
+    if (edge.v0 != edge.v1) continue;
+    const double middle = edge.t0 + 0.5 * (edge.t1 - edge.t0);
+    const Result<VertexId> split = editor.split_edge(edge_id, middle);
+    if (!split) return split.error();
+  }
+  Result<Brep> committed = editor.commit();
+  if (!committed) return committed.error();
+  return std::optional<Brep>{std::move(committed).value()};
+}
+
 // Largest radius/centre/origin magnitude of a surface. Multiplied by 1e-12 it
 // supplies the geometric floor for the coincidence and on-surface guards.
 inline double heal_surface_scale(const SurfaceGeometry& surface) {
@@ -1186,7 +1222,7 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
     return Error{issue.code, issue.message, issue.entity, 0};
   }
 
-  const std::vector<EdgeId> boundary = detail::heal_boundary_edges(brep, solid);
+  std::vector<EdgeId> boundary = detail::heal_boundary_edges(brep, solid);
 
   // A boundary edge is only safe to stitch when both of its uses belong to the
   // target solid. A shared edge would let heal_plan read the foreign coedge for
@@ -1201,14 +1237,20 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
       }
     }
   }
-  std::vector<std::vector<CoedgeId>> edge_coedges(brep.edges().size());
-  for (const CoedgeId coedge_id : brep.coedge_ids()) {
-    const Coedge& coedge = brep.coedge(coedge_id);
-    if (brep.edge_alive(coedge.edge) &&
-        coedge.edge.index() < edge_coedges.size()) {
-      edge_coedges[coedge.edge.index()].push_back(coedge_id);
+  // Coedge uses of every edge, gathered for the solid-local boundary checks.
+  // Rebuilt after a closed-rim split because the working copy has new edges.
+  const auto collect_edge_coedges = [](const Brep& source) {
+    std::vector<std::vector<CoedgeId>> map(source.edges().size());
+    for (const CoedgeId coedge_id : source.coedge_ids()) {
+      const Coedge& coedge = source.coedge(coedge_id);
+      if (source.edge_alive(coedge.edge) &&
+          coedge.edge.index() < map.size()) {
+        map[coedge.edge.index()].push_back(coedge_id);
+      }
     }
-  }
+    return map;
+  };
+  std::vector<std::vector<CoedgeId>> edge_coedges = collect_edge_coedges(brep);
   for (const EdgeId edge_id : boundary) {
     for (const CoedgeId coedge_id : edge_coedges[edge_id.index()]) {
       const FaceId face_id = brep.coedge(coedge_id).face;
@@ -1275,26 +1317,34 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
 
   // A closed rim edge (one vertex, v0 == v1) cannot be paired: welding would
   // collapse both ends onto the same point, leaving no traversal direction for
-  // the orientation check. heal_plan's zero-length guard below is meant for two
-  // distinct vertices that happen to coincide. Report the closed-rim case
-  // explicitly and leave splitting to split_solid (collapse_circular_chains).
-  // This runs on the immutable input before any SolidEditor mutation.
-  for (const EdgeId edge_id : boundary) {
-    const Edge& edge = brep.edge(edge_id);
-    if (edge.v0 == edge.v1) {
-      return Error{Errc::unsupported,
-                   "heal_brep: closed gap edge cannot be paired; split the rim "
-                   "first",
-                   edge_id.index(), 0};
-    }
+  // the orientation check. Split every closed boundary edge at the midpoint of
+  // its parameter span on a working copy, so the planner sees ordinary open
+  // halves across the gap. The copy is local to this call: `brep` stays the
+  // untouched input and every rejection below returns it verbatim. Splitting
+  // changes topology only, so the curve and surface stores (and the geometry
+  // indices the guards use) are identical in the working copy.
+  Result<std::optional<Brep>> split_result =
+      detail::heal_split_closed_rims(brep, solid);
+  if (!split_result) return split_result.error();
+  Brep split_brep;
+  const bool split_closed_rims = split_result.value().has_value();
+  if (split_closed_rims) {
+    split_brep = std::move(split_result).value().value();
+  }
+  const Brep& work = split_closed_rims ? split_brep : brep;
+  if (split_closed_rims) {
+    // The boundary and its coedge uses describe the topology the split just
+    // changed, so both maps are rebuilt on the working copy.
+    boundary = detail::heal_boundary_edges(work, solid);
+    edge_coedges = collect_edge_coedges(work);
   }
 
   HealReport report;
   report.boundary_edges = static_cast<std::uint32_t>(boundary.size());
-  const std::int64_t euler_before = euler_characteristic(brep, solid);
+  const std::int64_t euler_before = euler_characteristic(work, solid);
 
   Result<detail::HealPlan> plan_result =
-      detail::heal_plan(brep, boundary, options.max_gap);
+      detail::heal_plan(work, boundary, options.max_gap);
   if (!plan_result) return plan_result.error();
   detail::HealPlan plan = std::move(plan_result).value();
 
@@ -1312,9 +1362,9 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
     return HealResult{brep, std::move(rejected)};
   };
 
-  // The geometric guards below run on the immutable input after the plan is
-  // known and before any SolidEditor mutation, so a rejection leaves the brep
-  // exactly as it arrived.
+  // The geometric guards below run on the immutable working copy after the plan
+  // is known and before any SolidEditor mutation, so a rejection leaves the
+  // caller's brep exactly as it arrived.
   double surface_scale = 0.0;
   for (const SurfaceGeometry& surface : surfaces) {
     surface_scale = std::max(surface_scale, detail::heal_surface_scale(surface));
@@ -1327,9 +1377,9 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
   // the edge is expected to lie on.
   const auto edge_surface = [&](EdgeId edge_id) -> const SurfaceGeometry* {
     for (const CoedgeId coedge_id : edge_coedges[edge_id.index()]) {
-      const FaceId face_id = brep.coedge(coedge_id).face;
-      if (!brep.face_alive(face_id)) continue;
-      const Face& face = brep.face(face_id);
+      const FaceId face_id = work.coedge(coedge_id).face;
+      if (!work.face_alive(face_id)) continue;
+      const Face& face = work.face(face_id);
       if (face.surface != kNoGeometry && face.surface < surfaces.size()) {
         return &surfaces[face.surface];
       }
@@ -1352,15 +1402,15 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
   for (const detail::HealEdgePair& pair : plan.considered) {
     const SurfaceGeometry* keep_surface = edge_surface(pair.keep);
     const SurfaceGeometry* drop_surface = edge_surface(pair.drop);
-    const Edge& keep_edge = brep.edge(pair.keep);
-    const Edge& drop_edge = brep.edge(pair.drop);
+    const Edge& keep_edge = work.edge(pair.keep);
+    const Edge& drop_edge = work.edge(pair.drop);
     const bool keep_off_surface =
         keep_surface != nullptr &&
-        !detail::heal_edge_lies_on_surface(brep, keep_edge, *keep_surface,
+        !detail::heal_edge_lies_on_surface(work, keep_edge, *keep_surface,
                                            check_tolerance);
     const bool drop_off_surface =
         drop_surface != nullptr &&
-        !detail::heal_edge_lies_on_surface(brep, drop_edge, *drop_surface,
+        !detail::heal_edge_lies_on_surface(work, drop_edge, *drop_surface,
                                            check_tolerance);
     if (keep_off_surface || drop_off_surface) {
       return Error{Errc::unsupported,
@@ -1373,10 +1423,10 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
   // pass through both of the edge's final keep vertices. Resolve chains to the
   // single surviving vertex before measuring.
   const Result<std::vector<detail::HealVertexWeld>> welds_result =
-      detail::heal_dedup_welds(brep, plan.pairs);
+      detail::heal_dedup_welds(work, plan.pairs);
   if (!welds_result) return welds_result.error();
 
-  std::vector<std::uint32_t> final_keep(brep.vertices().size());
+  std::vector<std::uint32_t> final_keep(work.vertices().size());
   for (std::size_t index = 0; index < final_keep.size(); ++index) {
     final_keep[index] = static_cast<std::uint32_t>(index);
   }
@@ -1396,14 +1446,14 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
   };
 
   for (const detail::HealEdgePair& pair : plan.pairs) {
-    const Edge& keep_edge = brep.edge(pair.keep);
+    const Edge& keep_edge = work.edge(pair.keep);
     if (keep_edge.curve == kNoGeometry ||
         keep_edge.curve >= curves.size()) {
       continue;
     }
     const CurveGeometry& curve = curves[keep_edge.curve];
     for (const VertexId endpoint : {keep_edge.v0, keep_edge.v1}) {
-      const Point3d mapped = brep.vertices()[root_of(endpoint.index())].point;
+      const Point3d mapped = work.vertices()[root_of(endpoint.index())].point;
       if (!(detail::heal_curve_residual(curve, mapped) <= check_tolerance)) {
         return Error{Errc::unsupported,
                      "heal_brep: kept edge curve does not match its welded "
@@ -1428,7 +1478,7 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
   for (const detail::HealEdgePair& pair : plan.pairs) {
     for (const detail::HealVertexWeld& weld : pair.welds) {
       const double weld_tolerance =
-          std::max({brep.vertex(weld.keep).tol, brep.vertex(weld.drop).tol,
+          std::max({work.vertex(weld.keep).tol, work.vertex(weld.drop).tol,
                     pair.gap});
       largest_weld_tolerance = std::max(largest_weld_tolerance, weld_tolerance);
       if (weld_tolerance > options.max_tolerance) {
@@ -1437,7 +1487,7 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
     }
   }
 
-  SolidEditor editor(brep);
+  SolidEditor editor(work);
   const Result<std::vector<detail::HealVertexWeld>> applied_result =
       detail::heal_apply_welds(editor, welds_result.value());
   if (!applied_result) return reject(applied_result.error().message, true);
