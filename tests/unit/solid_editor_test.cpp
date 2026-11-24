@@ -4,12 +4,28 @@
 #include <cstdint>
 #include <limits>
 #include <span>
+#include <string_view>
 #include <utility>
 
 #include <geom/brep/solid_editor.hpp>
 #include <geom/core/error.hpp>
 
+#include "m4b_heal_fixture.hpp"
+
 namespace {
+
+// Walks a loop's next-cycle and returns its coedge count. The guard keeps a
+// corrupt chain from turning a failed assertion into an infinite loop.
+std::uint32_t loop_coedge_count(const geom::Brep& brep, geom::LoopId loop) {
+  const std::uint32_t guard = brep.coedge_count() + 1u;
+  std::uint32_t count = 0;
+  geom::CoedgeId current = brep.loop(loop).start;
+  do {
+    current = brep.coedge(current).next;
+    ++count;
+  } while (current != brep.loop(loop).start && count < guard);
+  return count;
+}
 
 struct SquareFace {
   geom::SolidEditor editor;
@@ -280,4 +296,149 @@ TEST_CASE("commit rejects a face with two outer loops") {
   CHECK_FALSE(r.has_value());
   CHECK(r.error().code == geom::Errc::invalid_topology);
   CHECK(s.editor.brep().loop_count() == 2);
+}
+
+TEST_CASE("solid editor: dissolve_edge of a pinhole rim arc keeps the loop") {
+  geom::SolidEditor ed;
+  const geom::test::m4b::ConePinhole cone =
+      geom::test::m4b::add_cone_pinhole(ed, 0.0, 0.25, true);
+  REQUIRE(ed.brep().edge_count() == 5u);
+  REQUIRE(ed.brep().coedge_count() == 8u);
+  REQUIRE(loop_coedge_count(ed.brep(), cone.lateral_loop) == 6u);
+  REQUIRE(loop_coedge_count(ed.brep(), cone.base_loop) == 2u);
+  const geom::CoedgeId old_start = ed.brep().loop(cone.lateral_loop).start;
+  REQUIRE(ed.brep().coedge(old_start).edge == cone.base0);
+
+  const auto r = ed.dissolve_edge(cone.top_a);
+  REQUIRE(r.has_value());
+
+  CHECK_FALSE(ed.brep().edge_alive(cone.top_a));
+  CHECK(ed.brep().vertex_alive(cone.t0));
+  CHECK(ed.brep().vertex_alive(cone.t1));
+  CHECK(ed.brep().edge_alive(cone.top_b));
+  CHECK(ed.brep().edge_alive(cone.seam));
+  CHECK(loop_coedge_count(ed.brep(), cone.lateral_loop) == 5u);
+  CHECK(loop_coedge_count(ed.brep(), cone.base_loop) == 2u);
+  CHECK(ed.brep().loop(cone.lateral_loop).start == old_start);
+  CHECK(ed.brep().edge_count() == 4u);
+  CHECK(ed.brep().coedge_count() == 7u);
+  CHECK(ed.brep().loop_count() == 2u);
+  CHECK(ed.brep().shell_count() == 1u);
+  CHECK(ed.brep().solid_count() == 1u);
+  CHECK(ed.commit().has_value());
+}
+
+TEST_CASE("solid editor: dissolve_edge of a twice-used edge relinks one loop") {
+  geom::SolidEditor ed;
+  const geom::test::m4b::ConePinch cone = geom::test::m4b::add_cone_pinch(ed, 0.0);
+  REQUIRE(ed.brep().edge_count() == 3u);
+  REQUIRE(ed.brep().coedge_count() == 6u);
+  REQUIRE(loop_coedge_count(ed.brep(), cone.lateral_loop) == 4u);
+  REQUIRE(loop_coedge_count(ed.brep(), cone.base_loop) == 2u);
+
+  const auto r = ed.dissolve_edge(cone.seam);
+  REQUIRE(r.has_value());
+
+  CHECK_FALSE(ed.brep().edge_alive(cone.seam));
+  CHECK(ed.brep().vertex_alive(cone.apex));
+  CHECK(loop_coedge_count(ed.brep(), cone.lateral_loop) == 2u);
+  CHECK(loop_coedge_count(ed.brep(), cone.base_loop) == 2u);
+  CHECK(ed.brep().edge_count() == 2u);
+  CHECK(ed.brep().coedge_count() == 4u);
+  CHECK(ed.brep().loop_count() == 2u);
+  CHECK(ed.brep().shell_count() == 1u);
+  CHECK(ed.brep().solid_count() == 1u);
+  const auto committed = ed.commit();
+  REQUIRE(committed.has_value());
+  CHECK(geom::validate_topology(committed.value()).ok());
+}
+
+TEST_CASE("solid editor: dissolve_edge shared by two loops relocates both starts") {
+  geom::SolidEditor ed;
+  const geom::test::m4b::ConePinhole cone =
+      geom::test::m4b::add_cone_pinhole(ed, 0.0, 0.25, true);
+  const geom::CoedgeId lateral_start = ed.brep().loop(cone.lateral_loop).start;
+  const geom::CoedgeId base_start = ed.brep().loop(cone.base_loop).start;
+  REQUIRE(ed.brep().coedge(lateral_start).edge == cone.base0);
+  REQUIRE(ed.brep().coedge(base_start).edge == cone.base0);
+
+  const auto r = ed.dissolve_edge(cone.base0);
+  REQUIRE(r.has_value());
+
+  CHECK_FALSE(ed.brep().edge_alive(cone.base0));
+  CHECK(ed.brep().vertex_alive(cone.b0));
+  CHECK(ed.brep().vertex_alive(cone.b1));
+  CHECK(loop_coedge_count(ed.brep(), cone.lateral_loop) == 5u);
+  CHECK(loop_coedge_count(ed.brep(), cone.base_loop) == 1u);
+  const geom::CoedgeId new_lateral_start = ed.brep().loop(cone.lateral_loop).start;
+  const geom::CoedgeId new_base_start = ed.brep().loop(cone.base_loop).start;
+  CHECK(new_lateral_start != lateral_start);
+  CHECK(new_base_start != base_start);
+  CHECK(ed.brep().coedge(new_lateral_start).edge == cone.base1);
+  CHECK(ed.brep().coedge(new_base_start).edge == cone.base1);
+  CHECK(ed.brep().edge_count() == 4u);
+  CHECK(ed.brep().coedge_count() == 6u);
+  const auto committed = ed.commit();
+  REQUIRE(committed.has_value());
+  CHECK(geom::validate_topology(committed.value()).ok());
+}
+
+TEST_CASE("solid editor: dissolve_edge refuses to empty a loop") {
+  geom::SolidEditor ed;
+  const geom::test::m4b::ConePinch cone = geom::test::m4b::add_cone_pinch(ed, 0.0);
+  REQUIRE(ed.dissolve_edge(cone.base0).has_value());
+  REQUIRE(loop_coedge_count(ed.brep(), cone.base_loop) == 1u);
+  REQUIRE(loop_coedge_count(ed.brep(), cone.lateral_loop) == 3u);
+
+  const auto r = ed.dissolve_edge(cone.base1);
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view(r.error().message) == "solid_editor: dissolve would empty a loop");
+  CHECK(r.error().context_a == cone.base1.index());
+  // The refused call staged nothing.
+  CHECK(ed.brep().edge_alive(cone.base1));
+  CHECK(loop_coedge_count(ed.brep(), cone.base_loop) == 1u);
+  CHECK(loop_coedge_count(ed.brep(), cone.lateral_loop) == 3u);
+  CHECK(ed.brep().edge_count() == 2u);
+  CHECK(ed.brep().coedge_count() == 4u);
+  CHECK(ed.commit().has_value());
+}
+
+TEST_CASE("solid editor: dissolve_edge rejects a dead edge") {
+  geom::SolidEditor ed;
+  const geom::test::m4b::ConePinch cone = geom::test::m4b::add_cone_pinch(ed, 0.0);
+  REQUIRE(ed.dissolve_edge(cone.seam).has_value());
+  REQUIRE(ed.brep().coedge_count() == 4u);
+  REQUIRE(ed.brep().edge_count() == 2u);
+
+  const auto r = ed.dissolve_edge(cone.seam);
+  REQUIRE_FALSE(r.has_value());
+  CHECK(r.error().code == geom::Errc::index_out_of_range);
+  CHECK(std::string_view(r.error().message) == "solid_editor: edge is not alive");
+  CHECK(r.error().context_a == cone.seam.index());
+  CHECK(ed.brep().coedge_count() == 4u);
+  CHECK(ed.brep().edge_count() == 2u);
+}
+
+TEST_CASE("solid editor: dissolve_edge keeps a closed manifold valid") {
+  geom::SolidEditor ed;
+  const geom::test::m4b::ConePinch cone = geom::test::m4b::add_cone_pinch(ed, 0.0);
+  const auto closed = ed.commit();
+  REQUIRE(closed.has_value());
+  CHECK(geom::validate_topology(closed.value()).ok());
+  REQUIRE(geom::euler_characteristic(closed.value(), cone.solid) == 2);
+
+  REQUIRE(ed.dissolve_edge(cone.seam).has_value());
+  const auto committed = ed.commit();
+  REQUIRE(committed.has_value());
+  const geom::Brep& brep = committed.value();
+  CHECK(geom::validate_topology(brep).ok());
+  CHECK(geom::euler_characteristic(brep, cone.solid) == 2);
+  CHECK(brep.shell(cone.shell).closed);
+  CHECK(brep.vertex_alive(cone.apex));
+  CHECK(brep.edge_count() == 2u);
+  CHECK(brep.coedge_count() == 4u);
+  CHECK(brep.face_count() == 2u);
+  CHECK(brep.loop_count() == 2u);
+  CHECK(brep.solid_count() == 1u);
 }

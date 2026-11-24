@@ -605,6 +605,89 @@ class SolidEditor {
     return {};
   }
 
+  // Removes `edge` from every loop that uses it, splicing each use out of its
+  // loop's next/prev chain and releasing the coedge; the edge's vertices stay
+  // alive. Both pinhole topologies are handled: one loop may use the edge twice
+  // (the two directions of a collapsed-pole seam) and the edge may be used once
+  // in each of two loops (a boundary edge between two faces). loop.start is
+  // relocated to the next surviving coedge when it named a removed use. The edge
+  // is released last, after no coedge references it; loops, faces, shells and
+  // solids are otherwise unchanged.
+  //
+  // A loop that would be left with no coedge is refused before anything is
+  // staged, because an empty loop is not a valid face boundary. A dead edge is
+  // rejected the same way erase_edge() rejects one.
+  Result<void> dissolve_edge(EdgeId edge) {
+    if (!staged_.edge_alive(edge)) {
+      return Error{Errc::index_out_of_range, "solid_editor: edge is not alive", edge.index(),
+                   0u};
+    }
+
+    std::vector<CoedgeId> uses;
+    for (const CoedgeId id : staged_.coedge_ids()) {
+      if (staged_.coedges_[id.index()].edge == edge) uses.push_back(id);
+    }
+
+    // Group the uses by loop. The removal is all-or-nothing, so a loop whose
+    // every live coedge is about to disappear aborts the call here, before any
+    // link or handle is touched.
+    std::vector<LoopId> loops;
+    std::vector<std::uint32_t> uses_per_loop;
+    for (const CoedgeId use : uses) {
+      const LoopId loop = staged_.coedges_[use.index()].loop;
+      std::size_t index = 0;
+      while (index < loops.size() && loops[index] != loop) ++index;
+      if (index == loops.size()) {
+        loops.push_back(loop);
+        uses_per_loop.push_back(0u);
+      }
+      ++uses_per_loop[index];
+    }
+    for (std::size_t i = 0; i < loops.size(); ++i) {
+      std::uint32_t live = 0;
+      for (const CoedgeId id : staged_.coedge_ids()) {
+        if (staged_.coedges_[id.index()].loop == loops[i]) ++live;
+      }
+      if (live == uses_per_loop[i]) {
+        return Error{Errc::unsupported, "solid_editor: dissolve would empty a loop",
+                     edge.index(), 0u};
+      }
+    }
+
+    const auto is_use = [&uses](CoedgeId id) {
+      for (const CoedgeId use : uses) {
+        if (use == id) return true;
+      }
+      return false;
+    };
+
+    // Splice every use out of its loop. Uses stay alive until all links are
+    // rewritten, so walking past a run of uses always follows the original
+    // chain; the result does not depend on the order of the uses, adjacent uses
+    // included. Each affected loop keeps at least one coedge (checked above).
+    for (const CoedgeId use : uses) {
+      CoedgeId prev = staged_.coedges_[use.index()].prev;
+      while (is_use(prev)) prev = staged_.coedges_[prev.index()].prev;
+      CoedgeId next = staged_.coedges_[use.index()].next;
+      while (is_use(next)) next = staged_.coedges_[next.index()].next;
+      staged_.coedges_[prev.index()].next = next;
+      staged_.coedges_[next.index()].prev = prev;
+    }
+
+    // A loop whose start was a removed use moves to the first survivor after it.
+    for (const LoopId loop_id : loops) {
+      Loop& loop = staged_.loops_[loop_id.index()];
+      if (!is_use(loop.start)) continue;
+      CoedgeId next = staged_.coedges_[loop.start.index()].next;
+      while (is_use(next)) next = staged_.coedges_[next.index()].next;
+      loop.start = next;
+    }
+
+    for (const CoedgeId use : uses) staged_.coedge_alloc_.release(use);
+    staged_.edge_alloc_.release(edge);
+    return {};
+  }
+
   // Counterpart of erase_edge() for vertices; edges that still bound the vertex
   // are left dangling and commit() reports them. Same id rules.
   Result<void> erase_vertex(VertexId id) {
