@@ -284,7 +284,14 @@ geom::SolidId only_solid(const geom::Brep& brep) {
   return solids.front();
 }
 
-std::string_view message_of(const geom::Error& error) { return std::string_view(error.message); }
+// Message argument for a REQUIRE_MESSAGE(result.has_value(), ...). Arguments are
+// evaluated before the assertion, so calling error() on a success value would
+// throw bad_variant_access (visible with --success, where passing assertions
+// still format their message).
+template <typename T>
+std::string_view failure_message(const geom::Result<T>& result) {
+  return result.has_value() ? std::string_view{} : std::string_view(result.error().message);
+}
 
 // Structural fingerprint of an operand. The sphere/sphere tests compare one
 // before and after a rejected boolean so a diagnostic cannot quietly re-chart or
@@ -329,7 +336,7 @@ void check_qa_volume(const char* name, const geom::Brep& a, const geom::Brep& b,
   INFO(name);
   const geom::Result<geom::CurvedBooleanResult> first = geom::boolean_solid_curved(
       a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
-  REQUIRE_MESSAGE(first.has_value(), name << ": " << message_of(first.error()));
+  REQUIRE_MESSAGE(first.has_value(), name << ": " << failure_message(first));
   CHECK_MESSAGE(geom::validate_topology(first.value().brep).ok(), name << ": invalid topology");
   const double volume = volume_of(first.value().brep);
   CHECK_MESSAGE(std::abs(volume - expected) <= 1e-6 * std::abs(expected),
@@ -348,15 +355,15 @@ void check_qa_rejection(const char* name, const geom::Brep& a, const geom::Brep&
       a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
   REQUIRE_MESSAGE(!first.has_value(), name << ": expected a diagnostic");
   CHECK_MESSAGE(first.error().code == geom::Errc::unsupported, name << ": unexpected error code");
-  CHECK_MESSAGE(!message_of(first.error()).empty(), name << ": empty message");
-  CHECK_MESSAGE(message_of(first.error()) == message,
-                name << ": message " << message_of(first.error()));
+  CHECK_MESSAGE(!failure_message(first).empty(), name << ": empty message");
+  CHECK_MESSAGE(failure_message(first) == message,
+                name << ": message " << failure_message(first));
 
   const geom::Result<geom::CurvedBooleanResult> again = geom::boolean_solid_curved(
       a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
   REQUIRE_MESSAGE(!again.has_value(), name << ": the repeated call succeeded");
   CHECK(again.error().code == first.error().code);
-  CHECK(message_of(again.error()) == message_of(first.error()));
+  CHECK(failure_message(again) == failure_message(first));
 }
 
 // A cone/plane boolean must produce one closed, outward single-shell solid. The
@@ -368,7 +375,7 @@ void check_cone_boolean(const char* name, const geom::Brep& a, const geom::Brep&
   INFO(name);
   const geom::Result<geom::CurvedBooleanResult> first = geom::boolean_solid_curved(
       a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
-  REQUIRE_MESSAGE(first.has_value(), name << ": " << message_of(first.error()));
+  REQUIRE_MESSAGE(first.has_value(), name << ": " << failure_message(first));
   const geom::Brep& brep = first.value().brep;
   CHECK_MESSAGE(geom::validate_topology(brep).ok(), name << ": invalid topology");
   const auto shells = brep.solid_shells(only_solid(brep));
@@ -442,7 +449,7 @@ void check_cone_tessellation(const char* name, const geom::Brep& brep,
                              std::size_t apex_vertices) {
   INFO(std::string(name));
   const geom::Result<geom::TriMesh> mesh = geom::tessellate(brep, options);
-  CHECK_MESSAGE(mesh.has_value(), name << ": " << message_of(mesh.error()));
+  CHECK_MESSAGE(mesh.has_value(), name << ": " << failure_message(mesh));
   if (!mesh.has_value()) return;
   const geom::TriMesh& first = mesh.value();
   CHECK_MESSAGE(first.positions.size() == positions,
@@ -499,7 +506,7 @@ TEST_CASE("brep: boolean_solid_curved subtracts a box from a quarter cylinder") 
   const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
       quarter, only_solid(quarter), box, only_solid(box), geom::SolidBooleanOp::difference,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(result.has_value(), "boolean_solid_curved failed: " << message_of(result.error()));
+  REQUIRE_MESSAGE(result.has_value(), "boolean_solid_curved failed: " << failure_message(result));
   const geom::Brep& brep = result.value().brep;
   CHECK(geom::validate_topology(brep).ok());
 
@@ -571,7 +578,7 @@ TEST_CASE("brep: boolean_solid_curved rejects NURBS operands") {
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE(!result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) == "boolean_solid_curved: NURBS operands are not supported");
+  CHECK(failure_message(result) == "boolean_solid_curved: NURBS operands are not supported");
 }
 
 TEST_CASE("curved boolean: a trimmed cone fragment is refused as an operand") {
@@ -586,11 +593,11 @@ TEST_CASE("curved boolean: a trimmed cone fragment is refused as an operand") {
   const geom::Result<geom::CurvedBooleanResult> lower = geom::boolean_solid_curved(
       cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::difference,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(lower.has_value(), message_of(lower.error()));
+  REQUIRE_MESSAGE(lower.has_value(), failure_message(lower));
   const geom::Result<geom::CurvedBooleanResult> upper = geom::boolean_solid_curved(
       cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(upper.has_value(), message_of(upper.error()));
+  REQUIRE_MESSAGE(upper.has_value(), failure_message(upper));
 
   const geom::Brep cutter =
       geom::make_box(geom::Point3d{-2.0, -2.0, 0.0}, geom::Point3d{2.0, 2.0, 0.5}, tolerance)
@@ -604,7 +611,7 @@ TEST_CASE("curved boolean: a trimmed cone fragment is refused as an operand") {
         geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance});
     REQUIRE_FALSE(refused.has_value());
     CHECK(refused.error().code == geom::Errc::unsupported);
-    CHECK(message_of(refused.error()) == message);
+    CHECK(failure_message(refused) == message);
   }
 }
 
@@ -666,15 +673,15 @@ TEST_CASE("tessellate: trimmed cone frusta are watertight") {
   const geom::Result<geom::CurvedBooleanResult> intersection = geom::boolean_solid_curved(
       cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(intersection.has_value(), message_of(intersection.error()));
+  REQUIRE_MESSAGE(intersection.has_value(), failure_message(intersection));
   const geom::Result<geom::CurvedBooleanResult> difference = geom::boolean_solid_curved(
       cone, only_solid(cone), box, only_solid(box), geom::SolidBooleanOp::difference,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(difference.has_value(), message_of(difference.error()));
+  REQUIRE_MESSAGE(difference.has_value(), failure_message(difference));
   const geom::Result<geom::CurvedBooleanResult> united = geom::boolean_solid_curved(
       cone, only_solid(cone), low_box, only_solid(low_box), geom::SolidBooleanOp::union_,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(united.has_value(), message_of(united.error()));
+  REQUIRE_MESSAGE(united.has_value(), failure_message(united));
   const double small_cone = kPi / 12.0;
   const double frustum = 7.0 * kPi / 12.0;
   const geom::Point3d apex{0.0, 0.0, 2.0};
@@ -682,7 +689,7 @@ TEST_CASE("tessellate: trimmed cone frusta are watertight") {
                          std::size_t triangles, double volume, std::size_t apex_vertices) {
     INFO(std::string(name));
     const geom::Result<geom::TriMesh> mesh = geom::tessellate(brep, options);
-    REQUIRE_MESSAGE(mesh.has_value(), name << ": " << message_of(mesh.error()));
+    REQUIRE_MESSAGE(mesh.has_value(), name << ": " << failure_message(mesh));
     const geom::TriMesh& first = mesh.value();
     CHECK_MESSAGE(first.positions.size() == positions,
                   name << ": positions " << first.positions.size());
@@ -735,7 +742,7 @@ TEST_CASE("tessellate: split cone fragments stay watertight") {
                          std::size_t triangles, double volume) {
     INFO(std::string(name));
     const geom::Result<geom::TriMesh> mesh = geom::tessellate(brep, options);
-    REQUIRE_MESSAGE(mesh.has_value(), name << ": " << message_of(mesh.error()));
+    REQUIRE_MESSAGE(mesh.has_value(), name << ": " << failure_message(mesh));
     const geom::TriMesh& first = mesh.value();
     CHECK_MESSAGE(first.positions.size() == positions,
                   name << ": positions " << first.positions.size());
@@ -818,7 +825,7 @@ TEST_CASE("tessellate: translated cone booleans stay watertight") {
                                 geom::SolidBooleanOp::difference,
                                 geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(translated_difference.has_value(),
-                  message_of(translated_difference.error()));
+                  failure_message(translated_difference));
   check_cone_tessellation("translated difference", translated_difference.value().brep, options,
                           134, 264, 1.830287422577, translated_apex, 0);
 }
@@ -846,7 +853,7 @@ TEST_CASE("tessellate: canonical cone faces keep their apex") {
         geom::CurvedBooleanOptions{tolerance});
     REQUIRE_MESSAGE(intersection.has_value(),
                     "intersection above z=" << height << ": "
-                                            << message_of(intersection.error()));
+                                            << failure_message(intersection));
     return intersection.value().brep;
   };
 
@@ -1016,7 +1023,7 @@ TEST_CASE("curved boolean: a cutter near the apex is refused") {
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(!message_of(result.error()).empty());
+  CHECK(!failure_message(result).empty());
 }
 
 // A cutter face that is shorter than the rim diameter stops the cut chain inside
@@ -1167,7 +1174,7 @@ TEST_CASE("brep: boolean_solid_curved rejects coplanar face contact") {
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE(!result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: coplanar face contact is not supported yet");
 }
 
@@ -1187,7 +1194,7 @@ TEST_CASE("brep: boolean_solid_curved rejects a disconnected result") {
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE(!result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: result is not a single connected component");
 }
 
@@ -1202,7 +1209,7 @@ TEST_CASE("brep: boolean_solid_curved heals the cut rim into exact arcs") {
       quarter, only_solid(quarter), box, only_solid(box), geom::SolidBooleanOp::difference,
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(result.has_value(),
-                  "boolean_solid_curved failed: " << message_of(result.error()));
+                  "boolean_solid_curved failed: " << failure_message(result));
   // The trimmed box cap at z = 1 is new boundary: its rim against the lateral
   // face keeps the exact area the volume check above relies on only when the
   // chordal cut is healed back onto the cylinder's circle. A healed cap is
@@ -1370,7 +1377,7 @@ TEST_CASE("curved boolean: sphere cap intersection") {
   const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
       sphere.value(), a, box.value(), b, geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance}, &report);
-  REQUIRE_MESSAGE(result.has_value(), "boolean failed: " << message_of(result.error()));
+  REQUIRE_MESSAGE(result.has_value(), "boolean failed: " << failure_message(result));
   CHECK(geom::validate_topology(result.value().brep).ok());
   // `report` is the failure report and stays zeroed on success; the returned
   // report carries the counters.
@@ -1391,7 +1398,7 @@ TEST_CASE("curved boolean: sphere complement cap") {
   const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
       sphere.value(), only_solid(sphere.value()), box.value(), only_solid(box.value()),
       geom::SolidBooleanOp::difference, geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(result.has_value(), "boolean failed: " << message_of(result.error()));
+  REQUIRE_MESSAGE(result.has_value(), "boolean failed: " << failure_message(result));
   CHECK(geom::validate_topology(result.value().brep).ok());
   CHECK(std::fabs(volume_of(result.value().brep) - 3.534291735288517) <= 1e-6);
 }
@@ -1407,7 +1414,7 @@ TEST_CASE("curved boolean: sphere slab band") {
   const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
       sphere.value(), only_solid(sphere.value()), slab.value(), only_solid(slab.value()),
       geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(result.has_value(), "boolean failed: " << message_of(result.error()));
+  REQUIRE_MESSAGE(result.has_value(), "boolean failed: " << failure_message(result));
   CHECK(geom::validate_topology(result.value().brep).ok());
   CHECK(result.value().brep.face_ids().size() == 3);
   CHECK(result.value().brep.edge_ids().size() == 3);
@@ -1454,13 +1461,13 @@ TEST_CASE("QA-15: sphere cap booleans are closed and deterministic") {
       const geom::Result<geom::detail::CurvedBooleanFaceInfo> info =
           geom::detail::curved_boolean_face_info(brep, id, tolerance);
       REQUIRE_MESSAGE(info.has_value(),
-                      name << ": face info failed: " << message_of(info.error()));
+                      name << ": face info failed: " << failure_message(info));
       infos.push_back(info.value());
     }
     const geom::Result<geom::TriMesh> mesh =
         geom::detail::curved_boolean_solid_mesh(brep, infos, tolerance);
     REQUIRE_MESSAGE(mesh.has_value(),
-                    name << ": classification mesh failed: " << message_of(mesh.error()));
+                    name << ": classification mesh failed: " << failure_message(mesh));
     const geom::detail::CurvedBooleanMeshClosure closure =
         geom::detail::curved_boolean_mesh_closure(mesh.value());
     CHECK_MESSAGE(closure.closed(), name << ": mesh is not closed");
@@ -1475,7 +1482,7 @@ TEST_CASE("QA-15: sphere cap booleans are closed and deterministic") {
       const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
           sphere, only_solid(sphere), *entry.b, only_solid(*entry.b), entry.op,
           geom::CurvedBooleanOptions{tolerance});
-      REQUIRE_MESSAGE(result.has_value(), entry.name << ": " << message_of(result.error()));
+      REQUIRE_MESSAGE(result.has_value(), entry.name << ": " << failure_message(result));
       const geom::Brep& brep = result.value().brep;
       CHECK(geom::validate_topology(brep).ok());
       const auto shells = brep.solid_shells(only_solid(brep));
@@ -1614,7 +1621,7 @@ TEST_CASE("curved boolean: torus and half space") {
       torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(half.has_value(),
-                  (half.has_value() ? std::string_view{} : message_of(half.error())));
+                  (half.has_value() ? std::string_view{} : failure_message(half)));
   CHECK(half.value().report.max_cut_residual <= 1e-3);
   CHECK(geom::validate_topology(half.value().brep).ok());
   CHECK(volume_of(half.value().brep) ==
@@ -1625,7 +1632,7 @@ TEST_CASE("curved boolean: torus and half space") {
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(other_half.has_value(),
                   (other_half.has_value() ? std::string_view{}
-                                          : message_of(other_half.error())));
+                                          : failure_message(other_half)));
   CHECK(geom::validate_topology(other_half.value().brep).ok());
   CHECK(volume_of(other_half.value().brep) ==
         doctest::Approx(2.4674011002723395).epsilon(1e-6));
@@ -1647,7 +1654,7 @@ TEST_CASE("curved boolean: torus cut across the v seam") {
       torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(half.has_value(),
-                  (half.has_value() ? std::string_view{} : message_of(half.error())));
+                  (half.has_value() ? std::string_view{} : failure_message(half)));
   CHECK(geom::validate_topology(half.value().brep).ok());
   CHECK(volume_of(half.value().brep) ==
         doctest::Approx(2.4674011002723395).epsilon(1e-6));
@@ -1670,7 +1677,7 @@ TEST_CASE("curved boolean: torus minus half space") {
       torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::difference,
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(half.has_value(),
-                  (half.has_value() ? std::string_view{} : message_of(half.error())));
+                  (half.has_value() ? std::string_view{} : failure_message(half)));
   CHECK(geom::validate_topology(half.value().brep).ok());
 }
 
@@ -1690,7 +1697,7 @@ TEST_CASE("curved boolean: a box that contains a torus keeps it whole") {
       torus, only_solid(torus), box, only_solid(box), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(whole.has_value(),
-                  (whole.has_value() ? std::string_view{} : message_of(whole.error())));
+                  (whole.has_value() ? std::string_view{} : failure_message(whole)));
   CHECK(geom::validate_topology(whole.value().brep).ok());
   CHECK(volume_of(whole.value().brep) ==
         doctest::Approx(4.934802200544679).epsilon(1e-6));
@@ -1787,7 +1794,7 @@ TEST_CASE("curved boolean: an offset torus plane splits both ways") {
 
   const auto cut = run(geom::SolidBooleanOp::intersection);
   REQUIRE_MESSAGE(cut.has_value(),
-                  (cut.has_value() ? std::string_view{} : message_of(cut.error())));
+                  (cut.has_value() ? std::string_view{} : failure_message(cut)));
   CHECK(geom::validate_topology(cut.value().brep).ok());
   CHECK(cut.value().brep.face_ids().size() == 2u);
   CHECK(cut.value().brep.edge_ids().size() == 24u);
@@ -1801,7 +1808,7 @@ TEST_CASE("curved boolean: an offset torus plane splits both ways") {
 
   const auto joined = run(geom::SolidBooleanOp::union_);
   REQUIRE_MESSAGE(joined.has_value(),
-                  (joined.has_value() ? std::string_view{} : message_of(joined.error())));
+                  (joined.has_value() ? std::string_view{} : failure_message(joined)));
   CHECK(geom::validate_topology(joined.value().brep).ok());
   CHECK(joined.value().brep.face_ids().size() == 9u);
   CHECK(joined.value().brep.edge_ids().size() == 122u);
@@ -1811,7 +1818,7 @@ TEST_CASE("curved boolean: an offset torus plane splits both ways") {
 
   const auto removed = run(geom::SolidBooleanOp::difference);
   REQUIRE_MESSAGE(removed.has_value(),
-                  (removed.has_value() ? std::string_view{} : message_of(removed.error())));
+                  (removed.has_value() ? std::string_view{} : failure_message(removed)));
   CHECK(geom::validate_topology(removed.value().brep).ok());
   CHECK(removed.value().brep.face_ids().size() == 3u);
   CHECK(removed.value().brep.edge_ids().size() == 110u);
@@ -1835,7 +1842,7 @@ TEST_CASE("curved boolean: torus cut by an offset parallel plane is rejected") {
       geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
         "axis");
   CHECK(report.face_pairs == 0);
@@ -1875,7 +1882,7 @@ TEST_CASE("curved boolean: torus cut by a tilted plane is re-charted") {
       const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
           torus.value(), only_solid(torus.value()), slab, only_solid(slab), entry.op,
           geom::CurvedBooleanOptions{tolerance}, &report);
-      REQUIRE_MESSAGE(result.has_value(), entry.name << ": " << message_of(result.error()));
+      REQUIRE_MESSAGE(result.has_value(), entry.name << ": " << failure_message(result));
       const geom::Brep& brep = result.value().brep;
       CHECK(geom::validate_topology(brep).ok());
       const auto shells = brep.solid_shells(only_solid(brep));
@@ -1916,7 +1923,7 @@ TEST_CASE("curved boolean: torus cut by a tilted plane is re-charted") {
           slab, only_solid(slab), torus.value(), only_solid(torus.value()), entry.op,
           geom::CurvedBooleanOptions{tolerance}, &reversed_report);
       REQUIRE_MESSAGE(reversed.has_value(), entry.name << " (reversed): "
-                                                        << message_of(reversed.error()));
+                                                        << failure_message(reversed));
       const geom::Brep& reversed_brep = reversed.value().brep;
       CHECK(geom::validate_topology(reversed_brep).ok());
       const auto reversed_shells = reversed_brep.solid_shells(only_solid(reversed_brep));
@@ -2033,7 +2040,7 @@ TEST_CASE("curved boolean: a tilted plane that misses the torus is rejected") {
       geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
         "axis");
   CHECK(report.face_pairs == 0);
@@ -2059,7 +2066,7 @@ TEST_CASE("curved boolean: a user-charted torus keeps the tilted-plane refusal")
         geom::CurvedBooleanOptions{tolerance}, &report);
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().code == geom::Errc::unsupported);
-    CHECK(message_of(result.error()) ==
+    CHECK(failure_message(result) ==
           "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
           "axis");
     CHECK(report.face_pairs == 0);
@@ -2074,7 +2081,7 @@ TEST_CASE("curved boolean: a user-charted torus keeps the tilted-plane refusal")
       geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &near_report);
   REQUIRE_FALSE(near_result.has_value());
   CHECK(near_result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(near_result.error()) ==
+  CHECK(failure_message(near_result) ==
         "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
         "axis");
   CHECK(near_report.face_pairs == 0);
@@ -2098,7 +2105,7 @@ TEST_CASE("curved boolean: a re-chart-origin torus with a near-axis plane is rej
       geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
         "axis");
   CHECK(report.face_pairs == 0);
@@ -2124,7 +2131,7 @@ TEST_CASE("curved boolean: torus cut by a near-axis plane is rejected quickly") 
       std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
         "axis");
   CHECK(report.face_pairs == 0);
@@ -2151,7 +2158,7 @@ TEST_CASE("curved boolean: torus cut by a near-perpendicular plane is rejected")
       geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
         "axis");
   CHECK(report.face_pairs == 0);
@@ -2181,7 +2188,7 @@ TEST_CASE("curved boolean: torus cut by a 5e-13 short axis is rejected quickly")
       std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
         "axis");
   CHECK(report.face_pairs == 0);
@@ -2207,7 +2214,7 @@ TEST_CASE("curved boolean: torus cut by a 1e-12 short axis is rejected") {
       geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: torus cut plane must be perpendicular to or contain the torus "
         "axis");
   CHECK(report.face_pairs == 0);
@@ -2234,7 +2241,7 @@ TEST_CASE("curved boolean: rounded unit axis still cuts the torus in half") {
       torus.value(), only_solid(torus.value()), slab, only_solid(slab),
       geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
   REQUIRE_MESSAGE(half.has_value(),
-                  (half.has_value() ? std::string_view{} : message_of(half.error())));
+                  (half.has_value() ? std::string_view{} : failure_message(half)));
   CHECK(geom::validate_topology(half.value().brep).ok());
   CHECK(volume_of(half.value().brep) ==
         doctest::Approx(2.4674011002723395).epsilon(1e-6));
@@ -2257,7 +2264,7 @@ TEST_CASE("curved boolean: a torus axis with a tiny norm excess still cuts") {
       torus.value(), only_solid(torus.value()), box.value(), only_solid(box.value()),
       geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance}, &report);
   REQUIRE_MESSAGE(half.has_value(),
-                  (half.has_value() ? std::string_view{} : message_of(half.error())));
+                  (half.has_value() ? std::string_view{} : failure_message(half)));
   CHECK(geom::validate_topology(half.value().brep).ok());
   CHECK(volume_of(half.value().brep) ==
         doctest::Approx(2.4674011002723395).epsilon(1e-6));
@@ -2290,7 +2297,7 @@ TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a box above its 
         cylinder, only_solid(cylinder), box, only_solid(box), item.op,
         geom::CurvedBooleanOptions{tolerance});
     REQUIRE_MESSAGE(result.has_value(), "boolean_solid_curved failed: "
-                                            << message_of(result.error()));
+                                            << failure_message(result));
     const geom::Brep& brep = result.value().brep;
     CHECK(geom::validate_topology(brep).ok());
     CHECK(std::abs(volume_of(brep) - item.volume) <= 1e-6);
@@ -2320,7 +2327,7 @@ TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a vertical slab"
       cylinder, only_solid(cylinder), slab, only_solid(slab), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(intersect.has_value(),
-                  "boolean_solid_curved failed: " << message_of(intersect.error()));
+                  "boolean_solid_curved failed: " << failure_message(intersect));
   CHECK(geom::validate_topology(intersect.value().brep).ok());
   CHECK(std::abs(volume_of(intersect.value().brep) - intersection) <= 1e-6);
   CHECK(intersect.value().brep.face_ids().size() == 5);
@@ -2329,7 +2336,7 @@ TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a vertical slab"
       cylinder, only_solid(cylinder), slab, only_solid(slab), geom::SolidBooleanOp::difference,
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(take_away.has_value(),
-                  "boolean_solid_curved failed: " << message_of(take_away.error()));
+                  "boolean_solid_curved failed: " << failure_message(take_away));
   CHECK(geom::validate_topology(take_away.value().brep).ok());
   CHECK(std::abs(volume_of(take_away.value().brep) - difference) <= 1e-6);
   CHECK(take_away.value().brep.face_ids().size() == 4);
@@ -2338,7 +2345,7 @@ TEST_CASE("brep: boolean_solid_curved cuts a full cylinder with a vertical slab"
       cylinder, only_solid(cylinder), slab, only_solid(slab), geom::SolidBooleanOp::union_,
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE_MESSAGE(united.has_value(),
-                  "boolean_solid_curved failed: " << message_of(united.error()));
+                  "boolean_solid_curved failed: " << failure_message(united));
   CHECK(geom::validate_topology(united.value().brep).ok());
   CHECK(std::abs(volume_of(united.value().brep) - (slab_volume + difference)) <= 1e-6);
   CHECK(united.value().brep.face_ids().size() == 9);
@@ -2363,7 +2370,7 @@ TEST_CASE("brep: boolean_solid_curved defers a symmetric difference that touches
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE(!result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: result touches itself along an edge");
 }
 
@@ -2388,7 +2395,7 @@ TEST_CASE("brep: boolean_solid_curved classification mesh is watertight") {
     const geom::Result<geom::TriMesh> mesh =
         geom::detail::curved_boolean_solid_mesh(brep, infos, tolerance);
     REQUIRE_MESSAGE(mesh.has_value(), "classification mesh failed: "
-                                          << message_of(mesh.error()));
+                                          << failure_message(mesh));
     return mesh.value();
   };
 
@@ -2443,7 +2450,7 @@ TEST_CASE("brep: boolean_solid_curved cuts an offset cap box from a full cylinde
         cylinder, only_solid(cylinder), box, only_solid(box), item.op,
         geom::CurvedBooleanOptions{tolerance});
     REQUIRE_MESSAGE(result.has_value(), "boolean_solid_curved failed: "
-                                            << message_of(result.error()));
+                                            << failure_message(result));
     const geom::Brep& brep = result.value().brep;
     CHECK(geom::validate_topology(brep).ok());
     CHECK(std::abs(volume_of(brep) - item.volume) <= 1e-6);
@@ -2489,7 +2496,7 @@ TEST_CASE("brep: boolean_solid_curved cuts a box across both cylinder caps") {
         cylinder, only_solid(cylinder), box, only_solid(box), item.op,
         geom::CurvedBooleanOptions{tolerance});
     REQUIRE_MESSAGE(result.has_value(), "boolean_solid_curved failed: "
-                                            << message_of(result.error()));
+                                            << failure_message(result));
     const geom::Brep& brep = result.value().brep;
     CHECK(geom::validate_topology(brep).ok());
     CHECK(std::abs(volume_of(brep) - item.volume) <= 1e-6);
@@ -2514,7 +2521,7 @@ TEST_CASE("brep: boolean_solid_curved defers a box minus a curved cap operand") 
       geom::CurvedBooleanOptions{tolerance});
   REQUIRE(!result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "boolean_solid_curved: flipped curved fragments are not supported yet");
 }
 
@@ -2542,7 +2549,7 @@ TEST_CASE("brep: split_face_curved rejects a cut that ends inside the face") {
       geom::split_face_curved(cylinder, lateral, cuts, tolerance);
   REQUIRE(!result.has_value());
   CHECK(result.error().code == geom::Errc::numeric_failure);
-  CHECK(message_of(result.error()) ==
+  CHECK(failure_message(result) ==
         "split_face_curved: an open cut endpoint is not on the face boundary");
 }
 
@@ -2573,7 +2580,7 @@ TEST_CASE("brep: collapse_circular_chains heals a rim run beside the cut corner"
 
   const geom::Result<bool> collapsed =
       geom::detail::collapse_circular_chains(fragment, circle, tolerance);
-  REQUIRE_MESSAGE(collapsed.has_value(), "collapse failed: " << message_of(collapsed.error()));
+  REQUIRE_MESSAGE(collapsed.has_value(), "collapse failed: " << failure_message(collapsed));
   CHECK(collapsed.value());
 
   // The dense samples collapse into one span whose sweep advances in a single
@@ -2717,7 +2724,7 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   const geom::Result<geom::CurvedBooleanResult> lens = geom::boolean_solid_curved(
       unit_a, only_solid(unit_a), unit_b, only_solid(unit_b),
       geom::SolidBooleanOp::intersection, options);
-  REQUIRE_MESSAGE(lens.has_value(), message_of(lens.error()));
+  REQUIRE_MESSAGE(lens.has_value(), failure_message(lens));
   CHECK(geom::validate_topology(lens.value().brep).ok());
   CHECK(lens.value().brep.face_ids().size() == 2);
   CHECK(lens.value().brep.edge_ids().size() == 3);
@@ -2729,7 +2736,7 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   for (const geom::FaceId face_id : lens.value().brep.face_ids()) {
     const geom::Result<std::vector<geom::FaceUvLoop>> loops =
         geom::face_loops_uv(lens.value().brep, face_id, tolerance);
-    REQUIRE_MESSAGE(loops.has_value(), message_of(loops.error()));
+    REQUIRE_MESSAGE(loops.has_value(), failure_message(loops));
     REQUIRE(loops.value().size() == 1);
     const std::vector<geom::Point2d>& ring = loops.value().front().points;
     REQUIRE(ring.size() >= 3);
@@ -2797,7 +2804,7 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   const geom::Result<geom::CurvedBooleanResult> cap_result = geom::boolean_solid_curved(
       unit_a, only_solid(unit_a), cap_box, only_solid(cap_box),
       geom::SolidBooleanOp::intersection, options);
-  REQUIRE_MESSAGE(cap_result.has_value(), message_of(cap_result.error()));
+  REQUIRE_MESSAGE(cap_result.has_value(), failure_message(cap_result));
   const geom::Brep cap = cap_result.value().brep;
   REQUIRE(cap.face_ids().size() == 2);
   const geom::Brep cap_other =
@@ -2812,7 +2819,7 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   REQUIRE_MESSAGE(!not_whole.has_value(), "a cap solid and a whole sphere must be rejected");
   CHECK(not_whole.error().code == geom::Errc::unsupported);
   CHECK(not_whole_report.face_pairs == 0u);
-  CHECK(message_of(not_whole.error()) ==
+  CHECK(failure_message(not_whole) ==
         "boolean_solid_curved: sphere/sphere booleans need whole-sphere operands");
   CHECK(fingerprint_of(cap) == cap_before);
   CHECK(fingerprint_of(cap_other) == cap_other_before);
@@ -2840,7 +2847,7 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
     REQUIRE_MESSAGE(!rejected.has_value(), "expected the crossing-spheres diagnostic");
     CHECK(rejected.error().code == geom::Errc::unsupported);
     CHECK(rejected_report.face_pairs == 0u);
-    CHECK(message_of(rejected.error()) ==
+    CHECK(failure_message(rejected) ==
           "boolean_solid_curved: sphere/sphere booleans need two crossing spheres");
     CHECK(fingerprint_of(other) == other_before);
   }
@@ -2853,7 +2860,7 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
       geom::make_sphere(geom::Point3d{0.0, 1.4, 0.0}, 0.8, tolerance).value();
   const geom::Result<geom::CurvedBooleanResult> y_lens = geom::boolean_solid_curved(
       y_a, only_solid(y_a), y_b, only_solid(y_b), geom::SolidBooleanOp::intersection, options);
-  REQUIRE_MESSAGE(y_lens.has_value(), message_of(y_lens.error()));
+  REQUIRE_MESSAGE(y_lens.has_value(), failure_message(y_lens));
   CHECK(geom::validate_topology(y_lens.value().brep).ok());
   CHECK(y_lens.value().brep.face_ids().size() == 2);
   CHECK(y_lens.value().brep.edge_ids().size() == 3);
@@ -2868,7 +2875,7 @@ TEST_CASE("curved boolean: sphere/sphere is not a splitter problem") {
   const geom::Result<geom::CurvedBooleanResult> near_lens = geom::boolean_solid_curved(
       near_a, only_solid(near_a), near_b, only_solid(near_b),
       geom::SolidBooleanOp::intersection, options);
-  REQUIRE_MESSAGE(near_lens.has_value(), message_of(near_lens.error()));
+  REQUIRE_MESSAGE(near_lens.has_value(), failure_message(near_lens));
   CHECK(near_lens.value().brep.face_ids().size() == 2);
   CHECK(near_lens.value().brep.edge_ids().size() == 3);
   CHECK(near_lens.value().brep.vertex_ids().size() == 3);
@@ -2892,7 +2899,7 @@ TEST_CASE("curved boolean: an off-axis sphere lens is built") {
       south.value(), south.value().solid_ids().front(), north.value(),
       north.value().solid_ids().front(), geom::SolidBooleanOp::intersection,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(lens.has_value(), message_of(lens.error()));
+  REQUIRE_MESSAGE(lens.has_value(), failure_message(lens));
   CHECK(geom::validate_topology(lens.value().brep).ok());
   check_one_shared_rim("off-axis lens", lens.value().brep);
   const std::optional<double> volume = sphere_face_volume(lens.value().brep);
@@ -2906,7 +2913,7 @@ TEST_CASE("curved boolean: an off-axis sphere lens is built") {
       south.value(), south.value().solid_ids().front(), north.value(),
       north.value().solid_ids().front(), geom::SolidBooleanOp::union_,
       geom::CurvedBooleanOptions{tolerance});
-  REQUIRE_MESSAGE(united.has_value(), message_of(united.error()));
+  REQUIRE_MESSAGE(united.has_value(), failure_message(united));
   CHECK(geom::validate_topology(united.value().brep).ok());
   check_one_shared_rim("off-axis union", united.value().brep);
   CHECK(*sphere_face_volume(united.value().brep) ==
@@ -2929,7 +2936,7 @@ TEST_CASE("curved boolean: sphere/sphere re-charts opposite meridians") {
                            .value();
   const geom::Result<geom::CurvedBooleanResult> lens = geom::boolean_solid_curved(
       a, only_solid(a), b, only_solid(b), geom::SolidBooleanOp::intersection, options);
-  REQUIRE_MESSAGE(lens.has_value(), message_of(lens.error()));
+  REQUIRE_MESSAGE(lens.has_value(), failure_message(lens));
   CHECK(geom::validate_topology(lens.value().brep).ok());
   CHECK(lens.value().brep.face_ids().size() == 2);
   CHECK(lens.value().brep.edge_ids().size() == 3);
@@ -2964,7 +2971,7 @@ TEST_CASE("curved boolean: difference subtracts a sphere cap") {
     const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
         *entry.a, only_solid(*entry.a), *entry.b, only_solid(*entry.b),
         geom::SolidBooleanOp::difference, options);
-    REQUIRE_MESSAGE(result.has_value(), entry.name << ": " << message_of(result.error()));
+    REQUIRE_MESSAGE(result.has_value(), entry.name << ": " << failure_message(result));
     const geom::Brep& brep = result.value().brep;
     CHECK(geom::validate_topology(brep).ok());
     CHECK(brep.face_ids().size() == 2);
@@ -3039,7 +3046,7 @@ TEST_CASE("curved boolean: difference subtracts a sphere cap") {
   const geom::Result<geom::CurvedBooleanResult> band = geom::boolean_solid_curved(
       unit_a, only_solid(unit_a), slab, only_solid(slab), geom::SolidBooleanOp::intersection,
       options);
-  REQUIRE_MESSAGE(band.has_value(), message_of(band.error()));
+  REQUIRE_MESSAGE(band.has_value(), failure_message(band));
   CHECK(!sphere_face_volume(band.value().brep).has_value());
 }
 
@@ -3095,7 +3102,7 @@ LensRun run_lens_row(const char* name, const geom::Brep& a, const geom::Brep& b,
   INFO(name);
   const geom::Result<geom::CurvedBooleanResult> result = geom::boolean_solid_curved(
       a, only_solid(a), b, only_solid(b), op, geom::CurvedBooleanOptions{1e-9});
-  REQUIRE_MESSAGE(result.has_value(), name << ": " << message_of(result.error()));
+  REQUIRE_MESSAGE(result.has_value(), name << ": " << failure_message(result));
   const geom::Brep& brep = result.value().brep;
   LensRun run;
   run.topology = lens_topology(brep);
@@ -3151,11 +3158,11 @@ TEST_CASE("QA-16: sphere lens booleans are closed and deterministic") {
     const geom::Result<geom::CurvedBooleanResult> cap = geom::boolean_solid_curved(
         unit_sphere, only_solid(unit_sphere), cap_box, only_solid(cap_box),
         geom::SolidBooleanOp::intersection, geom::CurvedBooleanOptions{tolerance});
-    REQUIRE_MESSAGE(cap.has_value(), "cap fixture: " << message_of(cap.error()));
+    REQUIRE_MESSAGE(cap.has_value(), "cap fixture: " << failure_message(cap));
     const geom::Brep& cap_brep = cap.value().brep;
     const geom::Result<double> library =
         geom::detail::curved_solid_volume(cap_brep, only_solid(cap_brep), tolerance);
-    REQUIRE_MESSAGE(library.has_value(), "cap fixture: " << message_of(library.error()));
+    REQUIRE_MESSAGE(library.has_value(), "cap fixture: " << failure_message(library));
     constexpr double kCapReference = 0.6544984694978736;
     CHECK_MESSAGE(std::abs(library.value() - kCapReference) <= 1e-6 * kCapReference,
                   "cap fixture: library volume " << library.value() << " expected "
@@ -3286,7 +3293,7 @@ void check_rotated_lens(double degrees, double distance, geom::SolidBooleanOp op
       north.value().solid_ids().front(), op, geom::CurvedBooleanOptions{1e-9});
   REQUIRE_MESSAGE(result.has_value(), "degrees " << degrees << " distance " << distance << " op "
                                                 << boolean_op_name(op) << ": "
-                                                << message_of(result.error()));
+                                                << failure_message(result));
   CHECK(geom::validate_topology(result.value().brep).ok());
   CHECK(result.value().brep.solid_shells(result.value().brep.solid_ids().front()).size() == 1);
   check_one_shared_rim(boolean_op_name(op), result.value().brep);
