@@ -85,9 +85,14 @@ struct HealIssue {
 };
 
 struct HealReport {
+  // Boundary edges left after the closed-rim split and the point-gap weld pass,
+  // i.e. the edges the pair planner had to work on.
   std::uint32_t boundary_edges = 0;
   std::uint32_t welded_vertices = 0;
   std::uint32_t sewn_edges = 0;
+  // Boundary edges dissolved by the point-gap pass because their endpoints
+  // collapsed onto one welded point.
+  std::uint32_t collapsed_edges = 0;
   double max_closed_gap = 0.0;
   double max_tolerance = 0.0;
   bool changed = false;
@@ -125,6 +130,14 @@ struct HealEdgePair {
   double gap = 0.0;             // max endpoint distance under the chosen mapping
 };
 
+// Result of the point-gap pass: the vertex welds that collapsed a boundary
+// point cluster and the boundary edges dissolved because they collapsed with
+// it.
+struct HealPointWeld {
+  std::vector<HealVertexWeld> welds;
+  std::vector<EdgeId> dissolved;
+};
+
 struct HealPlan {
   std::vector<HealEdgePair> pairs;
   // Best candidate pair for every boundary edge, including edges whose pairing
@@ -133,6 +146,10 @@ struct HealPlan {
   // cannot pick a seam.
   std::vector<HealEdgePair> considered;
   std::vector<HealIssue> issues;
+  // Vertex welds and dissolved edges applied by the point-gap pass before this
+  // plan was built.
+  std::vector<HealVertexWeld> point_welds;
+  std::vector<EdgeId> dissolved;
 };
 
 // Builds the deduplicated vertex-weld map for a plan. Entries whose keep or
@@ -727,6 +744,184 @@ inline Result<std::optional<Brep>> heal_split_closed_rims(const Brep& brep,
   Result<Brep> committed = editor.commit();
   if (!committed) return committed.error();
   return std::optional<Brep>{std::move(committed).value()};
+}
+
+// Welds boundary points that are closer than `max_gap` and dissolves the
+// boundary edges that collapse with them. A boundary edge whose endpoints are
+// within `max_gap` joins them into one cluster; clusters are transitive, so a
+// boundary edge whose endpoints end up in the same cluster is dissolved as
+// well even when its own chord is wider than `max_gap` - after the merge it
+// would be a self-loop. Each cluster is merged into its lowest-index live
+// vertex with a tolerance covering the whole cluster diameter. The editor has
+// no tolerance setter, so when the diameter pair excludes the keep vertex the
+// higher-index endpoint of that pair is merged into the lower one first; the
+// surviving tolerance then carries the diameter into the keep vertex.
+//
+// Only the editor's staged copy is changed: the caller commits on success, so
+// a rejection leaves the caller's Brep untouched.
+inline Result<HealPointWeld> heal_weld_point_gaps(
+    SolidEditor& editor, std::span<const EdgeId> boundary, double max_gap) {
+  HealPointWeld result;
+  const Brep& brep = editor.brep();
+  const std::size_t vertex_count = brep.vertices().size();
+  std::vector<std::uint32_t> parent(vertex_count);
+  for (std::size_t index = 0; index < vertex_count; ++index) {
+    parent[index] = static_cast<std::uint32_t>(index);
+  }
+  const auto find_root = [&parent](std::uint32_t index) {
+    std::uint32_t root = index;
+    while (parent[root] != root) root = parent[root];
+    while (parent[index] != root) {
+      const std::uint32_t next = parent[index];
+      parent[index] = root;
+      index = next;
+    }
+    return root;
+  };
+  const auto unite = [&parent, &find_root](std::uint32_t first,
+                                           std::uint32_t second) {
+    const std::uint32_t first_root = find_root(first);
+    const std::uint32_t second_root = find_root(second);
+    if (first_root == second_root) return;
+    // The lowest index stays the root, keeping the merge target deterministic.
+    if (first_root < second_root) {
+      parent[second_root] = first_root;
+    } else {
+      parent[first_root] = second_root;
+    }
+  };
+
+  // Join the endpoints of every boundary edge short enough to collapse.
+  for (const EdgeId edge_id : boundary) {
+    if (!brep.edge_alive(edge_id)) continue;
+    const Edge& edge = brep.edge(edge_id);
+    if (edge.v0 == edge.v1) continue;
+    if (!brep.vertex_alive(edge.v0) || !brep.vertex_alive(edge.v1)) continue;
+    const double gap = heal_detail::point_distance(
+        brep.vertex(edge.v0).point, brep.vertex(edge.v1).point);
+    if (!(gap <= max_gap)) continue;
+    unite(edge.v0.index(), edge.v1.index());
+  }
+
+  // Read every cluster, the surviving vertex and the cluster diameter before
+  // mutating: merging releases vertices, after which their points are gone.
+  struct ClusterWeld {
+    VertexId keep;
+    VertexId diameter_first;
+    VertexId diameter_second;
+    double diameter = 0.0;
+  };
+  std::vector<std::vector<VertexId>> members(vertex_count);
+  for (const VertexId vertex_id : brep.vertex_ids()) {
+    if (vertex_id.index() < vertex_count) {
+      members[find_root(vertex_id.index())].push_back(vertex_id);
+    }
+  }
+  std::vector<ClusterWeld> cluster_welds(vertex_count);
+  for (std::size_t root = 0; root < vertex_count; ++root) {
+    if (members[root].size() < 2u) continue;
+    ClusterWeld& cluster_weld = cluster_welds[root];
+    cluster_weld.keep = members[root].front();
+    for (const VertexId member : members[root]) {
+      if (member.index() < cluster_weld.keep.index()) cluster_weld.keep = member;
+    }
+    for (std::size_t first = 0; first < members[root].size(); ++first) {
+      for (std::size_t second = first + 1; second < members[root].size();
+           ++second) {
+        const double gap = heal_detail::point_distance(
+            brep.vertex(members[root][first]).point,
+            brep.vertex(members[root][second]).point);
+        if (gap > cluster_weld.diameter) {
+          cluster_weld.diameter = gap;
+          cluster_weld.diameter_first = members[root][first];
+          cluster_weld.diameter_second = members[root][second];
+        }
+      }
+    }
+  }
+
+  // A rim that lies within max_gap of another boundary rim is a gap to sew, not
+  // a point that collapsed: the two rims pair edge-by-edge and welding their
+  // vertices would dissolve both. Such a cluster has a boundary vertex outside
+  // it within max_gap, and it is left for the pairing pass.
+  std::vector<char> boundary_vertex(vertex_count, 0);
+  std::vector<VertexId> boundary_vertices;
+  for (const EdgeId edge_id : boundary) {
+    if (!brep.edge_alive(edge_id)) continue;
+    const Edge& edge = brep.edge(edge_id);
+    for (const VertexId vertex : {edge.v0, edge.v1}) {
+      if (vertex.index() >= vertex_count) continue;
+      if (boundary_vertex[vertex.index()] == 0) {
+        boundary_vertex[vertex.index()] = 1;
+        boundary_vertices.push_back(vertex);
+      }
+    }
+  }
+  std::vector<char> paired_cluster(vertex_count, 0);
+  for (std::size_t root = 0; root < vertex_count; ++root) {
+    if (members[root].size() < 2u) continue;
+    for (const VertexId member : members[root]) {
+      if (paired_cluster[root] != 0) break;
+      for (const VertexId other : boundary_vertices) {
+        if (find_root(other.index()) == root) continue;
+        if (heal_detail::point_distance(brep.vertex(member).point,
+                                        brep.vertex(other).point) <= max_gap) {
+          paired_cluster[root] = 1;
+          break;
+        }
+      }
+    }
+  }
+
+  // A boundary edge whose endpoints now share a cluster disappears with the
+  // merge, so it is dissolved first: merging first would leave the editor a
+  // self-loop edge to reject.
+  std::vector<char> collapsed(brep.edges().size(), 0);
+  for (const EdgeId edge_id : boundary) {
+    if (!brep.edge_alive(edge_id)) continue;
+    const Edge& edge = brep.edge(edge_id);
+    if (edge.v0 == edge.v1) continue;
+    if (!brep.vertex_alive(edge.v0) || !brep.vertex_alive(edge.v1)) continue;
+    if (find_root(edge.v0.index()) != find_root(edge.v1.index())) continue;
+    if (paired_cluster[find_root(edge.v0.index())] != 0) continue;
+    if (edge_id.index() < collapsed.size()) collapsed[edge_id.index()] = 1;
+  }
+
+  for (const EdgeId edge_id : boundary) {
+    if (edge_id.index() >= collapsed.size() ||
+        collapsed[edge_id.index()] == 0) {
+      continue;
+    }
+    const Result<void> dissolved = editor.dissolve_edge(edge_id);
+    if (!dissolved) return dissolved.error();
+    result.dissolved.push_back(edge_id);
+  }
+
+  for (std::size_t root = 0; root < vertex_count; ++root) {
+    if (members[root].size() < 2u) continue;
+    if (paired_cluster[root] != 0) continue;
+    const ClusterWeld& cluster_weld = cluster_welds[root];
+    const VertexId keep = cluster_weld.keep;
+    // Growing the largest gap into the surviving tolerance first means the
+    // keep vertex ends up with at least the cluster diameter even when the
+    // diameter pair does not involve it.
+    if (cluster_weld.diameter > 0.0 && cluster_weld.diameter_first != keep &&
+        cluster_weld.diameter_second != keep) {
+      const Result<void> merged = editor.merge_vertices(
+          cluster_weld.diameter_first, cluster_weld.diameter_second);
+      if (!merged) return merged.error();
+      result.welds.push_back(HealVertexWeld{cluster_weld.diameter_first,
+                                            cluster_weld.diameter_second});
+    }
+    for (const VertexId member : members[root]) {
+      if (member == keep) continue;
+      if (!editor.brep().vertex_alive(member)) continue;
+      const Result<void> merged = editor.merge_vertices(keep, member);
+      if (!merged) return merged.error();
+      result.welds.push_back(HealVertexWeld{keep, member});
+    }
+  }
+  return Result<HealPointWeld>{std::move(result)};
 }
 
 // Largest radius/centre/origin magnitude of a surface. Multiplied by 1e-12 it
@@ -1380,22 +1575,17 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
   if (split_closed_rims) {
     split_brep = std::move(split_result).value().value();
   }
-  const Brep& work = split_closed_rims ? split_brep : brep;
+  const Brep* work_ptr = split_closed_rims ? &split_brep : &brep;
   if (split_closed_rims) {
     // The boundary and its coedge uses describe the topology the split just
     // changed, so both maps are rebuilt on the working copy.
-    boundary = detail::heal_boundary_edges(work, solid);
-    edge_coedges = collect_edge_coedges(work);
+    boundary = detail::heal_boundary_edges(*work_ptr, solid);
+    edge_coedges = collect_edge_coedges(*work_ptr);
   }
 
   HealReport report;
   report.boundary_edges = static_cast<std::uint32_t>(boundary.size());
-  const std::int64_t euler_before = euler_characteristic(work, solid);
-
-  Result<detail::HealPlan> plan_result =
-      detail::heal_plan(work, boundary, options.max_gap);
-  if (!plan_result) return plan_result.error();
-  detail::HealPlan plan = std::move(plan_result).value();
+  detail::HealPlan plan;
 
   auto reject = [&](const char* message, bool carry_plan) -> Result<HealResult> {
     HealReport rejected;
@@ -1410,6 +1600,66 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
     }
     return HealResult{brep, std::move(rejected)};
   };
+
+  // The split above turns a zero-radius rim into two arcs whose endpoints sit
+  // on one point. Pairing cannot repair such a rim: after a weld both ends of
+  // the gap are the same vertex, so the boundary edges have to disappear before
+  // the planner runs. Weld the boundary points that are at most `max_gap` apart
+  // and dissolve the boundary edges that collapse with them, on a fresh working
+  // copy. The pass stages its edits, so a rejection discards them and the
+  // caller's brep stays untouched.
+  Brep point_welded_brep;
+  bool point_welds_applied = false;
+  double point_weld_tolerance = 0.0;
+  {
+    SolidEditor point_editor(*work_ptr);
+    Result<detail::HealPointWeld> point_result = detail::heal_weld_point_gaps(
+        point_editor, boundary, options.max_gap);
+    if (!point_result) return point_result.error();
+    detail::HealPointWeld point_weld = std::move(point_result).value();
+    if (!point_weld.dissolved.empty()) {
+      // The welded tolerance is at least the cluster diameter; the caller's cap
+      // still decides whether such a tolerance is acceptable.
+      for (const detail::HealVertexWeld& weld : point_weld.welds) {
+        if (!point_editor.brep().vertex_alive(weld.keep)) continue;
+        if (point_editor.brep().vertex(weld.keep).tol > options.max_tolerance) {
+          return reject("heal_brep: tolerance cap exceeded", false);
+        }
+      }
+      // The merged vertices carry a tolerance the edges and faces around them
+      // must also allow, exactly like the final editor stage below.
+      Result<double> point_raised =
+          point_editor.raise_tolerances(options.max_tolerance);
+      if (!point_raised) return reject(point_raised.error().message, false);
+      point_weld_tolerance = point_raised.value();
+      Result<Brep> point_commit = point_editor.commit();
+      if (!point_commit) return point_commit.error();
+      point_welded_brep = std::move(point_commit).value();
+      work_ptr = &point_welded_brep;
+      boundary = detail::heal_boundary_edges(*work_ptr, solid);
+      edge_coedges = collect_edge_coedges(*work_ptr);
+      point_welds_applied = true;
+      plan.point_welds = std::move(point_weld.welds);
+      plan.dissolved = std::move(point_weld.dissolved);
+    }
+  }
+  const Brep& work = *work_ptr;
+  report.boundary_edges = static_cast<std::uint32_t>(boundary.size());
+  const std::int64_t euler_before = euler_characteristic(work, solid);
+
+  // When the point-gap pass closed the last boundary edge there is no pair left
+  // to plan; the editor stage below still has to close the shell and verify the
+  // Euler characteristic. Otherwise an empty pairing is only acceptable when
+  // the planner already reported why (a gap past `max_gap`).
+  if (!point_welds_applied || !boundary.empty()) {
+    Result<detail::HealPlan> plan_result =
+        detail::heal_plan(work, boundary, options.max_gap);
+    if (!plan_result) return plan_result.error();
+    detail::HealPlan pairing = std::move(plan_result).value();
+    plan.pairs = std::move(pairing.pairs);
+    plan.considered = std::move(pairing.considered);
+    plan.issues = std::move(pairing.issues);
+  }
 
   // The geometric guards below run on the immutable working copy after the plan
   // is known and before any SolidEditor mutation, so a rejection leaves the
@@ -1512,7 +1762,7 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
     }
   }
 
-  if (plan.pairs.empty()) {
+  if (plan.pairs.empty() && !(point_welds_applied && boundary.empty())) {
     report.issues = plan.issues;
     if (!boundary.empty() && report.issues.empty()) {
       HealIssue issue;
@@ -1575,6 +1825,14 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
 
   std::vector<char> welded_vertices(editor.brep().vertices().size(), 0);
   for (const detail::HealVertexWeld& weld : applied_welds) {
+    if (editor.brep().vertex_alive(weld.keep) &&
+        weld.keep.index() < welded_vertices.size()) {
+      welded_vertices[weld.keep.index()] = 1;
+    }
+  }
+  // A point-weld keep is just as welded: the dissolved rim edges shortened its
+  // face loop, so that face needs pcurves for the new loop.
+  for (const detail::HealVertexWeld& weld : plan.point_welds) {
     if (editor.brep().vertex_alive(weld.keep) &&
         weld.keep.index() < welded_vertices.size()) {
       welded_vertices[weld.keep.index()] = 1;
@@ -1666,15 +1924,34 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
   Result<Brep> committed = editor.commit();
   if (!committed) return reject(committed.error().message, true);
 
-  report.welded_vertices = detail::heal_live_weld_count(editor.brep(), applied_welds);
+  std::uint32_t welded_count =
+      detail::heal_live_weld_count(editor.brep(), applied_welds);
+  // heal_live_weld_count counts surviving roots, which would report a
+  // collapsed point cluster as one vertex. The point-gap pass is described by
+  // the vertices it welded, so count every distinct cluster member instead.
+  std::vector<char> point_welded(editor.brep().vertices().size(), 0);
+  for (const detail::HealVertexWeld& weld : plan.point_welds) {
+    if (weld.keep.index() < point_welded.size()) {
+      point_welded[weld.keep.index()] = 1;
+    }
+    if (weld.drop.index() < point_welded.size()) {
+      point_welded[weld.drop.index()] = 1;
+    }
+  }
+  for (const char welded : point_welded) {
+    if (welded != 0) ++welded_count;
+  }
+  report.welded_vertices = welded_count;
   report.sewn_edges = sewn_edges;
+  report.collapsed_edges = static_cast<std::uint32_t>(plan.dissolved.size());
   report.changed = report.welded_vertices + report.sewn_edges > 0;
   double max_closed_gap = 0.0;
   for (const detail::HealEdgePair& pair : plan.pairs) {
     max_closed_gap = std::max(max_closed_gap, pair.gap);
   }
   report.max_closed_gap = max_closed_gap;
-  report.max_tolerance = std::max(raised, largest_weld_tolerance);
+  report.max_tolerance = std::max({raised, largest_weld_tolerance,
+                                   point_weld_tolerance});
   report.issues = std::move(plan.issues);
   return HealResult{std::move(committed).value(), std::move(report)};
 }

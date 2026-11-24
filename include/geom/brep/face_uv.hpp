@@ -539,6 +539,8 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
   Point2d previous_raw{};
 
   CoedgeId current = loop.start;
+  CoedgeId previous_coedge{};
+  bool has_previous_coedge = false;
   std::size_t steps = 0u;
   while (!current.is_null()) {
     if (!brep.coedge_alive(current)) {
@@ -575,6 +577,10 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
                                    uv[0] == previous[0] && uv[1] == previous[1];
           const bool position_junction =
               face_uv_distance(run.positions[i], last_position) <= tolerance;
+          const bool seam_uturn =
+              has_previous_coedge &&
+              brep.coedge(previous_coedge).edge == coedge.edge &&
+              brep.coedge(previous_coedge).reversed != coedge.reversed;
           if (position_junction &&
               face_uv_singular_chart_point(projection, run.positions[i])) {
             // A pole or apex has no azimuth: a run may arrive on one chart
@@ -588,6 +594,20 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
             if (same_stored_angle) continue;
             // Keep the run's own azimuth: unwrapping against the previous
             // column would fold the new column back onto the old one.
+            uv = raw;
+          } else if (seam_uturn && position_junction &&
+                     ((projection.periodic_u() &&
+                       face_uv_period_shift(raw[0] - previous_raw[0],
+                                            kFaceUvAngleTolerance)) ||
+                      (projection.periodic_v() &&
+                       face_uv_period_shift(raw[1] - previous_raw[1],
+                                            kFaceUvAngleTolerance)))) {
+            // A point-gap weld can dissolve the rim edges of a seam-slit loop so
+            // that the seam is used once in each direction and turns around on
+            // itself at the collapsed point. The up-seam and down-seam sides of
+            // that U-turn are the two columns of the chart window, so both must
+            // survive; unwrapping the turning point against the up-seam column
+            // would fold it onto that column and collapse the ring into a chord.
             uv = raw;
           } else if (uv_junction ||
                      (projection.periodic_u() &&
@@ -632,6 +652,8 @@ inline Result<FaceUvLoop> face_uv_read_loop(const Brep& brep, FaceId face_id, Lo
       return Error{Errc::invalid_topology, "face_loops_uv: loop coedge cycle does not close",
                    current.index(), 0u};
     }
+    previous_coedge = current;
+    has_previous_coedge = true;
     current = coedge.next;
   }
   if (!chain_closed) {

@@ -1334,3 +1334,140 @@ TEST_CASE("heal: a flipped inherited carrier is reversed into the keep direction
   REQUIRE(volume.has_value());
   CHECK(std::fabs(volume.value() - 1.0) <= 1e-12);
 }
+
+TEST_CASE("heal: a cone pinhole closes at a welded point") {
+  // The rim radius is zero, so the two split halves start and end on the same
+  // point. Pairing cannot repair that rim: after a weld both ends of the gap
+  // are one vertex. The point-gap weld pass has to dissolve both halves and
+  // merge the two rim vertices before the planner sees a zero-length edge.
+  SolidEditor editor;
+  const test::m4b::ConePinhole cone =
+      test::m4b::add_cone_pinhole(editor, 0.0, 0.0, true);
+  const auto committed = editor.commit();
+  REQUIRE(committed.has_value());
+  const Brep brep = committed.value();
+  const std::vector<double> input_fingerprint = brep_fingerprint(brep);
+  const HealOptions options{1e-9, 1e-9, 1e-9};
+
+  const auto healed = heal_brep(brep, cone.solid, options);
+  if (!healed.has_value()) {
+    MESSAGE("heal_brep rejected the zero-radius pinhole: "
+            << std::string(healed.error().message));
+  }
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK(result.report.changed);
+  CHECK(result.report.issues.empty());
+  CHECK(result.report.boundary_edges == 0u);
+  CHECK(result.report.welded_vertices == 2u);
+  CHECK(result.report.sewn_edges == 0u);
+  CHECK(result.report.collapsed_edges == 2u);
+  // The pass may not invent a tolerance the caller did not allow.
+  CHECK(result.report.max_tolerance <= 1e-9);
+  CHECK(brep_fingerprint(brep) == input_fingerprint);
+
+  // V = b0, b1, t0; E = base0, base1, seam; F = lateral, base.
+  CHECK(result.brep.vertex_count() == 3u);
+  CHECK(result.brep.edge_count() == 3u);
+  CHECK(result.brep.face_count() == 2u);
+  CHECK(euler_characteristic(result.brep, cone.solid) == 2);
+  CHECK(validate_topology(result.brep).ok());
+
+  const auto volume =
+      detail::curved_solid_volume(result.brep, cone.solid, 1e-9);
+  if (!volume.has_value()) {
+    MESSAGE("the point-welded pinhole has no volume: "
+            << std::string(volume.error().message));
+  }
+  REQUIRE(volume.has_value());
+  const double expected_volume = 2.0 / 3.0 * test::m4a::kPi;
+  CHECK(std::fabs(volume.value() - expected_volume) <=
+        1e-12 * expected_volume);
+
+  const auto shells = result.brep.solid_shells(cone.solid);
+  REQUIRE(shells.size() == 1u);
+  CHECK(result.brep.shell(shells.front()).closed);
+  CHECK(detail::heal_boundary_edges(result.brep, cone.solid).empty());
+
+  // Repeating the heal on the same input is deterministic.
+  const auto repeated = heal_brep(brep, cone.solid, options);
+  REQUIRE(repeated.has_value());
+  CHECK(brep_fingerprint(repeated.value().brep) == brep_fingerprint(result.brep));
+  const auto repeated_volume =
+      detail::curved_solid_volume(repeated.value().brep, cone.solid, 1e-9);
+  REQUIRE(repeated_volume.has_value());
+  CHECK(repeated_volume.value() == volume.value());
+}
+
+TEST_CASE("heal: a tiny pinhole rim welds only within max_gap") {
+  // The rim radius is 1e-6, so the split halves are two arcs 2e-6 apart. With
+  // max_gap = 1e-5 the point-gap pass may collapse them; with max_gap = 1e-9 it
+  // must not, and the caller must be told no pair could be made instead of
+  // receiving a silently open shell.
+  SolidEditor editor;
+  const test::m4b::ConePinhole cone =
+      test::m4b::add_cone_pinhole(editor, 0.0, 1e-6, true);
+  const auto committed = editor.commit();
+  REQUIRE(committed.has_value());
+  const Brep brep = committed.value();
+  const std::vector<double> input_fingerprint = brep_fingerprint(brep);
+
+  const auto healed = heal_brep(brep, cone.solid, HealOptions{1e-9, 1e-5, 1e-4});
+  if (!healed.has_value()) {
+    MESSAGE("heal_brep rejected the tiny pinhole: "
+            << std::string(healed.error().message));
+  }
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK(result.report.changed);
+  CHECK(result.report.issues.empty());
+  CHECK(result.report.boundary_edges == 0u);
+  CHECK(result.report.welded_vertices == 2u);
+  CHECK(result.report.sewn_edges == 0u);
+  CHECK(result.report.collapsed_edges == 2u);
+  // The merged rim vertices carry the 2e-6 rim diameter as tolerance.
+  CHECK(result.report.max_tolerance <= 1e-4);
+  CHECK(brep_fingerprint(brep) == input_fingerprint);
+
+  CHECK(result.brep.vertex_count() == 3u);
+  CHECK(result.brep.edge_count() == 3u);
+  CHECK(result.brep.face_count() == 2u);
+  CHECK(euler_characteristic(result.brep, cone.solid) == 2);
+  CHECK(validate_topology(result.brep).ok());
+
+  const auto volume =
+      detail::curved_solid_volume(result.brep, cone.solid, 1e-9);
+  if (!volume.has_value()) {
+    MESSAGE("the point-welded tiny pinhole has no volume: "
+            << std::string(volume.error().message));
+  }
+  REQUIRE(volume.has_value());
+  const double expected_volume = 2.0 / 3.0 * test::m4a::kPi;
+  CHECK(std::fabs(volume.value() - expected_volume) <=
+        1e-9 * expected_volume);
+
+  const auto shells = result.brep.solid_shells(cone.solid);
+  REQUIRE(shells.size() == 1u);
+  CHECK(result.brep.shell(shells.front()).closed);
+  CHECK(detail::heal_boundary_edges(result.brep, cone.solid).empty());
+
+  // Below the rim diameter nothing may weld; the solid stays open and the
+  // caller gets the honest "no pair" answer instead of a false success.
+  const auto rejected =
+      heal_brep(brep, cone.solid, HealOptions{1e-9, 1e-9, 1e-4});
+  REQUIRE(rejected.has_value());
+  const HealResult& rejected_result = rejected.value();
+  CHECK_FALSE(rejected_result.report.changed);
+  CHECK(rejected_result.report.boundary_edges == 2u);
+  CHECK(rejected_result.report.welded_vertices == 0u);
+  CHECK(rejected_result.report.sewn_edges == 0u);
+  CHECK(rejected_result.report.collapsed_edges == 0u);
+  CHECK(brep_fingerprint(rejected_result.brep) == input_fingerprint);
+  REQUIRE(rejected_result.report.issues.size() == 1u);
+  CHECK(rejected_result.report.issues.front().kind ==
+        HealIssueKind::invalid_result);
+  CHECK(rejected_result.report.issues.front().message ==
+        "heal_brep: no mutual pair");
+  CHECK(detail::heal_boundary_edges(rejected_result.brep, cone.solid).size() ==
+        2u);
+}
