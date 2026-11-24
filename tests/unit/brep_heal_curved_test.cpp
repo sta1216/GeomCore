@@ -1508,7 +1508,7 @@ TEST_CASE("heal: a tiny pinhole rim welds only within max_gap") {
   REQUIRE(rejected_result.report.issues.size() == 1u);
   CHECK(rejected_result.report.issues.front().kind ==
         HealIssueKind::invalid_result);
-  CHECK(rejected_result.report.issues.front().message ==
+  CHECK(std::string_view(rejected_result.report.issues.front().message) ==
         "heal_brep: no mutual pair");
   CHECK(detail::heal_boundary_edges(rejected_result.brep, cone.solid).size() ==
         2u);
