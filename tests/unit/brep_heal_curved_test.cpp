@@ -15,6 +15,7 @@
 
 #include "brep_heal_fixture.hpp"
 #include "m4a_curved_heal_fixture.hpp"
+#include "m4b_heal_fixture.hpp"
 
 using namespace geom;
 
@@ -917,6 +918,63 @@ TEST_CASE("heal: analytic curved gaps are accepted") {
     }
     CHECK(apex_vertices == 1u);
   }
+}
+
+TEST_CASE("heal: a sphere pole gap closes at the pole") {
+  // The cap ends exactly at the pole (v = pi/2) and its meridian seam is used
+  // twice; the band's rim sits `delta` below the pole on the same unit sphere,
+  // so the solid is the upper hemisphere and its volume is 2*pi/3. Both rims
+  // are already split at u = 0 and u = pi, so no closed-rim split is involved.
+  constexpr double delta = 1e-8;
+  constexpr double gap = 5e-9;
+  const test::m4a::CurvedSolid fixture =
+      test::m4b::make_sphere_pole_gap(delta, gap);
+  // Vertices are created e0, e1, p0, p1, c0, c1, pole; the sewn pair joins
+  // p0/c0 and p1/c1 across the gap.
+  const double measured_gap = vertex_gap(fixture.brep, 2, 4);
+  const std::vector<double> input_fingerprint = brep_fingerprint(fixture.brep);
+
+  const auto healed = heal_brep(fixture.brep, fixture.solid, HealOptions{});
+  if (!healed.has_value()) {
+    MESSAGE("heal_brep rejected the near-pole sphere gap: "
+            << std::string(healed.error().message));
+  }
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK(result.report.changed);
+  CHECK(result.report.issues.empty());
+  CHECK(result.report.boundary_edges == 4u);
+  CHECK(result.report.welded_vertices == 2u);
+  CHECK(result.report.sewn_edges == 2u);
+  CHECK(result.report.max_closed_gap == measured_gap);
+  CHECK(result.report.max_tolerance <= 1e-6);
+  CHECK(brep_fingerprint(fixture.brep) == input_fingerprint);
+  CHECK(euler_characteristic(result.brep, fixture.solid) == 2);
+  CHECK(validate_topology(result.brep).ok());
+
+  const auto volume = detail::curved_solid_volume(result.brep, fixture.solid, 1e-9);
+  if (!volume.has_value()) {
+    MESSAGE("the healed sphere pole gap has no volume: "
+            << std::string(volume.error().message));
+  }
+  REQUIRE(volume.has_value());
+  CHECK(std::fabs(volume.value() - 2.0 / 3.0 * test::m4a::kPi) <=
+        1e-12 * (2.0 / 3.0 * test::m4a::kPi));
+
+  // A closed result is one shell with no boundary edge left.
+  const auto shells = result.brep.solid_shells(fixture.solid);
+  REQUIRE(shells.size() == 1u);
+  CHECK(result.brep.shell(shells.front()).closed);
+  CHECK(detail::heal_boundary_edges(result.brep, fixture.solid).empty());
+
+  // Repeating the heal on the same input is deterministic.
+  const auto repeated = heal_brep(fixture.brep, fixture.solid, HealOptions{});
+  REQUIRE(repeated.has_value());
+  CHECK(brep_fingerprint(repeated.value().brep) == brep_fingerprint(result.brep));
+  const auto repeated_volume =
+      detail::curved_solid_volume(repeated.value().brep, fixture.solid, 1e-9);
+  REQUIRE(repeated_volume.has_value());
+  CHECK(repeated_volume.value() == volume.value());
 }
 
 TEST_CASE("heal: torus band gaps are accepted") {

@@ -183,19 +183,23 @@ inline Result<Point2d> face_uv_project_cone(const Cone3& surface, const Point3d&
 
 // `previous_u` and `has_previous_u` carry the last azimuth of the same loop:
 // at the poles the radial component vanishes, and the previous azimuth is kept
-// so that the unwrapped ring does not jump there.
+// so that the unwrapped ring does not jump there. The latitude comes from
+// atan2(axial, radial length) rather than asin(axial / radius): close to a pole
+// the ratio rounds to 1 while the radial length is still resolvable, and asin
+// would snap a whole neighbourhood of the pole onto the chart boundary.
 inline Result<Point2d> face_uv_project_sphere(const Sphere3& surface, const Point3d& point,
                                               double previous_u, bool has_previous_u) {
   const Vec3d offset = point - surface.center;
-  const double sin_v = std::clamp(dot(offset, surface.axis) / surface.radius, -1.0, 1.0);
-  const double v = std::asin(sin_v);
+  const double axial = dot(offset, surface.axis);
   const Vec3d y_axis = cross(surface.axis, surface.x_axis);
-  const Vec3d radial = offset - surface.axis * (surface.radius * sin_v);
+  const Vec3d radial = offset - surface.axis * axial;
   const double x = dot(radial, surface.x_axis);
   const double y = dot(radial, y_axis);
+  const double v = std::atan2(axial, std::hypot(x, y));
   double u = 0.0;
   if (std::hypot(x, y) > surface.radius * 1e-12) {
     u = std::atan2(y, x);
+    if (has_previous_u) u = face_uv_unwrap(u, previous_u);
   } else if (has_previous_u) {
     u = previous_u;
   }

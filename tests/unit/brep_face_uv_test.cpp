@@ -445,6 +445,59 @@ TEST_CASE("a sphere seam loop stays finite at the poles") {
   CHECK(max_v - min_v == doctest::Approx(kPi).epsilon(1e-12));
 }
 
+TEST_CASE("a sphere latitude stays inside the chart near the pole") {
+  constexpr double kRadius = 1.0;
+  const geom::Sphere3 sphere{geom::Point3d{0.0, 0.0, 0.0},
+                             geom::Vec3d{0.0, 0.0, 1.0},
+                             geom::Vec3d{1.0, 0.0, 0.0}, kRadius};
+  const geom::SurfaceGeometry surface = sphere;
+  const geom::detail::FaceUvProjection projection{&surface, {}, kTolerance};
+
+  // One nanometre of latitude from the north pole. On the unit sphere the
+  // axial component is 1 - delta^2/2, which rounds to 1 for delta < 1.5e-8, so
+  // an asin-based latitude saturates at pi/2 instead of following the point.
+  constexpr double kDelta = 1e-9;
+  const geom::Point3d near_pole{std::cos(0.5 * kPi - kDelta), 0.0,
+                                std::sin(0.5 * kPi - kDelta)};
+  const geom::Result<geom::Point2d> uv =
+      geom::detail::face_uv_project_sphere(sphere, near_pole, 0.0, false);
+  REQUIRE(uv.has_value());
+  CHECK(uv.value()[0] == 0.0);
+
+  const geom::Point3d round_trip = geom::detail::face_uv_eval(projection, uv.value());
+  INFO("v = " << uv.value()[1] << ", pi/2 - v = " << (0.5 * kPi - uv.value()[1])
+              << ", round-trip error = " << geom::norm2(round_trip - near_pole));
+  CHECK(uv.value()[1] < 0.5 * kPi);
+  CHECK(std::fabs(uv.value()[1] - (0.5 * kPi - kDelta)) <= 1e-15);
+  CHECK(geom::norm2(round_trip - near_pole) <= 1e-14);
+
+  // The exact pole has no azimuth: the previous one is kept, and the first
+  // sample of a loop borrows u = 0. The latitude is the chart boundary.
+  const geom::Point3d pole{0.0, 0.0, kRadius};
+  const geom::Result<geom::Point2d> borrowed =
+      geom::detail::face_uv_project_sphere(sphere, pole, 0.75, true);
+  REQUIRE(borrowed.has_value());
+  CHECK(borrowed.value()[0] == 0.75);
+  CHECK(borrowed.value()[1] == 0.5 * kPi);
+  const geom::Result<geom::Point2d> first =
+      geom::detail::face_uv_project_sphere(sphere, pole, 0.0, false);
+  REQUIRE(first.has_value());
+  CHECK(first.value()[0] == 0.0);
+  CHECK(first.value()[1] == 0.5 * kPi);
+
+  // Away from the pole the latitude follows the point to round-off.
+  constexpr double kLatitude = 0.25 * kPi;
+  constexpr double kAzimuth = 0.5;
+  const geom::Point3d on_sphere{
+      std::cos(kLatitude) * std::cos(kAzimuth),
+      std::cos(kLatitude) * std::sin(kAzimuth), std::sin(kLatitude)};
+  const geom::Result<geom::Point2d> middle =
+      geom::detail::face_uv_project_sphere(sphere, on_sphere, 0.0, false);
+  REQUIRE(middle.has_value());
+  CHECK(std::fabs(middle.value()[0] - kAzimuth) <= 1e-15);
+  CHECK(std::fabs(middle.value()[1] - kLatitude) <= 1e-15);
+}
+
 TEST_CASE("curved boolean: a sphere face advertises its full uv domain") {
   const auto sphere = geom::make_sphere(geom::Point3d{0.0, 0.0, 0.0}, 1.0, kTolerance);
   REQUIRE(sphere.has_value());
