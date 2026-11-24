@@ -108,15 +108,19 @@ Result<HealResult> heal_brep(const Brep& brep, SolidId solid, const HealOptions&
 
 namespace detail {
 
+// A directed weld: `drop` is merged into `keep`. The pair planner points each
+// weld from the kept edge's endpoint to the dropped edge's endpoint, so the kept
+// edge's surviving carrier always passes through its own (keep) vertex.
 struct HealVertexWeld {
-  VertexId keep{};  // lower index
-  VertexId drop{};  // higher index
+  VertexId keep{};  // surviving endpoint, on the kept edge
+  VertexId drop{};  // merged endpoint, on the dropped edge
 };
 
 struct HealEdgePair {
-  EdgeId keep{};      // lower index
-  EdgeId drop{};      // higher index
-  std::array<HealVertexWeld, 2> welds{};  // endpoint correspondence, keep < drop
+  EdgeId keep{};  // surviving edge; the lower index unless the weld direction
+                  // must agree with an earlier pair that claims the same seam
+  EdgeId drop{};  // consumed edge
+  std::array<HealVertexWeld, 2> welds{};  // kept-edge -> dropped-edge endpoints
   bool same_direction = false;  // coedge traversal directions agree
   double gap = 0.0;             // max endpoint distance under the chosen mapping
 };
@@ -219,11 +223,6 @@ inline double point_distance(const Point3d& a, const Point3d& b) {
 inline Point3d midpoint(const Point3d& a, const Point3d& b) {
   return Point3d{(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5,
                  (a[2] + b[2]) * 0.5};
-}
-
-inline HealVertexWeld normalize_weld(VertexId a, VertexId b) {
-  if (a.index() < b.index()) return HealVertexWeld{a, b};
-  return HealVertexWeld{b, a};
 }
 
 // Maps a vertex of the kept edge to its counterpart on the dropped edge.
@@ -462,16 +461,19 @@ inline Result<HealPlan> heal_plan(const Brep& brep,
       candidate.pair.drop = drop;
       candidate.keep_position = keep_position;
       candidate.drop_position = drop_position;
+      // The kept edge is the one whose carrier survives merge_edges, and that
+      // carrier ends at the kept edge's own vertices. Direct every weld from the
+      // kept edge's endpoint to the dropped edge's endpoint rather than sorting
+      // by vertex index: after a closed-rim split the lower vertex id can belong
+      // to the dropped rim, which would pull the kept carrier off its vertices.
       if (same_mapping) {
-        candidate.pair.welds = {
-            heal_detail::normalize_weld(keep_edge.v0, drop_edge.v0),
-            heal_detail::normalize_weld(keep_edge.v1, drop_edge.v1)};
+        candidate.pair.welds = {HealVertexWeld{keep_edge.v0, drop_edge.v0},
+                                HealVertexWeld{keep_edge.v1, drop_edge.v1}};
         candidate.pair.gap = same_gap;
         candidate.sum = same_sum;
       } else {
-        candidate.pair.welds = {
-            heal_detail::normalize_weld(keep_edge.v0, drop_edge.v1),
-            heal_detail::normalize_weld(keep_edge.v1, drop_edge.v0)};
+        candidate.pair.welds = {HealVertexWeld{keep_edge.v0, drop_edge.v1},
+                                HealVertexWeld{keep_edge.v1, drop_edge.v0}};
         candidate.pair.gap = flipped_gap;
         candidate.sum = flipped_sum;
       }
@@ -570,6 +572,16 @@ inline Result<HealPlan> heal_plan(const Brep& brep,
     preferred[index] = accepted[index][0];
   }
 
+  // Candidate order decides which rim of a seam survives: the first pair to
+  // claim a vertex fixes its weld direction. A later pair that spans the same
+  // seam (the other half of a split rim, for example) would otherwise weld the
+  // same vertices the other way round, so dedup would discard its welds while
+  // its kept edge still carries a carrier whose endpoints die. Swap that pair's
+  // keep/drop edges so every pair agrees on the surviving endpoint.
+  std::vector<std::uint32_t> weld_drop_to_keep(brep.vertices().size(),
+                                               kNoEntity);
+  std::vector<std::uint32_t> weld_keep_to_drop(brep.vertices().size(),
+                                              kNoEntity);
   for (std::size_t candidate_index = 0; candidate_index < candidates.size();
        ++candidate_index) {
     const heal_detail::Candidate& candidate = candidates[candidate_index];
@@ -591,7 +603,25 @@ inline Result<HealPlan> heal_plan(const Brep& brep,
       plan.issues.push_back(issue);
       continue;
     }
-    plan.pairs.push_back(candidate.pair);
+    HealEdgePair pair = candidate.pair;
+    bool welds_reversed = false;
+    for (const HealVertexWeld& weld : pair.welds) {
+      if (weld_drop_to_keep[weld.keep.index()] != kNoEntity ||
+          weld_keep_to_drop[weld.drop.index()] != kNoEntity) {
+        welds_reversed = true;
+      }
+    }
+    if (welds_reversed) {
+      std::swap(pair.keep, pair.drop);
+      for (HealVertexWeld& weld : pair.welds) {
+        std::swap(weld.keep, weld.drop);
+      }
+    }
+    for (const HealVertexWeld& weld : pair.welds) {
+      weld_drop_to_keep[weld.drop.index()] = weld.keep.index();
+      weld_keep_to_drop[weld.keep.index()] = weld.drop.index();
+    }
+    plan.pairs.push_back(pair);
   }
 
   std::size_t nearest_index = no_candidate;
@@ -1174,10 +1204,29 @@ inline Result<void> heal_rebuild_face_pcurves(SolidEditor& editor, FaceId face_i
     }
     simplified.push_back(run.points.back());
     // A circle keeps one interior sample so its arc direction stays defined and
-    // the polyline can still be read as an arc.
-    if (run.curved && simplified.size() < 3u) {
-      simplified.insert(simplified.begin() + 1,
-                        run.points[run.points.size() / 2u]);
+    // the polyline can still be read as an arc. When the sampled path has no
+    // point near the chart's exact midpoint (a closed rim split at an arbitrary
+    // parameter, for example), keep thirds instead: face_uv_unwrap folds a
+    // forward sweep a hair over pi back onto the previous column, which would
+    // collapse the rim pcurve into a spike and halve the loop's uv area.
+    if (run.curved && simplified.size() == 2u && run.points.size() >= 4u) {
+      const std::size_t middle = run.points.size() / 2u;
+      const auto folds = [](const Point2d& a, const Point2d& b) {
+        return std::fabs(b[0] - a[0]) > kFaceUvPi ||
+               std::fabs(b[1] - a[1]) > kFaceUvPi;
+      };
+      if (folds(simplified.front(), run.points[middle]) ||
+          folds(run.points[middle], simplified.back())) {
+        const std::size_t third = run.points.size() / 3u;
+        const std::size_t two_thirds = (2u * run.points.size()) / 3u;
+        if (third > 0u && third < two_thirds &&
+            two_thirds + 1u < run.points.size()) {
+          simplified.insert(simplified.begin() + 1, run.points[two_thirds]);
+          simplified.insert(simplified.begin() + 1, run.points[third]);
+        }
+      } else {
+        simplified.insert(simplified.begin() + 1, run.points[middle]);
+      }
     }
     run.points = std::move(simplified);
   }
