@@ -298,7 +298,7 @@ TEST_CASE("commit rejects a face with two outer loops") {
   CHECK(s.editor.brep().loop_count() == 2);
 }
 
-TEST_CASE("solid editor: dissolve_edge of a pinhole rim arc keeps the loop") {
+TEST_CASE("solid editor: dissolve_edge of both pinhole rim arcs keeps the loop") {
   geom::SolidEditor ed;
   const geom::test::m4b::ConePinhole cone =
       geom::test::m4b::add_cone_pinhole(ed, 0.0, 0.25, true);
@@ -309,22 +309,48 @@ TEST_CASE("solid editor: dissolve_edge of a pinhole rim arc keeps the loop") {
   const geom::CoedgeId old_start = ed.brep().loop(cone.lateral_loop).start;
   REQUIRE(ed.brep().coedge(old_start).edge == cone.base0);
 
-  const auto r = ed.dissolve_edge(cone.top_a);
-  REQUIRE(r.has_value());
+  // One arc alone would leave the lateral loop with a gap between the arc
+  // before it and the arc after it, so both rim arcs go together.
+  REQUIRE(ed.dissolve_edge(cone.top_a).has_value());
+  REQUIRE(ed.dissolve_edge(cone.top_b).has_value());
 
   CHECK_FALSE(ed.brep().edge_alive(cone.top_a));
+  CHECK_FALSE(ed.brep().edge_alive(cone.top_b));
   CHECK(ed.brep().vertex_alive(cone.t0));
   CHECK(ed.brep().vertex_alive(cone.t1));
-  CHECK(ed.brep().edge_alive(cone.top_b));
   CHECK(ed.brep().edge_alive(cone.seam));
-  CHECK(loop_coedge_count(ed.brep(), cone.lateral_loop) == 5u);
+  CHECK(loop_coedge_count(ed.brep(), cone.lateral_loop) == 4u);
   CHECK(loop_coedge_count(ed.brep(), cone.base_loop) == 2u);
   CHECK(ed.brep().loop(cone.lateral_loop).start == old_start);
-  CHECK(ed.brep().edge_count() == 4u);
-  CHECK(ed.brep().coedge_count() == 7u);
+  CHECK(ed.brep().edge_count() == 3u);
+  CHECK(ed.brep().coedge_count() == 6u);
   CHECK(ed.brep().loop_count() == 2u);
   CHECK(ed.brep().shell_count() == 1u);
   CHECK(ed.brep().solid_count() == 1u);
+  const auto committed = ed.commit();
+  REQUIRE(committed.has_value());
+  CHECK(geom::validate_topology(committed.value()).ok());
+}
+
+TEST_CASE("solid editor: dissolving one arc of a rim cannot be committed") {
+  geom::SolidEditor builder;
+  const geom::test::m4b::ConePinhole cone =
+      geom::test::m4b::add_cone_pinhole(builder, 0.0, 0.25, true);
+  const auto sealed = builder.commit();
+  REQUIRE(sealed.has_value());
+  geom::SolidEditor ed(sealed.value());
+  REQUIRE(ed.dissolve_edge(cone.top_a).has_value());
+
+  // The splice keeps next/prev consistent but leaves the coedge before the arc
+  // ending at t0 and the one after it starting at t1. commit() must refuse.
+  const auto committed = ed.commit();
+  REQUIRE_FALSE(committed.has_value());
+  CHECK(committed.error().code == geom::Errc::invalid_topology);
+  CHECK(std::string_view(committed.error().message) ==
+        "loop coedge chain is not vertex-continuous");
+
+  ed.rollback();
+  CHECK(ed.brep().edge_count() == 5u);
   CHECK(ed.commit().has_value());
 }
 

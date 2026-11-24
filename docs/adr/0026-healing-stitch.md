@@ -283,6 +283,11 @@ M4b-2 关闭 M4b-1 延后的 apex/pole gap。实现由两条独立路径组成�
   loop 都开口，因此以 `unsupported` 拒绝；调用者需要重建两个 loop。移除 loop
   最后一条 coedge 会被 `invalid_topology` 拒绝。它不删除面/壳/实体。锥 pinch
   形体（顶点一个、seam 在同一 lateral loop 正反各用一次）是该语义的验收形态。
+  同 loop 但只使用一次的边可以 stage，却会让剩余 coedge 的终点与下一条的起点
+  落在不同顶点；`SolidEditor::commit` 因此在发布前检查 dissolve 触及的每条 loop 的
+  coedge 链顶点连续性，失败时返回
+  `invalid_topology "loop coedge chain is not vertex-continuous"`，所以这种
+  消解无法提交。
 - **点隙焊接的顺序。** 固定顺序为：边界表/白名单/载体门禁 → 闭合 rim 拆分
   （工作副本）→ **点隙焊接**（新的 work 副本，`detail::heal_weld_point_gaps`）
   → `heal_plan`/Euler。点隙 pass 只在目标实体的边界顶点上做并查集聚类：
@@ -324,8 +329,8 @@ M4b-2 关闭 M4b-1 延后的 apex/pole gap。实现由两条独立路径组成�
 - **测试证据。** 新用例在 `tests/unit/brep_heal_curved_test.cpp`
   （极点、针孔、无效面）与 `tests/unit/brep_face_uv_test.cpp`（极点纬度）；
   夹具集中在 `tests/unit/m4b_heal_fixture.hpp`。Release 快速通道
-  `-tc="*heal*"` 为 95 用例/2,002 断言，`-tc="*uv*"` 为 9/388；全量 Release 为
-  1085 用例/680,741 断言，0 失败（较 M4b-1 +11 用例/+238 断言）。全量 Debug
+  `-tc="*heal*"` 为 95 用例/2,013 断言，`-tc="*uv*"` 为 9/388；全量 Release 为
+  1086 用例/680,748 断言，0 失败（较 M4b-1 +12 用例/+245 断言）。全量 Debug
   未完成：分片跑到 1,077/1,085 用例、553,598 断言、0 失败，余下 8 个球体布尔
   用例在 `/Od` 下超时，移交里程碑评审（PENDING）。实测表见
   `docs/benchmarks/m4b2-healing.md`，架构状态见 §16.4。

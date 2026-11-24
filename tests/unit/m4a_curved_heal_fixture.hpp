@@ -1040,29 +1040,29 @@ inline CubeFixture build_unit_cube(bool nurbs_face, bool nurbs_edge) {
 
   const FaceId x1 = m4a_face(editor, plane);
   const std::array<CoedgeSpec, 4> x1_loop{{
-      {s2, false}, {t1, true}, {s1, true}, {b1, true}}};
+      {b1, false}, {s2, false}, {t1, true}, {s1, true}}};
   editor.add_loop(x1, x1_loop, true).value();
 
   const FaceId y1 = m4a_face(editor, plane);
   const std::array<CoedgeSpec, 4> y1_loop{{
-      {s3, false}, {t2, true}, {s2, true}, {b2, true}}};
+      {s3, false}, {t2, true}, {s2, true}, {b2, false}}};
   editor.add_loop(y1, y1_loop, true).value();
 
   const FaceId x0 = m4a_face(editor, plane);
   const std::array<CoedgeSpec, 4> x0_loop{{
-      {s0, false}, {t3, true}, {s3, true}, {b3, true}}};
+      {s0, false}, {t3, true}, {s3, true}, {b3, false}}};
   editor.add_loop(x0, x0_loop, true).value();
 
   const FaceId y0 = m4a_face(editor, plane);
   const std::array<CoedgeSpec, 4> y0_loop{{
-      {s1, false}, {t0, true}, {s0, true}, {b0, true}}};
+      {b0, false}, {s1, false}, {t0, true}, {s0, true}}};
   editor.add_loop(y0, y0_loop, true).value();
 
   // Added last so the face index a guard reports is non-zero; the shell order
   // below still puts it first, so the surface guard reaches it first.
   const FaceId bottom = m4a_face(editor, bottom_surface);
   const std::array<CoedgeSpec, 4> bottom_loop{{
-      {b0, false}, {b1, false}, {b2, false}, {b3, false}}};
+      {b3, true}, {b2, true}, {b1, true}, {b0, true}}};
   editor.add_loop(bottom, bottom_loop, true).value();
 
   const std::array<FaceId, 6> faces{{bottom, top, x1, y1, x0, y0}};

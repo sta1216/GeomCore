@@ -696,6 +696,11 @@ class SolidEditor {
 
     for (const CoedgeId use : uses) staged_.coedge_alloc_.release(use);
     staged_.edge_alloc_.release(edge);
+    for (const LoopId loop_id : loops) {
+      bool seen = false;
+      for (const LoopId pending : pending_continuity_) seen = seen || pending == loop_id;
+      if (!seen) pending_continuity_.push_back(loop_id);
+    }
     return {};
   }
 
@@ -1067,12 +1072,44 @@ class SolidEditor {
       const ValidationIssue& issue = report.issues.front();
       return Error{issue.code, issue.message, issue.entity, 0u};
     }
+    // A dissolve can splice a loop's next/prev chain without changing handle
+    // liveness: the loop then no longer meets itself at a vertex. Only the
+    // loops a dissolve touched are checked, so staging helpers that build
+    // partial topology for other tests keep working.
+    for (const LoopId loop_id : pending_continuity_) {
+      if (!candidate.loop_alive(loop_id)) continue;
+      const Loop& loop = candidate.loops_[loop_id.index()];
+      CoedgeId current = loop.start;
+      std::uint32_t steps = 0;
+      for (;;) {
+        const Coedge& coedge = candidate.coedges_[current.index()];
+        const Coedge& next_coedge = candidate.coedges_[coedge.next.index()];
+        const Edge& edge = candidate.edges_[coedge.edge.index()];
+        const Edge& next_edge = candidate.edges_[next_coedge.edge.index()];
+        const VertexId end = coedge.reversed ? edge.v0 : edge.v1;
+        const VertexId next_start = next_coedge.reversed ? next_edge.v1 : next_edge.v0;
+        if (end != next_start) {
+          return Error{Errc::invalid_topology, "loop coedge chain is not vertex-continuous",
+                       loop_id.index(), 0u};
+        }
+        current = coedge.next;
+        if (current == loop.start) break;
+        if (++steps > candidate.coedge_count()) {
+          return Error{Errc::invalid_topology, "loop coedge chain does not close",
+                       loop_id.index(), 0u};
+        }
+      }
+    }
+    pending_continuity_.clear();
     return candidate;
   }
 
   // Drops every staged change and restores the base passed to the constructor
   // (an empty Brep for a default-constructed editor).
-  void rollback() { staged_ = base_; }
+  void rollback() {
+    staged_ = base_;
+    pending_continuity_.clear();
+  }
 
  private:
   static Error capacity_error() noexcept {
@@ -1115,6 +1152,10 @@ class SolidEditor {
   // by value costs one extra copy per editor but makes rollback trivial and
   // exact; the alternative (replaying the inverse edits) would be fragile.
   Brep base_;
+  // Loops whose coedge chain a dissolve rewrote; commit() re-checks that they
+  // still meet at a vertex. Mutable because commit() is a const query that
+  // clears the list once the candidate is accepted.
+  mutable std::vector<LoopId> pending_continuity_;
   Brep staged_;
 };
 

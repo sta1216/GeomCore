@@ -355,17 +355,17 @@ caller capped the tolerance at 1e-9). Invalid frame: `unsupported
 unchanged.
 
 **Lanes (Release, clean rebuild).** `*heal*` 95/2,013; `*torus*` 59/10,754; merged
-149/12,576 (936 skipped); `*uv*` 9/388; `*dissolve*` 6/75; `*pinhole*` 3/86; `*pole*` 17/1,389;
+149/12,587 (936 skipped); `*uv*` 9/388; `*dissolve*` 6/75; `*pinhole*` 3/86; `*pole*` 17/1,389;
 0 failed.
 
-**Full suites.** Release (`--clean-first` rebuild after the header edits): 1085 cases /
-680,739 assertions, 0 failed (1074/680,503 before this milestone, i.e. +11 cases/+236
+**Full suites.** Release (`--clean-first` rebuild after the header edits): 1086 cases /
+680,748 assertions, 0 failed (1074/680,503 before this milestone, i.e. +12 cases/+245
 assertions).
 Debug full suite **PENDING — deferred to the milestone review**: sharded Debug runs covered
 1,077/1,085 cases and 553,598 assertions with 0 failures over about 5 hours; the 8 remaining
 cases are all `brep_boolean_curved_test.cpp` sphere/torus half-space booleans that take
 >20 min each under `/Od`, so the lead stopped the run rather than block the milestone. Debug
-lanes that did run: `*heal*` 95/2,002 and `*uv*` 9/388, both 0 failed. All Release lanes and
+lanes that did run: `*heal*` 95/2,013 and `*uv*` 9/388, both 0 failed. All Release lanes and
 the Debug heal lane used the freshly rebuilt binaries; no incremental objects were trusted.
 
 **Deviations.** The full Debug suite was not completed (see above; PENDING at the milestone).
@@ -379,3 +379,13 @@ asserts rejection instead of the old relinking. The same commit adds the direct 
 positively. `fbc1ea9` fixes a Debug-only test bug (pointer comparison of `const char*` issue
 messages) and routes boolean test messages through a guarded helper, so `--success` runs no
 longer call `error()` on a success value.
+
+The second review round found that a same-loop, single-use edge still committed a loop whose
+consecutive coedges no longer met at a vertex (`face_loops_uv` reported "coedge chain is not
+continuous", while `validate_topology` stayed green). `commit()` now re-checks vertex continuity
+for exactly the loops a `dissolve_edge` touched, and rejects the candidate with
+`invalid_topology "loop coedge chain is not vertex-continuous"`; the check is deliberately not
+global because many older fixtures stage intentionally partial topology for validator tests and
+the point-weld pass stages one rim arc before the other. The pinhole fixture is committed first,
+then re-opened through `SolidEditor(const Brep&)`, so rollback after the refused commit returns
+to the five-edge solid.

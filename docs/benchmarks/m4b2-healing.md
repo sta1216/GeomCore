@@ -97,9 +97,10 @@ r0=1e-6 的 rim 顶点间距为 `2e-6`，`max_gap=1e-5` 允许塌缩，而
 | 用例 | 选项 | 结果 |
 | --- | --- | --- |
 | r0=1e-6 针孔，`max_gap` 低于 rim 直径 | `{1e-9, 1e-9, 1e-4}` | `changed == false`、`boundary_edges == 2`、welded/sewn/collapsed 均为 0、恰一条 `invalid_result "heal_brep: no mutual pair"`、返回 Brep 指纹等于输入、实体仍留 2 条边界边 |
-| r0=1e-6 针孔，`max_tolerance` 低于簇直径 | `{1e-9, 1e-5, 1e-9}` | `changed == false`、`boundary_edges == 2`、welded/collapsed 均为 0、`max_tolerance == 0`、恰一条 `invalid_result "heal_brep: tolerance cap exceeded"`、返回 Brep 指纹等于输入 |\n| 无效球面 frame（axis 与 x_axis 重合） | 默认 | `Err(unsupported, "heal_brep: surface is invalid")`、`context_a == 1`（**曲面存储索引**，不是面索引）、完整指纹不变、重复调用结果一致 |
+| r0=1e-6 针孔，`max_tolerance` 低于簇直径 | `{1e-9, 1e-5, 1e-9}` | `changed == false`、`boundary_edges == 2`、welded/collapsed 均为 0、`max_tolerance == 0`、恰一条 `invalid_result "heal_brep: tolerance cap exceeded"`、返回 Brep 指纹等于输入 |
+| 无效球面 frame（axis 与 x_axis 重合） | 默认 | `Err(unsupported, "heal_brep: surface is invalid")`、`context_a == 1`（**曲面存储索引**，不是面索引）、完整指纹不变、重复调用结果一致 |
 
-第二例用 `make_malformed_sphere_pole_gap(1e-6, 5e-7, true)`：前面加一个有效
+无效球面例用 `make_malformed_sphere_pole_gap(1e-6, 5e-7, true)`：前面加一个有效
 `Plane3` 把坏球推到曲面索引 1，而首个面仍坐在该球上，因此用面索引作 context
 的实现会失败。校验只覆盖提供 `is_valid()` 的
 `Cylinder3`/`Cone3`/`Sphere3`/`Torus3`；`Plane3` 没有 `is_valid()`，平面不做

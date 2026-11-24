@@ -435,6 +435,9 @@ inline ValidationReport validate_topology(const Brep& brep) {
         fail(Errc::invalid_topology, loop_id.index(), "loop prev link disagrees");
         break;
       }
+      // A loop is only a boundary if consecutive uses meet at the same vertex;
+      // SolidEditor::commit() checks that for the loops a dissolve touched,
+      // because a splice can keep next/prev consistent while leaving a gap.
       if (next == loop.start) break;
       current = next;
       if (++steps > coedge_limit) {

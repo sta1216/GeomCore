@@ -61,11 +61,19 @@ inline Sheet add_sheet(SolidEditor& editor, std::uint32_t surface, double z,
                    editor.add_edge(v[3], v[0], kNoGeometry, 0, 1, tol).value()};
   }
   sheet.face = editor.add_face(surface, false, tol).value();
-  const CoedgeSpec loop[] = {{sheet.edges[0], reverse_loop},
-                             {sheet.edges[1], reverse_loop},
-                             {sheet.edges[2], reverse_loop},
-                             {sheet.edges[3], reverse_loop}};
-  require_ok(editor.add_loop(sheet.face, loop, true));
+  // A loop's coedges must form a vertex-continuous ring. With reverse_edges the
+  // stored directions already run e3,e2,e1,e0; with reverse_loop the traversal
+  // runs against them, so the ring order flips again.
+  const CoedgeSpec forward[] = {{sheet.edges[0], reverse_loop},
+                                {sheet.edges[1], reverse_loop},
+                                {sheet.edges[2], reverse_loop},
+                                {sheet.edges[3], reverse_loop}};
+  const CoedgeSpec backward[] = {{sheet.edges[3], reverse_loop},
+                                 {sheet.edges[2], reverse_loop},
+                                 {sheet.edges[1], reverse_loop},
+                                 {sheet.edges[0], reverse_loop}};
+  require_ok(editor.add_loop(sheet.face,
+                             reverse_edges == reverse_loop ? forward : backward, true));
   return sheet;
 }
 
@@ -162,7 +170,7 @@ inline TornSheet make_partial_torn_sheet(double gap, double offset) {
   const auto b3 = editor.add_edge(b01, b00, kNoGeometry, 0, 1, 0).value();
   const auto face = editor.add_face(above, false, 0).value();
   const CoedgeSpec loop[] = {
-      {b0, true}, {b1, true}, {b2, true}, {b3, true}};
+      {b3, true}, {b2, true}, {b1, true}, {b0, true}};
   fixture_detail::require_ok(editor.add_loop(face, loop, true));
 
   const std::array<FaceId, 2> faces{a.face, face};

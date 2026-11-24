@@ -104,10 +104,10 @@ cmake --build build-rel --config Release --target geom_tests
 .\build-rel\tests\Release\geom_tests.exe --test-case="heal: a rejected closed-rim heal returns the caller's input"
 ```
 
-当前快速通道（Release）为 149 个用例、12,576 条断言、0 失败、936 跳过；其中
-`*heal*` 95 用例/2,002 断言、`*torus*` 59 用例/10,754 断言。M4b-1 收尾（T5）的
+当前快速通道（Release，含 M4b-2）为 149 个用例、12,587 条断言、0 失败、936 跳过；其中
+`*heal*` 95 用例/2,013 断言、`*torus*` 59 用例/10,754 断言。M4b-1 收尾（T5）的
 基线是 `*heal*` 91/1,866、`*torus*` 59/10,754、合并 145/12,440；M4b-2 新增的
-4 个 heal 用例/136 条断言来自球极点、两个锥针孔与无效解析面用例（见
+4 个 heal 用例/147 条断言来自球极点、两个锥针孔、无效解析面与点隙容差上限用例（见
 `docs/benchmarks/m4b2-healing.md`）。
 
 ## 范围与限制
