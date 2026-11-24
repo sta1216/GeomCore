@@ -1249,13 +1249,14 @@ inline std::vector<std::vector<Point2d>> curved_boolean_clip_pair(
       if (projected.has_value()) piece[index] = projected.value();
     }
   }
-  // The intersector and `face_uv_project` report a periodic coordinate in
-  // (-pi, pi], while the face's own parameter window is [u_lo, u_lo + 2*pi]. A
-  // chain that reaches the splitter with a periodic coordinate below its window
-  // reads as "outside the face" there, so the splitter trims its end and tears
-  // the ring it should close. Wrapping every periodic sample into the window and
-  // splitting at each seam keeps every piece inside the window with its ends
-  // exactly on the seam edges.
+  // Without a previous-azimuth hint the intersector and `face_uv_project`
+  // report a periodic coordinate in (-pi, pi]; with a hint the projection
+  // returns the unwrapped coordinate instead. Either way the face's own window
+  // is [u_lo, u_lo + 2*pi], and a chain that reaches the splitter with a
+  // periodic coordinate below its window reads as "outside the face" there, so
+  // the splitter trims its end and tears the ring it should close. Wrapping
+  // every periodic sample into the window and splitting at each seam keeps
+  // every piece inside the window with its ends exactly on the seam edges.
   if (face.projection.periodic_u() || face.projection.periodic_v()) {
     const TrimFaceDomain domain =
         trim_face_domain_from_ranges(face.projection, face.u, face.v);
