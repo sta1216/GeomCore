@@ -330,8 +330,8 @@ M4b-2 关闭 M4b-1 延后的 apex/pole gap。实现由两条独立路径组成�
   （极点、针孔、无效面）与 `tests/unit/brep_face_uv_test.cpp`（极点纬度）；
   夹具集中在 `tests/unit/m4b_heal_fixture.hpp`。Release 快速通道
   `-tc="*heal*"` 为 95 用例/2,013 断言，`-tc="*uv*"` 为 9/388；全量 Release 为
-  1086 用例/680,748 断言，0 失败（较 M4b-1 +12 用例/+245 断言）。全量 Debug
-  未完成：分片跑到 1,077/1,085 用例、553,598 断言、0 失败，余下 8 个球体布尔
+  1086 用例/680,749 断言，0 失败（较 M4b-1 +12 用例/+246 断言）。全量 Debug
+  未完成：分片覆盖除 8 个慢用例外全部用例、553,598 断言、0 失败，余下 8 个球体布尔
   用例在 `/Od` 下超时，移交里程碑评审（PENDING）。实测表见
   `docs/benchmarks/m4b2-healing.md`，架构状态见 §16.4。
 - **延期项。** 多壳点隙、跨实体点隙延后；partial-u、NURBS、fillet/chamfer/

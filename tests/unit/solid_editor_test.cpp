@@ -7,6 +7,7 @@
 #include <string_view>
 #include <utility>
 
+#include <geom/brep/face_uv.hpp>
 #include <geom/brep/solid_editor.hpp>
 #include <geom/core/error.hpp>
 
@@ -330,9 +331,10 @@ TEST_CASE("solid editor: dissolve_edge of both pinhole rim arcs keeps the loop")
   const auto committed = ed.commit();
   REQUIRE(committed.has_value());
   CHECK(geom::validate_topology(committed.value()).ok());
+  CHECK(geom::face_loops_uv(committed.value(), cone.lateral, 0.0).has_value());
 }
 
-TEST_CASE("solid editor: dissolving one arc of a rim cannot be committed") {
+TEST_CASE("solid editor: dissolve_edge of one rim arc cannot be committed") {
   geom::SolidEditor builder;
   const geom::test::m4b::ConePinhole cone =
       geom::test::m4b::add_cone_pinhole(builder, 0.0, 0.25, true);

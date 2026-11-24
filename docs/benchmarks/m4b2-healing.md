@@ -16,7 +16,7 @@
 | CPU / 内存 | Intel Core i7-8550U @ 1.80 GHz / 15.9 GB |
 | 编译器 | MSVC 19.44.35217.0（VS2022 17.14），`/W4 /WX /utf-8 /fp:precise` |
 | 构建 | CMake 4.4.4，`GEOM_WERROR=ON`，Debug 无优化、Release `/O2`，单线程 |
-| 代码基线 | `c41c6e2 fix(brep): restrict dissolve_edge to a single loop` |
+| 代码基线 | `50f6ca2 fix(brep): refuse commits that break a dissolved loop` |
 
 ## 测量定义
 
@@ -110,13 +110,14 @@ r0=1e-6 的 rim 顶点间距为 `2e-6`，`max_gap=1e-5` 允许塌缩，而
 
 - Release 快速通道 `-tc="*heal*"`：95 用例 / 2,013 断言，0 失败；其中新用例
   `heal: an invalid analytic surface names the surface index` 为 15 条断言。
-- Release UV 泳道 `-tc="*uv*"`：9 用例 / 388 断言，0 失败。
+- Release UV 泳道 `-tc="*uv*"`：9 用例 / 388 断言，0 失败；`*dissolve*` 7/85、
+  `*pinhole*` 3/89，均 0 失败。
 - Debug 全量：**未完成（PENDING，移交里程碑）**。本机 `/Od` 下球体布尔用例极
-  慢，分片运行 5 小时完成 1,077/1,085 用例、553,598 断言、0 失败；未跑完的 8 个
+  慢，分片运行 5 小时覆盖其余用例、553,598 断言、0 失败；未跑完的 8 个
   用例全在 `brep_boolean_curved_test.cpp`（球带、球冠、补集、平板与 torus 半空间）。
   Debug 安全泳道 `-tc="*heal*"` 为 95/2,013、`-tc="*uv*"` 为 9/388，0 失败。
-- 全量 Release：1085 用例 / 680,739 断言，0 失败（1074→1085 用例、680,503→
-  680,739 断言，+236 条）。
+- 全量 Release：1086 用例 / 680,749 断言，0 失败（1074→1086 用例、680,503→
+  680,749 断言，+246 条）。
 
 Debug/Release 均为强制全量重编译后的测试二进制（`geom_tests`），不接受增量
 对象文件。

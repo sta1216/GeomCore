@@ -355,14 +355,14 @@ caller capped the tolerance at 1e-9). Invalid frame: `unsupported
 unchanged.
 
 **Lanes (Release, clean rebuild).** `*heal*` 95/2,013; `*torus*` 59/10,754; merged
-149/12,587 (936 skipped); `*uv*` 9/388; `*dissolve*` 6/75; `*pinhole*` 3/86; `*pole*` 17/1,389;
+149/12,587 (936 skipped); `*uv*` 9/388; `*dissolve*` 7/85; `*pinhole*` 3/89; `*pole*` 17/1,389;
 0 failed.
 
 **Full suites.** Release (`--clean-first` rebuild after the header edits): 1086 cases /
-680,748 assertions, 0 failed (1074/680,503 before this milestone, i.e. +12 cases/+245
+680,749 assertions, 0 failed (1074/680,503 before this milestone, i.e. +12 cases/+246
 assertions).
 Debug full suite **PENDING — deferred to the milestone review**: sharded Debug runs covered
-1,077/1,085 cases and 553,598 assertions with 0 failures over about 5 hours; the 8 remaining
+all but the 8 slow cases with 553,598 assertions and 0 failures over about 5 hours; the 8
 cases are all `brep_boolean_curved_test.cpp` sphere/torus half-space booleans that take
 >20 min each under `/Od`, so the lead stopped the run rather than block the milestone. Debug
 lanes that did run: `*heal*` 95/2,013 and `*uv*` 9/388, both 0 failed. All Release lanes and
