@@ -167,3 +167,97 @@ M4a 保持上文平面契约（配对、方向、容差与 staged 事务）不�
   rel 4.2e-15；`chi == 2`；细节见 `docs/benchmarks/m4a-healing.md` 与
   architecture §16.4。
 - **缺少曲面。** `surface == kNoGeometry` 的面在修改前返回 `invalid_topology "heal_brep: face has no surface"`（Task 1 起的诊断，未单独测试）。
+
+---
+
+## 补遗（2026-11-24）：M4b-1 闭合 rim 与 torus 缝隙
+
+M4b-1 取代 M4a 补遗中的两条结论：闭合整圆 rim 不再以 `unsupported` 拒绝，而是在
+私有副本上自动拆分后愈合；torus 缝隙（v 周期、双半径、闭合 rim 半体）进入支持
+范围。平面契约与 M4a 的载体/方向/pcurve 契约不变；以下是新增与修正。
+
+- **闭合 rim 自动拆分（私有副本）。** `heal_brep` 在边界表、白名单与载体门禁
+  通过之后、`heal_plan` 与任何修改之前调用
+  `detail::heal_split_closed_rims(brep, solid)`：目标实体没有 `v0 == v1` 的边界边
+  时返回空 optional（零开销）；存在时用 `SolidEditor` 复制输入，对每条此类边在
+  参数中点 `edge.t0 + 0.5*(edge.t1-edge.t0)` 调 `split_edge` 后提交。拆分只发生在
+  工作副本，调用者的 `Brep` 不被修改；`split_edge` 失败时返回该错误、staging 副本
+  保持未动，`heal_brep` 同样不改动输入。M4a 的
+  `unsupported "closed gap edge cannot be paired; split the rim
+  first"` 诊断随之删除，`detail::heal_plan` 对直接调用者仍保留零长边的
+  `invalid_topology`。
+- **中点拆分后的计数。** 每条闭合圆边拆成两段参数各半的圆弧，工作副本的边界边
+  数暂时翻倍：圆柱闭合 rim 输入 `V/E/F = 4/6/4`，其中 2 条闭合缝边是边界边；
+  拆分后 `6/8/4`、4 条边界边。torus 闭合 rim 半体输入 `4/6/2`、4 条闭合边界边，
+  拆分后 `8/10/2`、8 条边界边。拆分顶点容差为 0，随后由普通互近邻配对焊回，
+  因此愈合结果回到输入规模（圆柱 `4/6/4`、torus 半体 `4/6/2`）。报告中的
+  `boundary_edges` 记录的是拆分后的工作计数（圆柱 4、torus 半体 8），不是输入
+  的 2/4。
+- **端点定向焊接。** `heal_plan` 不再按顶点索引排序后归一化焊点，而是以保留边
+  （`merge_edges` 的幸存载体）为基准：端点同向时焊 `{keep.v0→drop.v0,
+  keep.v1→drop.v1}`，反向时焊 `{keep.v0→drop.v1, keep.v1→drop.v0}`。闭合 rim
+  拆开后，较小顶点索引可能属于被丢弃的 rim，旧的 `normalize_weld` 会把保留载体
+  的端点换到对侧，导致 kept-curve 门禁在大缝隙下误报；端点定向消除了该缺陷，
+  `normalize_weld` 已删除。
+- **同缝方向归一化。** 首对候选固定一条缝的焊接方向；同一缝的后续配对（拆开的
+  rim 的另一半）若其焊点已被反向占用，则交换该对的 keep/drop 并同时交换每个
+  焊点的两端，使所有配对共享同一幸存端点。距离并列仍只在首个 coedge 邻面非
+  `Plane3` 时用焊后遍历方向挑选唯一相容候选，否则报 `ambiguous_gap`；平面行为
+  不变。
+- **条件三分 pcurve。** 闭合边按全周采样；当共线简化后只剩两端点、且中间采样点
+  与任一端点的 u 或 v 跨过图卡精确中点（`|Δ| > π`）时，
+  `face_uv_unwrap` 会把略超 π 的前向扫掠折回上一列，把 rim pcurve 压成尖刺并让
+  环的 uv 面积减半。此时 `heal_rebuild_face_pcurves` 改在 1/3 与 2/3 采样处存点
+  （而非中点），使弧向与面积都稳定；不触发该条件的紧凑 pcurve 采样完全不变
+  （既有 `lateral_points == 10` 用例保持）。
+- **圆柱闭合 rim 验收。** `make_cylinder_closed_rims_gap(1e-6)`：拆分后工作副本
+  `6/8/4`，愈合 `4/6/4`、单一闭合壳、无边界边、`chi == 2`、
+  `max_closed_gap = max_tolerance = 9.9999999991773336e-07`、2 焊点/2 缝合边，
+  体积 `6.2831884487723997` 对 `π*(2+1e-6)` 相对 `2.5e-14`，重复运行逐位一致，
+  二次 heal 为 `changed == false`。
+- **torus 开缝带验收。** 三个开缝带（u 缝、外支 v 缝、跨 v 缝的内支）输入均
+  `8/10/4`，愈合 `6/8/4`、`chi == 2`、2 焊点/2 缝合边、愈合后无边界边；体积分别为
+  `2.3561944901923608`（对 `3π/4`）、`5.4334195273316128`、
+  `0.8635058157199863`，相对参考均不超过 `6.8e-15`；实测缝宽
+  `9.999999901566576e-07`、`9.9999998999999992e-07`、
+  `9.9999998992555949e-07`（夹具按 `gap*(1-1e-8)` 留余量，稳定落在默认
+  `max_gap` 内）；内支图卡 v 跨度小于 2.0，反向 lateral 与 `Torus3(v_origin=π)`
+  均被正确处理。
+- **torus 闭合 rim 半体验收与 chi 修正。** 两个半体在 `z = ±h`（`h = (gap/2) *
+  (1-1e-8)`）切开，`alpha = asin(h/r)`；输入 `4/6/2`、4 条闭合边界边，拆分后
+  `8/10/2`、8 条边界边，愈合 `4/6/2`、单一闭合壳、愈合后无边界边、4 焊点/4 缝合边，
+  `max_closed_gap = 9.9999999030728907e-07`，体积 `4.934802200544679` 对
+  `π²/2` 绝对误差不超过 `1e-12`，四段图卡窗口 `[-alpha, π-alpha]` 与
+  `[π-alpha, 2π-alpha]` 各在 `1e-9` 内。**`chi == 0`**：计划与简报曾把 torus
+  半体写成 `chi == 2`，那是错的；`euler_characteristic`
+  （`validate.hpp:905-959`）按 `V - E + F - (L - F)` 计算，闭合 torus 的
+  `V=4, E=6, F=2` 给出 0。所有 M4b-1 文档、计划与 benchmark 以 0 为准。
+- **拒绝后的返回语义（重要）。** 拆分发生在工作副本，因此愈合失败时返回的
+  `HealResult::brep` 是**调用者的原始输入**（拓扑、几何存储、容差逐位不变），
+  而 `report.boundary_edges` 是**拆分后的工作计数**，不是输入的闭合 rim 条数：
+  圆柱为 4、torus 半体为 8。两类拒绝都满足 `changed == false`、
+  `welded_vertices == sewn_edges == 0`：`max_gap` 小于实测缝宽时报
+  `gap_too_large`；焊接容差超过 `max_tolerance` 时报
+  `invalid_result "heal_brep: tolerance cap exceeded"`（容差取保留/丢弃顶点容差
+  与配对 gap 的最大值）。
+- **测试锁。** `heal: a rejected closed-rim heal returns the caller's input` 用
+  `max_gap=1e-12` 触发 `gap_too_large`、用 `max_tolerance=1e-9` 触发
+  `invalid_result "heal_brep: tolerance cap exceeded"`。两个分支都断言返回 Brep
+  与输入的**完整指纹**逐项相同：实体/几何存储计数、顶点位置与容差、边端点/曲线
+  索引/参数域/容差、面曲面/反向/容差、coedge 的边/面/环/反向/pcurve/next/prev/
+  容差、loop 的 face/start/next/outer，以及 `report.boundary_edges == 4`。这样
+  即使实现把工作副本的一部分泄漏进返回值，或把报告计数错写成输入值，测试都会
+  失败。
+- **负例。** `gap=1e-3` 仍报 `gap_too_large`（拆分后边界 8，entity_a/b = 0/1）；
+  平面盖报 carrier 消息（context 1/4）；off-surface rim 报 (2/6)；NURBS 面/边与
+  歧义缝复用 M4a 用例；所有拒绝的输入指纹不变。
+- **延期项。** 顶点/极点缩成一点的 apex/pole gap 延后到 M4b-2；fillet/chamfer/
+  shell 在更晚的里程碑；NURBS 曲面/曲线、曲面重拟合与多实体缝合仍不支持；
+  partial-u（只拆闭合 rim 的一段、保留部分整圆边）不做，本里程碑总是整条边拆分；
+  torus 的 u 周期多圈缠绕仍不在验收范围。
+- **测试证据。** 新增/扩展用例见 `tests/unit/brep_heal_curved_test.cpp` 与
+  `tests/unit/m4a_curved_heal_fixture.hpp`（简报中的
+  `brep_heal_curved_fixture.hpp` 不存在）。Release 快速通道 `-tc="*heal*"` 为
+  91 用例/1,866 断言、`-tc="*torus*"` 为 59/10,754、合并 145/12,440，0 失败；
+  全量 Debug/Release 套件留到里程碑收口，本里程碑未运行。实测表见
+  `docs/benchmarks/m4b-healing.md`，架构状态见 §16.4。

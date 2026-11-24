@@ -80,11 +80,11 @@ Torus cases use open bands (already supported shapes) and closed-rim halves; see
 5. Commit `fix(heal): keep the welded endpoint on the kept edge`.
 
 ### Task 3: cylinder closed-rim acceptance
-**Files:** `tests/unit/brep_heal_curved_fixture.hpp`, `tests/unit/brep_heal_curved_test.cpp`.
+**Files:** `tests/unit/m4a_curved_heal_fixture.hpp`, `tests/unit/brep_heal_curved_test.cpp`.
 **Steps:**
 1. Add fixture builders: `make_cylinder_closed_rim_band(radius, z0, z1)` (one shell, one cylinder face, two closed rim edges, 2 coedges, pcurves present) and `make_two_band_closed_rim_gap(radius, height, gap)` (two bands, z=[0,height], [height+gap, 2*height+gap]).
 2. RED: `CHECK(heal_brep(...))` fails on the diagnostic; after T1/T2 GREEN.
-3. Assert volume `pi*(2+gap)` (r=1), boundary 0, `V=6/E=8/F=4`, chi==2, welded 2/sewn 2, `max_closed_gap` ~1e-6, validate clean, second heal unchanged, repeat deterministic.
+3. Assert volume `pi*(2+gap)` (r=1), boundary 0, post-split working `V=6/E=8/F=4` and healed `V=4/E=6/F=4`, chi==2, welded 2/sewn 2, `max_closed_gap` ~1e-6, validate clean, second heal unchanged, repeat deterministic.
 4. Run `-tc="*closed rim*"` and `-tc="*heal*"`.
 5. Commit `test(heal): accept a cylinder split by a closed-rim seam`.
 
@@ -100,7 +100,7 @@ Torus cases use open bands (already supported shapes) and closed-rim halves; see
 ### Task 5: torus closed-rim halves and negatives
 **Files:** fixture + test.
 **Steps:**
-1. Build two torus halves (cut at z=+-gap/2) with closed rims; heal to full torus volume `4.934802200544679` (R=1,r=0.5), boundary 0, chi==2, one shell.
+1. Build two torus halves (cut at z=+-gap/2) with closed rims; heal to full torus volume `4.934802200544679` (R=1,r=0.5), boundary 0, chi==0 (not 2: V=4,E=6,F=2), one shell.
 2. Add negatives: radius mismatch (gap_too_large), plane lid carrier mismatch, off-surface rim, NURBS face/edge, ambiguous seam; assert messages and `context_a/context_b`.
 3. Run the torus filters; commit `test(heal): accept closed-rim torus halves with negatives`.
 
@@ -112,14 +112,46 @@ Torus cases use open bands (already supported shapes) and closed-rim halves; see
 3. Run fast-lane `-tc="*heal*"`; commit `docs(m4b): record the closed-rim and torus contract`.
 
 ## Exit criteria
-- Closed-rim cylinder and torus cases heal to the stated volumes with zero boundary edges, chi==2, one shell, deterministic repeats.
+- Closed-rim cylinder and torus cases heal to the stated volumes with zero boundary edges, `chi==2` for the cylinder/bands and `chi==0` for the closed torus halves, one shell, deterministic repeats.
 - Failed heals return the original input bit-identically.
 - Existing M4a/QA-12/negative tests unchanged in value and message.
 - Task-level: Release targeted filters green with file-level counts; milestone: full Debug+Release suites green, then ff merge, push, CI green.
 
 ## Self-review
-- [ ] Each task has a RED test and a single commit.
-- [ ] No test asserts only counts; volumes/topology/messages are pinned.
-- [ ] Rejection paths are tested for input immutability.
-- [ ] Fast-lane commands are named.
-- [ ] Deferrals (apex/pole, fillet/chamfer, shell, NURBS, partial-u) are explicit.
+- [x] Each task has a RED test and a single commit.
+- [x] No test asserts only counts; volumes/topology/messages are pinned.
+- [x] Rejection paths are tested for input immutability.
+- [x] Fast-lane commands are named.
+- [x] Deferrals (apex/pole, fillet/chamfer, shell, NURBS, partial-u) are explicit.
+
+## Results
+
+| Task | Commit | Scope |
+| --- | --- | --- |
+| T1 | `3f72969` | split closed boundary rims on a private copy |
+| T2 | `95bb910` | endpoint-directed welds + same-seam orientation normalization |
+| T3 | `4936801` | cylinder closed-rim acceptance |
+| T4 | `b0dd6b9` | torus band gaps (u, outer v, inner v seam) |
+| T5 | `19773bc` | torus closed-rim halves + negatives |
+| T6 | `docs(m4b): record the closed-rim and torus contract`（本提交） | ADR-0026 addendum, `docs/benchmarks/m4b-healing.md`, architecture §16.4, this plan, rejection lock |
+
+Fast lane (Release `build-rel`, `geom_tests.exe`, `GEOM_WERROR=ON`, no warnings):
+
+- `-tc="*heal*"`: 91 cases / 1,866 assertions, 0 failed.
+- `-tc="*torus*"`: 59 cases / 10,754 assertions, 0 failed.
+- `-tc="*heal*,*torus*"`: 145 cases / 12,440 assertions, 0 failed.
+
+Pre-lock baseline at T5 was `*heal*` 90/1,847, `*torus*` 59/10,754, combined
+144/12,421. The Task 6 lock adds exactly 1 case / 19 assertions, so the growth is
+accounted for by the rejection test and no other test changed.
+
+**Full Debug and Release suites were not run during M4b-1 task work.** Both are
+still to be run at milestone close, before ff merge/push and CI. This plan records
+only the targeted fast lane above.
+
+Corrections recorded during Task 6: torus halves are `chi == 0` (the brief and the
+original Task 5 step said 2); Task 3's `V=6/E=8/F=4` is the post-split working copy
+while the healed result is `V=4/E=6/F=4`; the fixture header is
+`tests/unit/m4a_curved_heal_fixture.hpp` (not `brep_heal_curved_fixture.hpp`); and
+on a post-split rejection the returned Brep is the caller's input while
+`report.boundary_edges` is the post-split working count.

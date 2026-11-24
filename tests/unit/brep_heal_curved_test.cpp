@@ -53,6 +53,76 @@ std::vector<double> brep_fingerprint(const Brep& brep) {
   return fingerprint;
 }
 
+// Full topological fingerprint for rejection immutability: entity/store
+// counts, every vertex position and tolerance, every edge's carrier and
+// parameter range with both endpoints, every coedge's wiring/pcurve/tolerance,
+// every loop, and every face's surface/reversal/tolerance. Handles are recorded
+// by index (null as the sentinel) so the copy must also agree on which slots are
+// live, not only on the surviving geometry values.
+std::vector<double> full_brep_fingerprint(const Brep& brep) {
+  std::vector<double> fingerprint{
+      static_cast<double>(brep.vertex_count()),
+      static_cast<double>(brep.edge_count()),
+      static_cast<double>(brep.coedge_count()),
+      static_cast<double>(brep.loop_count()),
+      static_cast<double>(brep.face_count()),
+      static_cast<double>(brep.shell_count()),
+      static_cast<double>(brep.solid_count()),
+      static_cast<double>(brep.geometry().curves.size()),
+      static_cast<double>(brep.geometry().surfaces.size()),
+      static_cast<double>(brep.geometry().pcurves.size())};
+  const auto index_of = [](const Handle& id) {
+    return static_cast<double>(id.is_null() ? Handle::kNullIndex : id.index());
+  };
+  for (const VertexId id : brep.vertex_ids()) {
+    const Vertex& vertex = brep.vertex(id);
+    fingerprint.push_back(static_cast<double>(id.index()));
+    fingerprint.push_back(vertex.point[0]);
+    fingerprint.push_back(vertex.point[1]);
+    fingerprint.push_back(vertex.point[2]);
+    fingerprint.push_back(vertex.tol);
+  }
+  for (const EdgeId id : brep.edge_ids()) {
+    const Edge& edge = brep.edge(id);
+    fingerprint.push_back(static_cast<double>(id.index()));
+    fingerprint.push_back(static_cast<double>(edge.curve));
+    fingerprint.push_back(edge.t0);
+    fingerprint.push_back(edge.t1);
+    fingerprint.push_back(index_of(edge.v0));
+    fingerprint.push_back(index_of(edge.v1));
+    fingerprint.push_back(edge.tol);
+  }
+  for (const CoedgeId id : brep.coedge_ids()) {
+    const Coedge& coedge = brep.coedge(id);
+    fingerprint.push_back(static_cast<double>(id.index()));
+    fingerprint.push_back(index_of(coedge.edge));
+    fingerprint.push_back(index_of(coedge.face));
+    fingerprint.push_back(index_of(coedge.loop));
+    fingerprint.push_back(coedge.reversed ? 1.0 : 0.0);
+    fingerprint.push_back(static_cast<double>(coedge.pcurve));
+    fingerprint.push_back(index_of(coedge.next));
+    fingerprint.push_back(index_of(coedge.prev));
+    fingerprint.push_back(coedge.tol);
+  }
+  for (const LoopId id : brep.loop_ids()) {
+    const Loop& loop = brep.loop(id);
+    fingerprint.push_back(static_cast<double>(id.index()));
+    fingerprint.push_back(index_of(loop.face));
+    fingerprint.push_back(index_of(loop.start));
+    fingerprint.push_back(index_of(loop.next));
+    fingerprint.push_back(loop.outer ? 1.0 : 0.0);
+  }
+  for (const FaceId id : brep.face_ids()) {
+    const Face& face = brep.face(id);
+    fingerprint.push_back(static_cast<double>(id.index()));
+    fingerprint.push_back(static_cast<double>(face.surface));
+    fingerprint.push_back(index_of(face.first_loop));
+    fingerprint.push_back(face.reversed ? 1.0 : 0.0);
+    fingerprint.push_back(face.tol);
+  }
+  return fingerprint;
+}
+
 std::size_t count_issues(const detail::HealPlan& plan, HealIssueKind kind) {
   return static_cast<std::size_t>(std::count_if(
       plan.issues.begin(), plan.issues.end(),
@@ -717,6 +787,52 @@ TEST_CASE("heal: closed rim gaps are split and healed") {
         1e-6 * test::m4a::kTwoPi);
   CHECK(std::fabs(accepted.volume - 6.2831884487723997) <=
         1e-12 * 6.2831884487723997);
+}
+
+TEST_CASE("heal: a rejected closed-rim heal returns the caller's input") {
+  // Both rejection classes split the two cross-gap rim edges on a working copy
+  // first (post-split boundary 4 from working V=6/E=8), then reject before any
+  // SolidEditor mutation. The returned brep must be the caller's input bit for
+  // bit, while report.boundary_edges names the post-split working count (4),
+  // not the input's two closed rim edges.
+  constexpr double gap = 1e-6;
+  const test::m4a::CurvedSolid fixture =
+      test::m4a::make_cylinder_closed_rims_gap(gap);
+  const std::vector<double> input = full_brep_fingerprint(fixture.brep);
+
+  SUBCASE("max_gap below the rim seam") {
+    HealOptions options;
+    options.max_gap = 1e-12;
+    const auto healed = heal_brep(fixture.brep, fixture.solid, options);
+    REQUIRE(healed.has_value());
+    const HealResult& result = healed.value();
+    CHECK_FALSE(result.report.changed);
+    CHECK(result.report.boundary_edges == 4u);
+    CHECK(result.report.welded_vertices == 0u);
+    CHECK(result.report.sewn_edges == 0u);
+    REQUIRE(result.report.issues.size() == 1u);
+    CHECK(result.report.issues.front().kind == HealIssueKind::gap_too_large);
+    CHECK(full_brep_fingerprint(result.brep) == input);
+    CHECK(full_brep_fingerprint(fixture.brep) == input);
+  }
+
+  SUBCASE("max_tolerance below the rim seam") {
+    HealOptions options;
+    options.max_tolerance = 1e-9;
+    const auto healed = heal_brep(fixture.brep, fixture.solid, options);
+    REQUIRE(healed.has_value());
+    const HealResult& result = healed.value();
+    CHECK_FALSE(result.report.changed);
+    CHECK(result.report.boundary_edges == 4u);
+    CHECK(result.report.welded_vertices == 0u);
+    CHECK(result.report.sewn_edges == 0u);
+    REQUIRE(result.report.issues.size() == 1u);
+    CHECK(result.report.issues.front().kind == HealIssueKind::invalid_result);
+    CHECK(std::string_view(result.report.issues.front().message) ==
+          "heal_brep: tolerance cap exceeded");
+    CHECK(full_brep_fingerprint(result.brep) == input);
+    CHECK(full_brep_fingerprint(fixture.brep) == input);
+  }
 }
 
 TEST_CASE("heal: analytic curved gaps are accepted") {
