@@ -33,6 +33,8 @@ constexpr std::string_view kOffSurfaceMessage =
     "heal_brep: gap edge is not on its face surface";
 constexpr std::string_view kKeptCurveMessage =
     "heal_brep: kept edge curve does not match its welded vertices";
+constexpr std::string_view kInvalidSurfaceMessage =
+    "heal_brep: surface is invalid";
 
 bool contains(std::string_view text, std::string_view needle) {
   return text.find(needle) != std::string_view::npos;
@@ -259,6 +261,46 @@ TEST_CASE("heal: an unsupported NURBS face names the face index") {
   CHECK(healed.error().code == Errc::unsupported);
   CHECK(std::string_view(healed.error().message) == kSurfaceKindMessage);
   CHECK(healed.error().context_a == fixture.face.index());
+}
+
+TEST_CASE("heal: an invalid analytic surface names the surface index") {
+  // probe8 built the sphere as Sphere3{center, radius}; brace elision put the
+  // radius in `axis`, leaving axis == x_axis. That chart is degenerate, so the
+  // surface is invalid even though the topology below is a valid B-rep. A
+  // leading valid plane pushes the malformed sphere to surface index 1, while
+  // the first face (the band) sits on it, so a face-index context would fail.
+  const test::m4a::CurvedSolid fixture =
+      test::m4b::make_malformed_sphere_pole_gap(1e-6, 5e-7, true);
+  REQUIRE(fixture.brep.geometry().surfaces.size() == 3u);
+  CHECK(std::get_if<Plane3>(&fixture.brep.geometry().surfaces[0]) != nullptr);
+  const auto* sphere =
+      std::get_if<Sphere3>(&fixture.brep.geometry().surfaces[1]);
+  REQUIRE(sphere != nullptr);
+  REQUIRE_FALSE(sphere->is_valid());
+  const ShellId shell = fixture.brep.solid_shells(fixture.solid).front();
+  const FaceId band = fixture.brep.shell_faces(shell).front();
+  CHECK(fixture.brep.face(band).surface == 1u);
+  const std::vector<double> input_fingerprint =
+      full_brep_fingerprint(fixture.brep);
+
+  const auto healed = heal_brep(fixture.brep, fixture.solid, {});
+  if (healed.has_value()) {
+    MESSAGE("heal_brep accepted an invalid analytic surface");
+  }
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::unsupported);
+  CHECK(std::string_view(healed.error().message) == kInvalidSurfaceMessage);
+  // The context is the surface store index, not the face that uses it.
+  CHECK(healed.error().context_a == 1u);
+  CHECK(full_brep_fingerprint(fixture.brep) == input_fingerprint);
+
+  // Repeating the heal is deterministic and still leaves the input untouched.
+  const auto repeated = heal_brep(fixture.brep, fixture.solid, {});
+  REQUIRE_FALSE(repeated.has_value());
+  CHECK(repeated.error().code == Errc::unsupported);
+  CHECK(std::string_view(repeated.error().message) == kInvalidSurfaceMessage);
+  CHECK(repeated.error().context_a == 1u);
+  CHECK(full_brep_fingerprint(fixture.brep) == input_fingerprint);
 }
 
 TEST_CASE("heal: an unsupported NURBS edge curve names the curve kind") {

@@ -22,17 +22,24 @@
 
 namespace geom::test::m4b {
 
-// Sphere radius 1 with the band [v_up, v_up + gap] removed at the north pole,
-// where v_up = pi/2 - delta. Vertices are created e0, e1, p0, p1, c0, c1, pole;
-// the gap pair is p0/p1 on the band rim and c0/c1 on the cap rim.
-inline m4a::CurvedSolid make_sphere_pole_gap(double delta, double gap) {
+namespace detail {
+
+// Sphere radius `sphere.radius` with the band [v_up, v_up + gap] removed at the
+// north pole, where v_up = pi/2 - delta. Vertices are created e0, e1, p0, p1,
+// c0, c1, pole; the gap pair is p0/p1 on the band rim and c0/c1 on the cap rim.
+// The malformed-surface test needs the probe8 geometry with a degenerate chart,
+// which the public builder cannot express, so both share this body.
+inline m4a::CurvedSolid make_sphere_pole_gap_with_surface(double delta, double gap,
+                                                          const Sphere3& sphere,
+                                                          bool leading_plane = false) {
   using namespace geom::test::m4a;
 
   SolidEditor editor;
-  const double radius = 1.0;
-  const std::uint32_t sphere =
-      editor.add_surface(Sphere3{m4a_point(0.0, 0.0, 0.0), {0.0, 0.0, 1.0},
-                                 {1.0, 0.0, 0.0}, radius});
+  if (leading_plane) {
+    editor.add_surface(Plane3{{0.0, 0.0, 1.0}, 0.0});
+  }
+  const double radius = sphere.radius;
+  const std::uint32_t sphere_index = editor.add_surface(sphere);
   const std::uint32_t eq_low = editor.add_curve(
       CircleCurve3{m4a_point(0.0, 0.0, 0.0), {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, radius});
   const double v_up = kPi * 0.5 - delta;
@@ -68,7 +75,7 @@ inline m4a::CurvedSolid make_sphere_pole_gap(double delta, double gap) {
   const EdgeId seam_low = m4a_edge(editor, e0, p0, mer, 0.0, v_up);
   const EdgeId seam_high = m4a_edge(editor, c0, pole, mer, v_cap, kPi * 0.5);
 
-  const FaceId band = m4a_face(editor, sphere);
+  const FaceId band = m4a_face(editor, sphere_index);
   const std::array<CoedgeSpec, 6> band_loop{{
       {eqa, false}, {eqb, false}, {seam_low, false},
       {polb, true}, {pola, true}, {seam_low, true}}};
@@ -76,7 +83,7 @@ inline m4a::CurvedSolid make_sphere_pole_gap(double delta, double gap) {
   const FaceId cap = m4a_face(editor, plane);
   const std::array<CoedgeSpec, 2> cap_loop{{{eqa, true}, {eqb, true}}};
   editor.add_loop(cap, cap_loop, true).value();
-  const FaceId pole_cap = m4a_face(editor, sphere);
+  const FaceId pole_cap = m4a_face(editor, sphere_index);
   const std::array<CoedgeSpec, 4> pole_loop{{
       {capa, false}, {capb, false}, {seam_high, false}, {seam_high, true}}};
   editor.add_loop(pole_cap, pole_loop, true).value();
@@ -84,6 +91,29 @@ inline m4a::CurvedSolid make_sphere_pole_gap(double delta, double gap) {
   const std::array<FaceId, 3> faces{{band, cap, pole_cap}};
   const SolidId solid = m4a_add_solid(editor, faces);
   return m4a::CurvedSolid{editor.commit().value(), solid};
+}
+
+}  // namespace detail
+
+inline m4a::CurvedSolid make_sphere_pole_gap(double delta, double gap) {
+  return detail::make_sphere_pole_gap_with_surface(
+      delta, gap,
+      Sphere3{m4a::m4a_point(0.0, 0.0, 0.0), {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0}, 1.0});
+}
+
+// probe8's original fixture `Sphere3{center, radius}` let brace elision put the
+// radius in `axis`, leaving axis == x_axis == (1, 0, 0). That frame has no chart
+// (`y_axis = cross(axis, x_axis)` is zero), so Sphere3::is_valid() is false.
+// This fixture keeps the same failure mode with axis == x_axis == (0, 0, 1);
+// everything else is the valid radius-one pole-gap topology above. With
+// `leading_plane` the malformed sphere lands at surface index 1 while the first
+// face still sits on it, which pins the error context to the surface index.
+inline m4a::CurvedSolid make_malformed_sphere_pole_gap(double delta, double gap,
+                                                      bool leading_plane = false) {
+  return detail::make_sphere_pole_gap_with_surface(
+      delta, gap,
+      Sphere3{m4a::m4a_point(0.0, 0.0, 0.0), {0.0, 0.0, 1.0}, {0.0, 0.0, 1.0}, 1.0},
+      leading_plane);
 }
 
 // ---------------------------------------------------------------------------

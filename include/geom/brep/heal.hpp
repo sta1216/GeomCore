@@ -22,6 +22,7 @@
 #include <optional>
 #include <span>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <geom/brep/face_uv.hpp>
@@ -1527,6 +1528,24 @@ inline Result<HealResult> heal_brep(const Brep& brep, SolidId solid,
         return Error{Errc::unsupported,
                      "heal_brep: surface type is not supported yet",
                      face_id.index(), 0};
+      }
+      // A malformed analytic frame has no chart: the split/plan passes below
+      // would either fail later with a misleading off-circle error or rebuild
+      // pcurves that do not follow their edges. Reject it up front. Plane3 has
+      // no frame to validate; its documented nonzero-normal precondition is
+      // unchanged.
+      const bool surface_valid = std::visit(
+          [](const auto& candidate) {
+            if constexpr (requires { candidate.is_valid(); }) {
+              return candidate.is_valid();
+            } else {
+              return true;
+            }
+          },
+          surface);
+      if (!surface_valid) {
+        return Error{Errc::unsupported, "heal_brep: surface is invalid",
+                     face.surface, 0};
       }
       LoopId loop_id = face.first_loop;
       std::size_t loops_seen = 0;
