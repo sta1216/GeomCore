@@ -1,9 +1,11 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numbers>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -613,6 +615,74 @@ CurvedAcceptance check_closed_curved_heal(
   return CurvedAcceptance{result.brep, volume.value()};
 }
 
+// Acceptance gate for the two closed-rim torus halves. Every cross-gap rim is
+// split into two arcs here, so the report has 8 boundary edges, 4 welded
+// vertices and 4 sewn edges. A torus has Euler characteristic 0, not 2: after
+// welding, V=4, E=6, F=2. The rest of the contract matches
+// check_closed_curved_heal: deterministic repeat, unchanged input and an
+// idempotent second heal.
+CurvedAcceptance check_torus_halves_heal(
+    const test::m4a::CurvedSolid& fixture, const HealOptions& options,
+    double expected_volume, double relative_tolerance, double measured_gap) {
+  const std::vector<double> input_fingerprint = brep_fingerprint(fixture.brep);
+
+  const auto healed = heal_brep(fixture.brep, fixture.solid, options);
+  if (!healed.has_value()) {
+    MESSAGE("heal_brep rejected the torus halves: "
+            << std::string(healed.error().message));
+  }
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK(result.report.changed);
+  CHECK(result.report.issues.empty());
+  CHECK(result.report.boundary_edges == 8u);
+  CHECK(result.report.welded_vertices == 4u);
+  CHECK(result.report.sewn_edges == 4u);
+  CHECK(result.report.max_closed_gap == measured_gap);
+  CHECK(result.report.max_tolerance <= 1e-6);
+  CHECK(brep_fingerprint(fixture.brep) == input_fingerprint);
+  // A torus is not a sphere: V=4, E=6, F=2 gives chi = 0. The brief's chi == 2
+  // was copied from the closed-rim cylinder; the healer's Euler guard compares
+  // against the post-split working topology, which is also 0 here.
+  CHECK(euler_characteristic(result.brep, fixture.solid) == 0);
+  CHECK(validate_topology(result.brep).ok());
+
+  const auto volume =
+      detail::curved_solid_volume(result.brep, fixture.solid, 1e-9);
+  REQUIRE(volume.has_value());
+  CHECK(std::fabs(volume.value() - expected_volume) <=
+        relative_tolerance * expected_volume);
+
+  // Repeating the heal on the same input must produce the same brep bitwise
+  // (counts and every vertex position) and the identical volume.
+  const auto repeated = heal_brep(fixture.brep, fixture.solid, options);
+  REQUIRE(repeated.has_value());
+  CHECK(brep_fingerprint(repeated.value().brep) ==
+        brep_fingerprint(result.brep));
+  CHECK(repeated.value().report.max_closed_gap == result.report.max_closed_gap);
+  const auto repeated_volume =
+      detail::curved_solid_volume(repeated.value().brep, fixture.solid, 1e-9);
+  REQUIRE(repeated_volume.has_value());
+  CHECK(repeated_volume.value() == volume.value());
+
+  // A closed result has no boundary left to stitch: the second heal is a
+  // no-op and leaves the geometry bitwise unchanged.
+  const auto second = heal_brep(result.brep, fixture.solid, options);
+  REQUIRE(second.has_value());
+  CHECK_FALSE(second.value().report.changed);
+  CHECK(second.value().report.issues.empty());
+  CHECK(second.value().report.welded_vertices == 0u);
+  CHECK(second.value().report.sewn_edges == 0u);
+  CHECK(brep_fingerprint(second.value().brep) == brep_fingerprint(result.brep));
+  const auto second_volume =
+      detail::curved_solid_volume(second.value().brep, fixture.solid, 1e-9);
+  REQUIRE(second_volume.has_value());
+  CHECK(second_volume.value() == volume.value());
+  CHECK(validate_topology(second.value().brep).ok());
+
+  return CurvedAcceptance{result.brep, volume.value()};
+}
+
 }  // namespace
 
 TEST_CASE("heal: closed rim gaps are split and healed") {
@@ -832,6 +902,136 @@ TEST_CASE("heal: torus band gaps are accepted") {
       CHECK(v_max - v_min < 2.0);
     }
   }
+}
+
+TEST_CASE("heal: torus halves with closed rims are split, welded and sewn") {
+  constexpr double gap = 1e-6;
+  const test::m4a::CurvedSolid fixture =
+      test::m4a::make_torus_closed_rims_gap(gap);
+  // Vertices are created outer-high, inner-high, inner-low, outer-low. Each
+  // closed rim is split at u = pi before planning, so vertex_gap(0, 3) is the
+  // outer cross-gap pair and is the report's maximum closed gap.
+  const double measured_gap = vertex_gap(fixture.brep, 0, 3);
+
+  // The two halves are glued across the cut planes, so the healed solid is the
+  // whole torus: 2*pi^2*R*r^2 = pi^2/2.
+  constexpr double expected_volume = 4.934802200544679;
+  const CurvedAcceptance accepted = check_torus_halves_heal(
+      fixture, {}, expected_volume, 1e-12, measured_gap);
+
+  // Healed topology: V=4, E=6, F=2 (chi=0). The four closed rims split into
+  // eight boundary arcs (working V=8, E=10); the four cross-gap pairs then weld
+  // the lower arc endpoints onto the upper ones and merge each pair, dropping
+  // four vertices and four edges.
+  CHECK(accepted.brep.vertex_count() == 4u);
+  CHECK(accepted.brep.edge_count() == 6u);
+  CHECK(accepted.brep.face_count() == 2u);
+  CHECK(euler_characteristic(accepted.brep, fixture.solid) == 0);
+
+  const auto shells = accepted.brep.solid_shells(fixture.solid);
+  REQUIRE(shells.size() == 1u);
+  CHECK(accepted.brep.shell(shells.front()).closed);
+  CHECK(detail::heal_boundary_edges(accepted.brep, fixture.solid).empty());
+
+  // The split reuses freed edge handles, so the kept cross-gap rims are the
+  // lower outer rim and the upper inner rim. The healed upper face therefore
+  // spans v in [-alpha, pi-alpha] and the lower face spans [pi-alpha,
+  // 2*pi-alpha]; together they cover exactly one turn, which is why the volume
+  // is the full torus despite the chart window shifting by alpha.
+  const double alpha = std::asin(0.5 * gap * (1.0 - 1e-8) /
+                                 test::m4a::torus_fixture::kMinorRadius);
+  constexpr double pi = std::numbers::pi_v<double>;
+  const std::array<std::pair<double, double>, 2> expected_windows{{
+      {-alpha, pi - alpha}, {pi - alpha, 2.0 * pi - alpha}}};
+  std::size_t face_index = 0;
+  for (const FaceId face_id : accepted.brep.face_ids()) {
+    REQUIRE(face_index < expected_windows.size());
+    const auto loops = face_loops_uv(accepted.brep, face_id, 1e-9);
+    REQUIRE(loops.has_value());
+    double v_min = 0.0;
+    double v_max = 0.0;
+    bool first = true;
+    for (const FaceUvLoop& loop : loops.value()) {
+      for (const Point2d& point : loop.points) {
+        if (first) {
+          v_min = point[1];
+          v_max = point[1];
+          first = false;
+        } else {
+          v_min = std::min(v_min, point[1]);
+          v_max = std::max(v_max, point[1]);
+        }
+      }
+    }
+    CHECK(std::fabs(v_min - expected_windows[face_index].first) <= 1e-9);
+    CHECK(std::fabs(v_max - expected_windows[face_index].second) <= 1e-9);
+    ++face_index;
+  }
+  CHECK(face_index == 2u);
+}
+
+TEST_CASE("heal: torus closed rims beyond max_gap report gap_too_large") {
+  // The same closed-rim halves cut 1e-3 apart: every rim is split, but no pair
+  // fits inside the 1e-6 max_gap, so the healer reports the nearest miss.
+  constexpr double gap = 1e-3;
+  const test::m4a::CurvedSolid fixture =
+      test::m4a::make_torus_closed_rims_gap(gap);
+
+  const auto healed = heal_brep(fixture.brep, fixture.solid, {});
+  REQUIRE(healed.has_value());
+  const HealResult& result = healed.value();
+  CHECK_FALSE(result.report.changed);
+  CHECK(result.report.boundary_edges == 8u);
+  CHECK(result.report.welded_vertices == 0u);
+  CHECK(result.report.sewn_edges == 0u);
+  REQUIRE(!result.report.issues.empty());
+  const HealIssue& issue = result.report.issues.front();
+  CHECK(issue.kind == HealIssueKind::gap_too_large);
+  // The split reuses the freed closed-rim edge handles, so the nearest miss is
+  // the inner rim pair: one half of the upper inner rim and one half of the
+  // lower inner rim.
+  CHECK(issue.entity_a == 0u);
+  CHECK(issue.entity_b == 1u);
+  CHECK(issue.gap > 1e-6);
+}
+
+TEST_CASE("heal: a torus rim against a plane lid reports a carrier mismatch") {
+  // The upper torus half is capped by a plane disk whose rim is the half's
+  // outer closed rim. The rims pair at zero gap, so the first pair the surface
+  // guard sees joins a Torus3 face to a Plane3 face.
+  const test::m4a::CurvedSolid fixture =
+      test::m4a::make_torus_plane_lid_gap(1e-6);
+  const std::vector<double> before = brep_fingerprint(fixture.brep);
+
+  const auto healed = heal_brep(fixture.brep, fixture.solid, {});
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::unsupported);
+  CHECK(std::string_view(healed.error().message) == kCarrierMessage);
+  // The closed-rim split reuses freed edge handles: edge 1 is one plane-disk
+  // arc (created after the torus outer rim was split) and edge 4 is the
+  // coincident torus outer arc it was paired with.
+  CHECK(healed.error().context_a == 1u);
+  CHECK(healed.error().context_b == 4u);
+  CHECK(brep_fingerprint(fixture.brep) == before);
+}
+
+TEST_CASE("heal: an off-surface torus rim reports the off-surface error") {
+  // The lower outer rim is pushed 1e-7 radially outward, so its circle is not
+  // on the shared Torus3 surface even though the cross-gap chord still fits
+  // inside max_gap and planning pairs the halves.
+  const test::m4a::CurvedSolid fixture =
+      test::m4a::make_torus_off_surface_gap(1e-6, 1e-7);
+  const std::vector<double> before = brep_fingerprint(fixture.brep);
+
+  const auto healed = heal_brep(fixture.brep, fixture.solid, {});
+  REQUIRE_FALSE(healed.has_value());
+  CHECK(healed.error().code == Errc::unsupported);
+  CHECK(std::string_view(healed.error().message) == kOffSurfaceMessage);
+  // Handle reuse after the closed-rim split makes the kept edge (2) one shifted
+  // lower outer arc and the dropped edge (6) its upper counterpart.
+  CHECK(healed.error().context_a == 2u);
+  CHECK(healed.error().context_b == 6u);
+  CHECK(brep_fingerprint(fixture.brep) == before);
 }
 
 TEST_CASE("heal: an inherited carrier must still pass through its welded vertices") {

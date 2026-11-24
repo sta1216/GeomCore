@@ -786,6 +786,196 @@ inline CurvedSolid make_torus_inner_v_seam_gap(double gap = 1e-6) {
   return CurvedSolid{editor.commit().value(), solid};
 }
 
+// Case 5d: two torus halves cut by the planes z = +/-gap/2. Unlike the band
+// fixtures above, every boundary rim here is a full-turn circle with a single
+// vertex (v0 == v1, parameter span 0..2*pi), so this case exercises the
+// automatic closed-rim split before planning. The outer and inner rims are
+// paired across the gap and welded. The split reuses the freed closed-rim edge
+// handles, so the surviving (kept) outer rim is the lower one while the kept
+// inner rim is the upper one; the healed upper face spans [-alpha, pi-alpha] and
+// the lower face spans [pi-alpha, 2*pi-alpha], together covering the whole
+// torus exactly once. Healed volume is the full torus
+//   V = 2*pi^2*R*r^2 = pi^2/2 = 4.934802200544679...
+//
+// Both halves lie on the same Torus3 surface and their loops are the canonical
+// (u, v) rectangles, so the shared rims are traversed in opposite directions
+// across the gap.
+inline CurvedSolid make_torus_closed_rims_gap(double gap = 1e-6) {
+  using namespace torus_fixture;
+  const Torus3 torus{m4a_point(0.0, 0.0, 0.0), {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0},
+                     kMajorRadius, kMinorRadius, 0.0};
+  // Same 1e-8 relative margin as the open torus band fixtures: the cut height
+  // is recovered through asin/sin around the tube, so the margin keeps the
+  // cross-gap vertex chord strictly below the default 1e-6 max_gap.
+  const double target_half_height = 0.5 * gap * (1.0 - 1e-8);
+  const double alpha = std::asin(target_half_height / kMinorRadius);
+  const double v_outer_high = alpha;
+  const double v_inner_high = kPi - alpha;
+  const double v_inner_low = kPi + alpha;
+  const double v_outer_low = kTwoPi - alpha;
+
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(torus);
+  const std::uint32_t seam = editor.add_curve(seam_meridian(torus));
+
+  // Closed rims: one vertex at u = 0 and one closed edge per rim. The split
+  // pass later adds the opposite u = pi vertex and the two half-turn arcs.
+  struct ClosedRim {
+    VertexId vertex{};
+    EdgeId edge{};
+  };
+  const auto add_closed_rim = [&](double chart_v) {
+    const std::uint32_t curve = editor.add_curve(v_rim_circle(torus, chart_v));
+    const VertexId vertex = m4a_vertex(editor, torus.eval(0.0, chart_v));
+    return ClosedRim{vertex,
+                     m4a_edge(editor, vertex, vertex, curve, 0.0, kTwoPi)};
+  };
+  const ClosedRim rim_outer_high = add_closed_rim(v_outer_high);
+  const ClosedRim rim_inner_high = add_closed_rim(v_inner_high);
+  const ClosedRim rim_inner_low = add_closed_rim(v_inner_low);
+  const ClosedRim rim_outer_low = add_closed_rim(v_outer_low);
+
+  const EdgeId seam_high =
+      m4a_edge(editor, rim_outer_high.vertex, rim_inner_high.vertex, seam,
+               v_outer_high, v_inner_high);
+  const EdgeId seam_low =
+      m4a_edge(editor, rim_inner_low.vertex, rim_outer_low.vertex, seam,
+               v_inner_low, v_outer_low);
+
+  const FaceId high = m4a_face(editor, surface);
+  const std::array<CoedgeSpec, 4> high_loop{{
+      {rim_outer_high.edge, false}, {seam_high, false},
+      {rim_inner_high.edge, true}, {seam_high, true}}};
+  editor.add_loop(high, high_loop, true).value();
+
+  const FaceId low = m4a_face(editor, surface);
+  const std::array<CoedgeSpec, 4> low_loop{{
+      {rim_inner_low.edge, false}, {seam_low, false},
+      {rim_outer_low.edge, true}, {seam_low, true}}};
+  editor.add_loop(low, low_loop, true).value();
+
+  const std::array<FaceId, 2> faces{{high, low}};
+  const SolidId solid = m4a_add_solid(editor, faces);
+  return CurvedSolid{editor.commit().value(), solid};
+}
+
+// Case 5e: the upper torus half of case 5d capped by a plane disk at the same
+// height, with the disk rim coincident with the half's outer closed rim. The
+// two rims pair at zero gap, so the surface guard must reject the pair because
+// a Torus3 face and a Plane3 face cannot be the same carrier. The inner rim has
+// no counterpart, which would report gap_too_large; the surface guard runs
+// first on the coincident outer pair.
+inline CurvedSolid make_torus_plane_lid_gap(double gap = 1e-6) {
+  using namespace torus_fixture;
+  const Torus3 torus{m4a_point(0.0, 0.0, 0.0), {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0},
+                     kMajorRadius, kMinorRadius, 0.0};
+  const double target_half_height = 0.5 * gap * (1.0 - 1e-8);
+  const double alpha = std::asin(target_half_height / kMinorRadius);
+  const double outer_radius = kMajorRadius + kMinorRadius * std::cos(alpha);
+
+  SolidEditor editor;
+  const std::uint32_t torus_surface = editor.add_surface(torus);
+  const std::uint32_t plane_surface =
+      editor.add_surface(Plane3{{0.0, 0.0, 1.0}, target_half_height});
+  const std::uint32_t seam = editor.add_curve(seam_meridian(torus));
+
+  const auto add_closed_rim = [&](double chart_v) {
+    const std::uint32_t curve = editor.add_curve(v_rim_circle(torus, chart_v));
+    const VertexId vertex = m4a_vertex(editor, torus.eval(0.0, chart_v));
+    return std::pair<VertexId, EdgeId>{
+        vertex, m4a_edge(editor, vertex, vertex, curve, 0.0, kTwoPi)};
+  };
+  const auto [outer_vertex, outer_rim] = add_closed_rim(alpha);
+  const auto [inner_vertex, inner_rim] = add_closed_rim(kPi - alpha);
+  const EdgeId seam_edge = m4a_edge(editor, outer_vertex, inner_vertex, seam,
+                                    alpha, kPi - alpha);
+
+  const FaceId upper = m4a_face(editor, torus_surface);
+  const std::array<CoedgeSpec, 4> upper_loop{{
+      {outer_rim, false}, {seam_edge, false}, {inner_rim, true},
+      {seam_edge, true}}};
+  editor.add_loop(upper, upper_loop, true).value();
+
+  // The plane lid is a disk whose boundary is the torus half's outer rim.
+  const std::uint32_t lid_curve = editor.add_curve(
+      CircleCurve3{m4a_point(0.0, 0.0, target_half_height),
+                   {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, outer_radius});
+  const VertexId lid_vertex =
+      m4a_vertex(editor, m4a_point(outer_radius, 0.0, target_half_height));
+  const EdgeId lid_rim =
+      m4a_edge(editor, lid_vertex, lid_vertex, lid_curve, 0.0, kTwoPi);
+  const FaceId lid = m4a_face(editor, plane_surface);
+  const std::array<CoedgeSpec, 1> lid_loop{{{lid_rim, false}}};
+  editor.add_loop(lid, lid_loop, true).value();
+
+  const std::array<FaceId, 2> faces{{upper, lid}};
+  const SolidId solid = m4a_add_solid(editor, faces);
+  return CurvedSolid{editor.commit().value(), solid};
+}
+
+// Case 5f: the two halves of case 5d, but the lower outer closed rim is a
+// circle of radius R + r*cos(alpha) + radial_shift, so its carrier no longer
+// lies on the shared Torus3 surface. The cut height keeps a 1e-2 relative
+// margin instead of 1e-8 so the cross-gap chord stays below the default 1e-6
+// max_gap even with the radial shift; planning then pairs the rims and reaches
+// the off-surface guard instead of reporting gap_too_large.
+inline CurvedSolid make_torus_off_surface_gap(double gap = 1e-6,
+                                              double radial_shift = 1e-7) {
+  using namespace torus_fixture;
+  const Torus3 torus{m4a_point(0.0, 0.0, 0.0), {0.0, 0.0, 1.0}, {1.0, 0.0, 0.0},
+                     kMajorRadius, kMinorRadius, 0.0};
+  const double target_half_height = 0.5 * gap * (1.0 - 1e-2);
+  const double alpha = std::asin(target_half_height / kMinorRadius);
+  const double outer_radius = kMajorRadius + kMinorRadius * std::cos(alpha);
+
+  SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(torus);
+  const std::uint32_t seam = editor.add_curve(seam_meridian(torus));
+
+  const auto add_closed_rim = [&](const CircleCurve3& circle,
+                                  const Point3d& at) {
+    const std::uint32_t curve = editor.add_curve(circle);
+    const VertexId vertex = m4a_vertex(editor, at);
+    return std::pair<VertexId, EdgeId>{
+        vertex, m4a_edge(editor, vertex, vertex, curve, 0.0, kTwoPi)};
+  };
+  const auto [outer_high_vertex, outer_high] =
+      add_closed_rim(v_rim_circle(torus, alpha), torus.eval(0.0, alpha));
+  const auto [inner_high_vertex, inner_high] = add_closed_rim(
+      v_rim_circle(torus, kPi - alpha), torus.eval(0.0, kPi - alpha));
+  const auto [inner_low_vertex, inner_low] = add_closed_rim(
+      v_rim_circle(torus, kPi + alpha), torus.eval(0.0, kPi + alpha));
+  // The lower outer rim is pushed radially outward, off the torus surface.
+  const CircleCurve3 outer_low_circle{
+      m4a_point(0.0, 0.0, -target_half_height), {1.0, 0.0, 0.0},
+      {0.0, 1.0, 0.0}, outer_radius + radial_shift};
+  const auto [outer_low_vertex, outer_low] =
+      add_closed_rim(outer_low_circle,
+                     m4a_point(outer_radius + radial_shift, 0.0,
+                               -target_half_height));
+
+  const EdgeId seam_high = m4a_edge(editor, outer_high_vertex, inner_high_vertex,
+                                    seam, alpha, kPi - alpha);
+  const EdgeId seam_low = m4a_edge(editor, inner_low_vertex, outer_low_vertex,
+                                   seam, kPi + alpha, kTwoPi - alpha);
+
+  const FaceId high = m4a_face(editor, surface);
+  const std::array<CoedgeSpec, 4> high_loop{{
+      {outer_high, false}, {seam_high, false}, {inner_high, true},
+      {seam_high, true}}};
+  editor.add_loop(high, high_loop, true).value();
+
+  const FaceId low = m4a_face(editor, surface);
+  const std::array<CoedgeSpec, 4> low_loop{{
+      {inner_low, false}, {seam_low, false}, {outer_low, true},
+      {seam_low, true}}};
+  editor.add_loop(low, low_loop, true).value();
+
+  const std::array<FaceId, 2> faces{{high, low}};
+  const SolidId solid = m4a_add_solid(editor, faces);
+  return CurvedSolid{editor.commit().value(), solid};
+}
+
 // ---------------------------------------------------------------------------
 // Negative kind fixtures: a closed unit cube.
 //
