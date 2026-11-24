@@ -626,9 +626,23 @@ TEST_CASE("heal: closed rim gaps are split and healed") {
   const CurvedAcceptance accepted = check_closed_curved_heal(
       fixture, {}, test::m4a::kPi * (2.0 + gap), 1e-12, measured_gap);
 
+  // Healed topology observed on the Release build: V=4, E=6, F=4 (chi=2).
+  // Only the two cross-gap rims are boundary edges, so the split pass adds one
+  // vertex+edge to each (working copy V=6, E=8); the two cross-gap welds then
+  // drop those two vertices and merging the paired halves drops two edges.
+  // The bottom/top rings are interior (lateral + cap) and are not split.
+  CHECK(accepted.brep.vertex_count() == 4u);
+  CHECK(accepted.brep.edge_count() == 6u);
+  CHECK(accepted.brep.face_count() == 4u);
+
+  // A successful closed-rim heal leaves one closed shell and no boundary edge.
+  const auto shells = accepted.brep.solid_shells(fixture.solid);
+  REQUIRE(shells.size() == 1u);
+  CHECK(accepted.brep.shell(shells.front()).closed);
+  CHECK(detail::heal_boundary_edges(accepted.brep, fixture.solid).empty());
+
   // The healer keeps the input height 2 + gap instead of shrinking the gap, as
   // in the open two-band case.
-  CHECK(accepted.brep.face_count() == 4u);
   CHECK(std::fabs(accepted.volume - test::m4a::kTwoPi) <=
         1e-6 * test::m4a::kTwoPi);
   CHECK(std::fabs(accepted.volume - 6.2831884487723997) <=
