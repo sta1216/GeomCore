@@ -105,4 +105,7 @@ if(GEOM_BUILD_BENCH)
 
   add_executable(geom_bench_m3c3b bench/bench_m3c3b.cpp)
   target_link_libraries(geom_bench_m3c3b PRIVATE geom_core)
+
+  add_executable(geom_bench_m4c1 bench/bench_m4c1.cpp)
+  target_link_libraries(geom_bench_m4c1 PRIVATE geom_core)
 endif()
