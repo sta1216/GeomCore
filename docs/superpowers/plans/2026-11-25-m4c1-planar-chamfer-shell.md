@@ -503,10 +503,9 @@ TEST_CASE("shell rejects bad options and unsupported operands") {
   options.tolerance = std::numeric_limits<double>::infinity();
   CHECK(shell_solid(box, open, options).error().code == Errc::non_finite);
 
-  const Brep other = box_solid(Point3d{10.0, 0.0, 0.0}, Point3d{12.0, 2.0, 2.0});
-  const std::array<FaceId, 1> foreign{other.face_ids().front()};
+  const std::array<FaceId, 1> dead{FaceId{}};
   options.tolerance = 1e-9;
-  CHECK(shell_solid(box, foreign, options).error().code == Errc::index_out_of_range);
+  CHECK(shell_solid(box, dead, options).error().code == Errc::index_out_of_range);
 }
 
 TEST_CASE("a duplicate open face is applied once") {
@@ -535,12 +534,12 @@ Expected: both cases pass; the open-face and all-open behavior already landed in
 
 - [ ] **Step 3: Keep the guards covered**
 
-The Task 4 implementation already deduplicates open faces in first-occurrence order, rejects a face that is not in the solid with `Errc::index_out_of_range`, rejects an empty closed set with `Errc::unsupported` ("shell_solid: at least one face must stay closed"), and maps unrepresentable thin walls to `Errc::degenerate`. Do not change those contracts here; only adjust the code if Step 2 finds a real defect.
+The Task 4 implementation already deduplicates open faces in first-occurrence order, rejects a dead or out-of-range `FaceId` with `Errc::index_out_of_range`, rejects an empty closed set with `Errc::unsupported` ("shell_solid: at least one face must stay closed"), and maps unrepresentable thin walls to `Errc::degenerate`. A `FaceId` from a *different* `Brep` cannot be detected: handles are only `(index, generation)`. Do not change those contracts here; only adjust the code if Step 2 finds a real defect.
 
 - [ ] **Step 4: Run Debug and Release tests**
 
 Run both configurations with `--test-case="*shell*"`.
-Expected: the two new cases pass in both configurations alongside the seven Task 4 cases.
+Expected: the two new cases pass in both configurations alongside the eight Task 4 cases.
 
 - [ ] **Step 5: Commit**
 
