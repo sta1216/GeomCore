@@ -194,17 +194,6 @@ TEST_CASE("shell refuses an oblique face") {
         "shell_solid: only axis-aligned faces are supported");
 }
 
-TEST_CASE("shell half-space classifier sees a bounded interior") {
-  const std::vector<Plane3> box{
-      {{-1, 0, 0}, -0.25}, {{1, 0, 0}, 1.75}, {{0, -1, 0}, -0.25},
-      {{0, 1, 0}, 1.75},   {{0, 0, -1}, -0.25}, {{0, 0, 1}, 1.75}};
-  CHECK(detail::shell_half_spaces_have_interior(box, 1e-9));
-
-  std::vector<Plane3> thin = box;
-  thin[1].offset = 0.250000002;  // 2e-9 wide, so the half-width equals the tolerance
-  CHECK_FALSE(detail::shell_half_spaces_have_interior(thin, 1e-9));
-}
-
 TEST_CASE("shell refuses any oblique face in any face order") {
   const double a = 30.0 * 3.14159265358979323846 / 180.0;
   const double b = 20.0 * 3.14159265358979323846 / 180.0;

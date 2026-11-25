@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <span>
 #include <utility>
 #include <vector>
@@ -12,7 +11,6 @@
 #include <geom/brep/boolean_solid.hpp>
 #include <geom/brep/detail/blend_common.hpp>
 #include <geom/brep/primitives.hpp>
-#include <geom/brep/split_solid.hpp>
 #include <geom/brep/validate.hpp>
 #include <geom/core/error.hpp>
 #include <geom/core/result.hpp>
@@ -31,65 +29,6 @@ struct ShellResult {
   std::uint32_t cavity_shells = 0;  // enclosed pockets; always >= 1 on success
 };
 
-namespace detail {
-
-// True when the half-spaces have a point strictly more than `tolerance` inside
-// every plane. Used only after a split failure: a genuine splitter bug must not
-// be reported as a wall that is too thin, while a cavity narrower than the
-// numeric resolution has no such point and is honestly degenerate.
-//
-// A triple intersection lies exactly on its three planes, so it can never be
-// the witness itself. Instead collect the vertices of the intersection that
-// satisfy every other half-space, and test their centroid: a convex
-// combination of feasible vertices is strictly inside the intersection, and its
-// clearance is the smallest wall half-width for a slab-like cavity.
-inline bool shell_half_spaces_have_interior(const std::vector<Plane3>& planes, double tolerance) {
-  const std::size_t count = planes.size();
-  if (count > 64u) return true;  // too many triples to certify a failure; surface it
-  std::vector<Point3d> vertices;
-  vertices.reserve(count);
-  for (std::size_t i = 0; i < count; ++i) {
-    for (std::size_t j = i + 1; j < count; ++j) {
-      for (std::size_t k = j + 1; k < count; ++k) {
-        const Vec3d& ni = planes[i].normal;
-        const Vec3d& nj = planes[j].normal;
-        const Vec3d& nk = planes[k].normal;
-        const Vec3d cjk = cross(nj, nk);
-        const double det = dot(ni, cjk);
-        if (!std::isfinite(det) || std::abs(det) < 1e-15) continue;
-        const Vec3d numerator = cjk * planes[i].offset + cross(nk, ni) * planes[j].offset +
-                                cross(ni, nj) * planes[k].offset;
-        const Vec3d point = numerator * (1.0 / det);
-        if (!std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2])) {
-          continue;
-        }
-        const Point3d candidate{point[0], point[1], point[2]};
-        bool feasible = true;
-        for (const Plane3& plane : planes) {
-          if (plane.signed_distance(candidate) > tolerance) {
-            feasible = false;
-            break;
-          }
-        }
-        if (feasible) vertices.push_back(candidate);
-      }
-    }
-  }
-  if (vertices.empty()) return false;
-  Point3d centroid = vertices.front();
-  for (std::size_t i = 1; i < vertices.size(); ++i) {
-    centroid = centroid + (vertices[i] - centroid) * (1.0 / static_cast<double>(i + 1));
-  }
-  // Equality means the cavity is exactly two tolerances wide: the assembler
-  // cannot stitch that wall, so it counts as unmeasurable rather than interior.
-  const double required = tolerance * (1.0 + 4.0 * std::numeric_limits<double>::epsilon());
-  for (const Plane3& plane : planes) {
-    if (!(plane.signed_distance(centroid) < -required)) return false;
-  }
-  return true;
-}
-
-}  // namespace detail
 
 // Hollows a convex planar solid to a uniform wall of `thickness`, leaving an
 // inner cavity. M4c-1 accepts closed, axis-aligned solids only: an open face
@@ -98,13 +37,14 @@ inline bool shell_half_spaces_have_interior(const std::vector<Plane3>& planes, d
 // dependent solid. M4c-2 lifts the open-face and oblique restrictions together
 // with the splitter/boolean face-order fix.
 //
-// The cavity is built as a half-space intersection, not by cutting the input:
-// a bounding box around the input, expanded by twice the wall thickness, is
-// cut once per face, with each face plane moved inward by `thickness`. The
-// final regularized difference A - cavity then leaves the uniform wall.
+// The cavity is the axis-aligned box inset by `thickness` on every side, then
+// the final regularized difference A - cavity leaves the uniform wall. The box
+// is built directly instead of being cut out of a seed: every accepted face is
+// axis-aligned, so a convex solid with only axis-aligned faces is a box, and
+// constructing it directly avoids the order-sensitive splitter path.
 //
-// A half-space that leaves nothing below it means the requested wall consumes
-// the body in that direction and is reported as degenerate.
+// A thickness that consumes the body in any axis leaves no interior and is
+// reported as degenerate.
 //
 // Diagnostics are static texts because Error::message is a const char*.
 inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId> open_faces = {},
@@ -169,10 +109,10 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
     return Error{Errc::unsupported, "shell_solid: only axis-aligned faces are supported"};
   }
 
-  // The cavity is the intersection of one half-space per face, seeded by a box
-  // that contains the solid with room to spare on every side. Every accepted
-  // face is closed and axis-aligned, so each plane cuts `thickness` inside the
-  // input.
+  // Every accepted face is axis-aligned. A closed convex solid whose faces are
+  // all axis-aligned is a box: intersecting the half-spaces leaves one interval
+  // per axis, independent of the other axes. The cavity is therefore the input
+  // bounding box inset by the wall thickness on every side.
   Point3d lo = brep.vertex(brep.vertex_ids().front()).point;
   Point3d hi = lo;
   for (const VertexId id : brep.vertex_ids()) {
@@ -182,63 +122,21 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
       hi[axis] = std::max(hi[axis], point[axis]);
     }
   }
-  // The margin must also stay well above the numeric resolution: a seed face
-  // only `3 * thickness` away from a cut would leave a sliver that the stitcher
-  // merges away for very thin walls. A relative floor keeps the seed a real
-  // solid at any thickness.
-  double extent = 0.0;
-  for (int axis = 0; axis < 3; ++axis) extent = std::max(extent, hi[axis] - lo[axis]);
-  const double margin =
-      std::max({2.0 * options.thickness, 1e-6 * std::max(1.0, extent), 1000.0 * tolerance});
-  Point3d seed_lo{lo[0] - margin, lo[1] - margin, lo[2] - margin};
-  Point3d seed_hi{hi[0] + margin, hi[1] + margin, hi[2] + margin};
-  if (!std::isfinite(seed_lo[0]) || !std::isfinite(seed_lo[1]) || !std::isfinite(seed_lo[2]) ||
-      !std::isfinite(seed_hi[0]) || !std::isfinite(seed_hi[1]) || !std::isfinite(seed_hi[2])) {
-    return Error{Errc::non_finite, "shell_solid: wall thickness moves the seed box out of range"};
-  }
-  const Result<Brep> seed = make_box(seed_lo, seed_hi, tolerance);
-  if (!seed.has_value()) {
-    return Error{Errc::degenerate, "shell_solid: could not build the inner seed box"};
-  }
-
-  Brep inner = seed.value();
-  std::vector<Plane3> planes;
-  planes.reserve(view.value().faces.size());
-  for (std::size_t i = 0; i < view.value().faces.size(); ++i) {
-    planes.push_back(Plane3{view.value().outward[i],
-                            view.value().offset[i] - options.thickness});
-  }
-  for (const Plane3& plane : planes) {
-    // A plane at or below every vertex leaves no interior on its below side;
-    // cutting there would either be an identity or a tangency error.
-    double distance_min = std::numeric_limits<double>::infinity();
-    for (const VertexId id : inner.vertex_ids()) {
-      distance_min = std::min(distance_min, plane.signed_distance(inner.vertex(id).point));
-    }
-    if (!(distance_min < -tolerance)) {
+  const Point3d inner_lo{lo[0] + options.thickness, lo[1] + options.thickness,
+                         lo[2] + options.thickness};
+  const Point3d inner_hi{hi[0] - options.thickness, hi[1] - options.thickness,
+                         hi[2] - options.thickness};
+  for (int axis = 0; axis < 3; ++axis) {
+    if (!(inner_hi[axis] > inner_lo[axis])) {
       return Error{Errc::degenerate, "shell_solid: wall thickness leaves no interior"};
     }
-
-    const Result<SplitSolidResult> split =
-        split_solid_by_plane(inner, inner.solid_ids().front(), plane, tolerance);
-    if (!split.has_value()) {
-      if (!detail::shell_half_spaces_have_interior(planes, tolerance)) {
-        return Error{Errc::degenerate,
-                     "shell_solid: wall thickness leaves no measurable interior at this tolerance"};
-      }
-      // A real splitter failure is reported as invalid_topology with the public
-      // prefix; the splitter's own message is intentionally not forwarded.
-      return Error{Errc::invalid_topology,
-                   "shell_solid: cavity intersection could not be assembled"};
-    }
-    if (split.value().below.solid_count() == 0u) {
-      return Error{Errc::degenerate, "shell_solid: wall thickness leaves no interior"};
-    }
-    if (split.value().below.solid_count() != 1u) {
-      return Error{Errc::invalid_topology, "shell_solid: cut split the inner solid"};
-    }
-    inner = std::move(split.value().below);
   }
+  const Result<Brep> inner_box = make_box(inner_lo, inner_hi, tolerance);
+  if (!inner_box.has_value()) {
+    return Error{Errc::degenerate, "shell_solid: wall thickness leaves no measurable interior"};
+  }
+
+  Brep inner = inner_box.value();
 
   SolidBooleanOptions boolean_options;
   boolean_options.tolerance = tolerance;

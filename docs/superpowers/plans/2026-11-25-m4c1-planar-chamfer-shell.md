@@ -4,7 +4,7 @@
 
 **Goal:** Add exact constant-distance chamfer and uniform-thickness shell operations for convex, planar-faced, single-shell B-rep solids, with deterministic diagnostics for every unsupported input. Shelling in M4c-1 accepts only **closed, axis-aligned** operands: open faces and oblique (non-axis-aligned) faces are refused explicitly because the sequential splitter and the boolean stitch are face-order sensitive there; M4c-2 lifts both restrictions together with the ordering fix.
 
-**Architecture:** Both operations reduce to repeated half-space cuts. Chamfering an edge cuts the solid with the plane through the two face setback points and keeps the side away from the edge; shelling intersects one inward-shifted half-space per face, seeded by a box, and subtracts the resulting inner solid from the original. Cutting reuses `split_solid_by_plane`; the only new geometry code is frame construction, convexity validation, and distance-vs-face-width checks. No new tolerance regime and no global epsilon are introduced.
+**Architecture:** Both operations reduce to exact planar operations. Chamfering an edge cuts the solid with the plane through the two face setback points and keeps the side away from the edge; shelling the axis-aligned closed solid insets its bounding box by the wall thickness and subtracts that cavity from the original. Chamfer cuts reuse `split_solid_by_plane`; the only new geometry code is frame construction, convexity validation, distance-vs-face-width checks, and the direct inset box. No new tolerance regime and no global epsilon are introduced.
 
 **Tech Stack:** C++20, header-only `geom_core`, `geom::v1`, doctest 2.4.11, CMake 4.x, MSVC 19.44 `/W4 /WX /utf-8`, PowerShell on Windows.
 
@@ -463,12 +463,12 @@ Expected: compile error for the missing `shell.hpp`.
 
 - [ ] **Step 3: Implement `shell_solid`**
 
-Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (dead or out-of-range is `Errc::index_out_of_range`); any non-empty open-face list is refused below. Refuse a solid with any oblique face (`Errc::unsupported`, "shell_solid: only axis-aligned faces are supported"), and refuse a non-empty open-face list (`Errc::unsupported`, "shell_solid: open faces are not supported in M4c-1"): the sequential splitter and the boolean stitch are face-order sensitive for those operands (M4c-2). Build the cavity as the intersection of one half-space per face, seeded by a box that contains the input with a numeric margin `max(2 * thickness, 1e-6 * max(1, extent), 1000 * tolerance)` on every side: a closed face cuts with `Plane3{outward[i], offset[i] - thickness}` and keeps `below`. Require exactly one solid after each cut. If a plane is at or below every vertex, or a cut leaves no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). If a split fails, test whether the shifted half-spaces still contain a point more than `tolerance` inside every plane by averaging the feasible triple-intersection vertices; if none, return `Errc::degenerate` ("shell_solid: wall thickness leaves no measurable interior at this tolerance"), otherwise return `Errc::invalid_topology` ("shell_solid: cavity intersection could not be assembled"). Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; a non-finite result is `Errc::non_finite` ("shell_solid: cavity difference failed a numeric check") and any other failure is the "no measurable interior" degenerate case. Require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1`.
+Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (dead or out-of-range is `Errc::index_out_of_range`); any non-empty open-face list is refused below. Refuse a solid with any oblique face (`Errc::unsupported`, "shell_solid: only axis-aligned faces are supported"), and refuse a non-empty open-face list (`Errc::unsupported`, "shell_solid: open faces are not supported in M4c-1"): the splitter and boolean stitch are face-order sensitive for those operands (M4c-2). Because every accepted face is axis-aligned, a closed convex solid is a box: compute the input AABB and inset it by `thickness` on each axis. If any inset interval is non-positive (or loses the wall to rounding), return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"); build the cavity with `make_box(inner_lo, inner_hi, tolerance)` and treat a box failure as the "no measurable interior" degenerate case. Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; a non-finite result is `Errc::non_finite` ("shell_solid: cavity difference failed a numeric check") and any other failure is the "no measurable interior" degenerate case. Require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1`.
 
 - [ ] **Step 4: Run Debug and Release tests**
 
 Run both configurations with `--test-case="*shell*"`.
-Expected: thirteen shell cases (closed, no interior, open refusal, 720 Release / 24 Debug face orders, wall below resolution, cavity thinner than the tolerance, all faces open, oblique prism, classifier witness, any-oblique refusal, bad options, duplicate open request, sub-ulp seed); the `*shell*` filter also matches unrelated pre-existing tests, so check the new case names rather than the total.
+Expected: twelve shell cases (closed, no interior, open refusal, 720 Release / 24 Debug face orders, wall below resolution, cavity thinner than the tolerance, all faces open, oblique prism, any-oblique refusal, bad options, duplicate open request); the `*shell*` filter also matches unrelated pre-existing tests, so check the new case names rather than the total.
 
 - [ ] **Step 5: Commit**
 
@@ -752,14 +752,14 @@ git commit -m "docs(m4c1): record planar chamfer and shell evidence"
 | Item | Value |
 | --- | --- |
 | Branch / base | `sdd/m4c1`, base `9e39182` |
-| Chamfer one edge volume | TBD |
-| Chamfer all edges volume | TBD |
-| Shell closed volume | TBD |
+| Chamfer one edge volume | 7.880208333333334 |
+| Chamfer all edges volume | 7.34375 |
+| Shell closed volume | 10.875 |
 | Shell open-top volume | deferred to M4c-2 |
-| Bench chamfer all edges (min/median) | TBD |
-| Bench closed shell (min/median) | TBD |
-| Debug cases / assertions | TBD |
-| Release cases / assertions | TBD |
+| Bench chamfer all edges (min/median) | 466.700 ms / 495.516 ms |
+| Bench closed shell (min/median) | 1.105 ms / 1.158 ms |
+| Debug cases / assertions | PENDING (known eight long curved half-space booleans); shell 45/459, QA 2/24 |
+| Release cases / assertions | 1115 / 681,655 |
 | Merged commit | TBD |
 
 ## Self-Review
