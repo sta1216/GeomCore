@@ -294,7 +294,7 @@ TEST_CASE("a duplicate open face request is still refused") {
         "shell_solid: open faces are not supported in M4c-1");
 }
 
-TEST_CASE("shell keeps a representable seed below one coordinate ulp") {
+TEST_CASE("shell rejects a wall below one coordinate ulp") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
   ShellOptions options;
   options.thickness = 1e-300;

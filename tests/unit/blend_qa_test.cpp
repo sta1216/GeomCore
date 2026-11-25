@@ -95,6 +95,29 @@ TEST_CASE("blend outputs are deterministic and leave inputs unchanged") {
   CHECK(mesh_a.value().positions.size() == mesh_b.value().positions.size());
   CHECK(mesh_a.value().triangles == mesh_b.value().triangles);
 
+  ShellOptions shell;
+  shell.thickness = 0.25;
+  const std::array<FaceId, 0> open{};
+  const Result<ShellResult> shell_a = shell_solid(box, open, shell);
+  const Result<ShellResult> shell_b = shell_solid(box, open, shell);
+  REQUIRE(shell_a.has_value());
+  REQUIRE(shell_b.has_value());
+  CHECK(shell_a.value().cavity_shells == 1u);
+  CHECK(shell_a.value().brep.vertex_count() == shell_b.value().brep.vertex_count());
+  CHECK(shell_a.value().brep.edge_count() == shell_b.value().brep.edge_count());
+  CHECK(shell_a.value().brep.face_count() == shell_b.value().brep.face_count());
+  const Result<MassProperties> shell_mass_a = mass_properties(shell_a.value().brep);
+  const Result<MassProperties> shell_mass_b = mass_properties(shell_b.value().brep);
+  REQUIRE(shell_mass_a.has_value());
+  REQUIRE(shell_mass_b.has_value());
+  CHECK(shell_mass_a.value().volume == shell_mass_b.value().volume);
+  const Result<TriMesh> shell_mesh_a = tessellate(shell_a.value().brep, TessellationOptions{});
+  const Result<TriMesh> shell_mesh_b = tessellate(shell_b.value().brep, TessellationOptions{});
+  REQUIRE(shell_mesh_a.has_value());
+  REQUIRE(shell_mesh_b.has_value());
+  CHECK(shell_mesh_a.value().positions.size() == shell_mesh_b.value().positions.size());
+  CHECK(shell_mesh_a.value().triangles == shell_mesh_b.value().triangles);
+
   CHECK(box.face_count() == 6u);
   const Result<MassProperties> original = mass_properties(box);
   REQUIRE(original.has_value());

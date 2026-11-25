@@ -758,8 +758,8 @@ git commit -m "docs(m4c1): record planar chamfer and shell evidence"
 | Shell open-top volume | deferred to M4c-2 |
 | Bench chamfer all edges (min/median) | 466.700 ms / 495.516 ms |
 | Bench closed shell (min/median) | 1.105 ms / 1.158 ms |
-| Debug cases / assertions | PENDING (known eight long curved half-space booleans); shell 45/459, QA 2/24 |
-| Release cases / assertions | 1115 / 681,655 |
+| Debug cases / assertions | PENDING (known eight long curved half-space booleans); shell 45/465, QA 2/37 |
+| Release cases / assertions | 1115 / 681,668 |
 | Merged commit | TBD |
 
 ## Self-Review
