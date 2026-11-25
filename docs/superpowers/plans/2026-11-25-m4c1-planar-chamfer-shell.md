@@ -4,7 +4,7 @@
 
 **Goal:** Add exact constant-distance chamfer and uniform-thickness shell operations for convex, planar-faced, single-shell B-rep solids, with deterministic diagnostics for every unsupported input.
 
-**Architecture:** Both operations reduce to repeated half-space cuts. Chamfering an edge cuts the solid with the plane through the two face setback points and keeps the side away from the edge; shelling cuts the solid with every face plane shifted inward and subtracts the resulting inner solid from the original. Cutting reuses `split_solid_by_plane`; the only new geometry code is frame construction, convexity validation, and distance-vs-face-width checks. No new tolerance regime and no global epsilon are introduced.
+**Architecture:** Both operations reduce to repeated half-space cuts. Chamfering an edge cuts the solid with the plane through the two face setback points and keeps the side away from the edge; shelling cuts the solid with every face plane shifted inward and subtracts the resulting inner solid from the original. A requested open face is shifted **outward** so the inner solid protrudes through the opening and the difference cuts a clean pocket instead of leaving two coplanar caps. Cutting reuses `split_solid_by_plane`; the only new geometry code is frame construction, convexity validation, and distance-vs-face-width checks. No new tolerance regime and no global epsilon are introduced.
 
 **Tech Stack:** C++20, header-only `geom_core`, `geom::v1`, doctest 2.4.11, CMake 4.x, MSVC 19.44 `/W4 /WX /utf-8`, PowerShell on Windows.
 
@@ -33,7 +33,7 @@ The convex restriction is a correctness boundary, not an implementation shortcut
 
 1. **Chamfer distance at or beyond the adjacent face width** — a caller can ask for `distance = 2.0` on a 2-wide face. Expected: `Errc::unsupported` naming the width limit, never a closed solid with a collapsed or flipped face.
 2. **Three chamfers meeting at one vertex** — sequential half-space cuts must leave a closed solid with a planar vertex facet, `chi == 2`, and no non-manifold edge. Expected: valid solid and the analytic volume for a fully chamfered cube.
-3. **Open-face shell** — the inner solid touches the omitted face. Expected: one open pocket, the omitted face keeps an outer and an inner loop, and the tessellated mesh has zero boundary edges.
+3. **Open-face shell** — the inner solid is shifted outward through the omitted face. Expected: one open pocket, the omitted face keeps an outer and an inner loop, and the tessellated mesh has zero boundary edges (no coincident cap, no zero-thickness wall).
 4. **Wall thickness at or above the local thickness** — the inner solid vanishes. Expected: `Errc::degenerate` ("wall thickness leaves no interior"), never an empty Brep or a self-intersecting one.
 5. **Curved or non-convex operand** — a cylinder or an L-shaped union is easy to pass by mistake. Expected: `Errc::unsupported` before any cutting, with the input counts unchanged.
 
@@ -463,7 +463,7 @@ Expected: compile error for the missing `shell.hpp`.
 
 - [ ] **Step 3: Implement `shell_solid`**
 
-Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (alive, in the solid). Start `inner = brep`; for every face not open, cut with `Plane3{outward[i], offset[i] - thickness}` and keep `below`; require exactly one solid after each cut. If the below result has no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1` (closed open-list) or `0` when any face is open.
+Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (alive, in the solid). Start `inner = brep`; for a closed face cut with `Plane3{outward[i], offset[i] - thickness}` and keep `below`; for a requested open face cut with `Plane3{outward[i], offset[i] + thickness}` and keep `below`, so the inner solid extends past the opening. Require exactly one solid after each cut. If the below result has no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1` (closed open-list) or `0` when any face is open.
 
 - [ ] **Step 4: Run Debug and Release tests**
 
@@ -557,7 +557,7 @@ Expected: the open-top case fails or returns the wrong volume; the dead-face cas
 
 - [ ] **Step 3: Implement open-face handling**
 
-Omit each requested face plane from the cut loop. If every face is open, return `Errc::unsupported` ("shell_solid: at least one face must stay closed"). Deduplicate open faces in first-occurrence order. Reject a face that is not part of the solid's single shell with `Errc::invalid_topology`.
+Omit each requested face from the inner half-space intersection by shifting its plane **outward** by `thickness` and keeping the below side. The inner solid then protrudes through the opening, so the final difference opens the pocket without coincident coplanar caps. If every face is open, return `Errc::unsupported` ("shell_solid: at least one face must stay closed"). Deduplicate open faces in first-occurrence order. Reject a face that is not part of the solid's single shell with `Errc::invalid_topology`.
 
 - [ ] **Step 4: Run Debug and Release tests**
 
