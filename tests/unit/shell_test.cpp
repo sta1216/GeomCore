@@ -60,3 +60,80 @@ TEST_CASE("shell rejects a thickness that leaves no interior") {
   CHECK(std::string_view(result.error().message).find("leaves no interior") !=
         std::string::npos);
 }
+
+TEST_CASE("open-top shell opens one pocket") {
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
+  FaceId top{};
+  for (const FaceId face : box.face_ids()) {
+    const auto& plane = std::get<Plane3>(box.geometry().surfaces[box.face(face).surface]);
+    const Vec3d normal = box.face(face).reversed ? plane.normal * -1.0 : plane.normal;
+    if (normal[2] > 0.5) top = face;
+  }
+  REQUIRE_FALSE(top.is_null());
+  ShellOptions options;
+  options.thickness = 0.25;
+  const std::array<FaceId, 1> open{top};
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 0u);
+  CHECK(result.value().brep.solid_count() == 1u);
+  CHECK(result.value().brep.solid_shells(result.value().brep.solid_ids().front()).size() == 1u);
+  CHECK(validate_topology(result.value().brep).ok());
+  // 24 - (1.5 * 2.5 * 3.75).
+  CHECK(std::abs(volume_of(result.value().brep) - 9.9375) <= 1e-9);
+}
+
+TEST_CASE("opposite open faces make a through pocket") {
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
+  std::array<FaceId, 2> open{};
+  std::size_t count = 0;
+  for (const FaceId face : box.face_ids()) {
+    const auto& plane = std::get<Plane3>(box.geometry().surfaces[box.face(face).surface]);
+    const Vec3d normal = box.face(face).reversed ? plane.normal * -1.0 : plane.normal;
+    if (std::abs(normal[2]) > 0.5) open[count++] = face;
+  }
+  REQUIRE(count == 2u);
+  ShellOptions options;
+  options.thickness = 0.25;
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 0u);
+  CHECK(result.value().brep.solid_shells(result.value().brep.solid_ids().front()).size() == 1u);
+  CHECK(std::abs(volume_of(result.value().brep) - 9.0) <= 1e-9);
+}
+
+TEST_CASE("shell rejects a wall below the boolean resolution") {
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
+  ShellOptions options;
+  options.thickness = 1e-8;
+  const std::array<FaceId, 0> open{};
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::degenerate);
+  CHECK(std::string_view(result.error().message).find("no measurable interior") !=
+        std::string::npos);
+}
+
+TEST_CASE("shell rejects a cavity thinner than the tolerance") {
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
+  ShellOptions options;
+  options.thickness = 0.999999999;
+  const std::array<FaceId, 0> open{};
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::degenerate);
+  CHECK(std::string_view(result.error().message).find("no measurable interior") !=
+        std::string::npos);
+}
+
+TEST_CASE("shell rejects opening every face") {
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
+  const auto faces = box.face_ids();
+  ShellOptions options;
+  options.thickness = 0.25;
+  const Result<ShellResult> result = shell_solid(box, faces, options);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message).find("at least one face must stay closed") !=
+        std::string::npos);
+}
