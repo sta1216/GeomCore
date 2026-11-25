@@ -31,6 +31,46 @@ struct ShellResult {
   std::uint32_t cavity_shells = 0;  // enclosed pockets; 0 when any face is open
 };
 
+namespace detail {
+
+// True when the half-spaces have a point at least `tolerance` inside every
+// plane. Used only after a split failure: a genuine splitter bug must not be
+// reported as a wall that is too thin, while a cavity narrower than the
+// numeric resolution has no such point and is honestly degenerate.
+inline bool shell_half_spaces_have_interior(const std::vector<Plane3>& planes, double tolerance) {
+  const std::size_t count = planes.size();
+  if (count > 64u) return true;  // too many triples to certify a failure; surface it
+  for (std::size_t i = 0; i < count; ++i) {
+    for (std::size_t j = i + 1; j < count; ++j) {
+      for (std::size_t k = j + 1; k < count; ++k) {
+        const Vec3d& ni = planes[i].normal;
+        const Vec3d& nj = planes[j].normal;
+        const Vec3d& nk = planes[k].normal;
+        const Vec3d cjk = cross(nj, nk);
+        const double det = dot(ni, cjk);
+        if (!std::isfinite(det) || std::abs(det) < 1e-15) continue;
+        const Vec3d numerator = cjk * planes[i].offset + cross(nk, ni) * planes[j].offset +
+                                cross(ni, nj) * planes[k].offset;
+        const Vec3d point = numerator * (1.0 / det);
+        if (!std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2])) {
+          continue;
+        }
+        bool interior = true;
+        for (const Plane3& plane : planes) {
+          if (!(plane.signed_distance(Point3d{point[0], point[1], point[2]}) < -tolerance)) {
+            interior = false;
+            break;
+          }
+        }
+        if (interior) return true;
+      }
+    }
+  }
+  return false;
+}
+
+}  // namespace detail
+
 // Hollows a convex planar solid to a uniform wall of `thickness`, leaving an
 // inner cavity (or, for requested open faces, a pocket that opens through
 // them).
@@ -116,7 +156,14 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
       hi[axis] = std::max(hi[axis], point[axis]);
     }
   }
-  const double margin = 2.0 * options.thickness;
+  // The margin must also stay well above the numeric resolution: a seed face
+  // only `3 * thickness` away from a cut would leave a sliver that the stitcher
+  // merges away for very thin walls. A relative floor keeps the seed a real
+  // solid at any thickness.
+  double extent = 0.0;
+  for (int axis = 0; axis < 3; ++axis) extent = std::max(extent, hi[axis] - lo[axis]);
+  const double margin =
+      std::max({2.0 * options.thickness, 1e-6 * std::max(1.0, extent), 1000.0 * tolerance});
   Point3d seed_lo{lo[0] - margin, lo[1] - margin, lo[2] - margin};
   Point3d seed_hi{hi[0] + margin, hi[1] + margin, hi[2] + margin};
   if (!std::isfinite(seed_lo[0]) || !std::isfinite(seed_lo[1]) || !std::isfinite(seed_lo[2]) ||
@@ -129,11 +176,30 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
   }
 
   Brep inner = seed.value();
-  for (std::size_t i = 0; i < view.value().faces.size(); ++i) {
+  // Sequential half-space clipping is order sensitive when an oblique plane
+  // meets a face that an earlier oblique cut already trimmed. Cut the
+  // axis-aligned planes first: those only slice box faces, so the remaining
+  // oblique planes meet convex polygonal faces with clean loops.
+  std::vector<std::size_t> cut_order(view.value().faces.size());
+  for (std::size_t i = 0; i < cut_order.size(); ++i) cut_order[i] = i;
+  const auto oblique = [&view](std::size_t i) {
+    int non_axis = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+      if (std::abs(view.value().outward[i][axis]) > 1e-9) ++non_axis;
+    }
+    return non_axis > 1;
+  };
+  std::stable_partition(cut_order.begin(), cut_order.end(),
+                        [&oblique](std::size_t i) { return !oblique(i); });
+  std::vector<Plane3> planes;
+  planes.reserve(cut_order.size());
+  for (const std::size_t i : cut_order) {
     const bool open = is_open[i] != 0;
-    const Plane3 plane{view.value().outward[i],
-                       view.value().offset[i] + (open ? options.thickness : -options.thickness)};
-
+    planes.push_back(Plane3{view.value().outward[i],
+                            view.value().offset[i] +
+                                (open ? options.thickness : -options.thickness)});
+  }
+  for (const Plane3& plane : planes) {
     // A plane at or below every vertex leaves no interior on its below side;
     // cutting there would either be an identity or a tangency error.
     double distance_min = std::numeric_limits<double>::infinity();
@@ -147,8 +213,11 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
     const Result<SplitSolidResult> split =
         split_solid_by_plane(inner, inner.solid_ids().front(), plane, tolerance);
     if (!split.has_value()) {
-      return Error{Errc::degenerate,
-                   "shell_solid: wall thickness leaves no measurable interior at this tolerance"};
+      if (!detail::shell_half_spaces_have_interior(planes, tolerance)) {
+        return Error{Errc::degenerate,
+                     "shell_solid: wall thickness leaves no measurable interior at this tolerance"};
+      }
+      return split.error();
     }
     if (split.value().below.solid_count() == 0u) {
       return Error{Errc::degenerate, "shell_solid: wall thickness leaves no interior"};
