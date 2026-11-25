@@ -94,6 +94,7 @@ set(GEOM_TEST_SOURCES
   unit/brep_mesh_inside_test.cpp
   unit/trimmed_domain_test.cpp
   unit/tessellate_trimmed_test.cpp
+  unit/chamfer_test.cpp
 )
 
 list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)
