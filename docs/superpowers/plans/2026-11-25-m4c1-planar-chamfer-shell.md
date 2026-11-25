@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add exact constant-distance chamfer and uniform-thickness shell operations for convex, planar-faced, single-shell B-rep solids, with deterministic diagnostics for every unsupported input. Shelling accepts at most one oblique (non-axis-aligned) face; multiple oblique faces are refused explicitly until the splitter is made order independent in M4c-2.
+**Goal:** Add exact constant-distance chamfer and uniform-thickness shell operations for convex, planar-faced, single-shell B-rep solids, with deterministic diagnostics for every unsupported input. Shelling in M4c-1 accepts only **closed, axis-aligned** operands: open faces and oblique (non-axis-aligned) faces are refused explicitly because the sequential splitter and the boolean stitch are face-order sensitive there; M4c-2 lifts both restrictions together with the ordering fix.
 
-**Architecture:** Both operations reduce to repeated half-space cuts. Chamfering an edge cuts the solid with the plane through the two face setback points and keeps the side away from the edge; shelling cuts the solid with every face plane shifted inward and subtracts the resulting inner solid from the original. A requested open face is shifted **outward** so the inner solid protrudes through the opening and the difference cuts a clean pocket instead of leaving two coplanar caps. Cutting reuses `split_solid_by_plane`; the only new geometry code is frame construction, convexity validation, and distance-vs-face-width checks. No new tolerance regime and no global epsilon are introduced.
+**Architecture:** Both operations reduce to repeated half-space cuts. Chamfering an edge cuts the solid with the plane through the two face setback points and keeps the side away from the edge; shelling intersects one inward-shifted half-space per face, seeded by a box, and subtracts the resulting inner solid from the original. Cutting reuses `split_solid_by_plane`; the only new geometry code is frame construction, convexity validation, and distance-vs-face-width checks. No new tolerance regime and no global epsilon are introduced.
 
 **Tech Stack:** C++20, header-only `geom_core`, `geom::v1`, doctest 2.4.11, CMake 4.x, MSVC 19.44 `/W4 /WX /utf-8`, PowerShell on Windows.
 
@@ -16,7 +16,7 @@
 - Public entry points return `Result<T>`; no exceptions cross the API; every failure carries a stable `Errc` and an exact message prefix.
 - Inputs are `const Brep&` and never mutated. Failures leave the caller's document untouched and return no partial solid.
 - Tolerances are explicit arguments; no global epsilon. A geometric guard uses `max(64 * tolerance, 1e-12 * scale)` and the plan states it where used.
-- The only accepted operands in this milestone are a **single solid with a single closed shell, all faces planar, and the solid convex**. Everything else is `Errc::unsupported` with a diagnostic naming the reason. `shell_solid` additionally accepts at most **one** oblique (non-axis-aligned) face: two or more oblique faces are order sensitive inside the sequential splitter and are refused explicitly (M4c-2).
+- The only accepted operands in this milestone are a **single solid with a single closed shell, all faces planar, and the solid convex**. Everything else is `Errc::unsupported` with a diagnostic naming the reason. `shell_solid` additionally requires **every face to be axis-aligned** and the open-face list to be empty: open pockets and oblique faces are order sensitive inside the sequential splitter and the boolean stitch, so they are refused explicitly until M4c-2 fixes the ordering.
 - The only accepted edges are straight `LineCurve3` edges with exactly two coedges on two distinct faces.
 - Tests use doctest, fixed literals, and independent expected values (analytic volumes), not values copied from the implementation. Every public error path has a negative test.
 - Build with `-DGEOM_WERROR=ON`, run both Debug and Release, and keep `/W4 /WX /utf-8` clean on MSVC.
@@ -33,7 +33,7 @@ The convex restriction is a correctness boundary, not an implementation shortcut
 
 1. **Chamfer distance at or beyond the adjacent face width** — a caller can ask for `distance = 2.0` on a 2-wide face. Expected: `Errc::unsupported` naming the width limit, never a closed solid with a collapsed or flipped face.
 2. **Three chamfers meeting at one vertex** — sequential half-space cuts must leave a closed solid with a planar vertex facet, `chi == 2`, and no non-manifold edge. Expected: valid solid and the analytic volume for a fully chamfered cube.
-3. **Open-face shell** — the inner solid is shifted outward through the omitted face. Expected: one open pocket, the omitted face keeps an outer and an inner loop, and the tessellated mesh has zero boundary edges (no coincident cap, no zero-thickness wall).
+3. **Face-order determinism** — a closed axis-aligned box assembled from its six faces in all 720 face orders must shell to the same 10.875 volume. Expected: 720/720 succeed and agree; an open face or an oblique face anywhere in that order is refused with the stable M4c-1 diagnostic.
 4. **Wall thickness at or above the local thickness** — the inner solid vanishes. Expected: `Errc::degenerate` ("wall thickness leaves no interior"), never an empty Brep or a self-intersecting one.
 5. **Curved or non-convex operand** — a cylinder or an L-shaped union is easy to pass by mistake. Expected: `Errc::unsupported` before any cutting, with the input counts unchanged.
 
@@ -43,7 +43,7 @@ The convex restriction is a correctness boundary, not an implementation shortcut
 - Create `include/geom/brep/chamfer.hpp` — `ChamferOptions`, `ChamferResult`, `chamfer_edges`.
 - Create `include/geom/brep/shell.hpp` — `ShellOptions`, `ShellResult`, `shell_solid`.
 - Create `tests/unit/chamfer_test.cpp` — chamfer geometry, multi-edge and diagnostic tests.
-- Create `tests/unit/shell_test.cpp` — closed, open and diagnostic shell tests.
+- Create `tests/unit/shell_test.cpp` — closed, face-order, and diagnostic shell tests.
 - Create `tests/unit/blend_qa_test.cpp` — watertight tessellation, determinism and input-immutability cross-checks.
 - Create `bench/bench_m4c1.cpp` — chamfer-all-edges and closed-shell timings plus volume checksums.
 - Modify `tests/CMakeLists.txt` — register the three test files.
@@ -463,12 +463,12 @@ Expected: compile error for the missing `shell.hpp`.
 
 - [ ] **Step 3: Implement `shell_solid`**
 
-Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (dead or out-of-range is `Errc::index_out_of_range`; an empty closed set is `Errc::unsupported`). Refuse a solid with more than one oblique face (`Errc::unsupported`, "shell_solid: more than one oblique face is not supported") because the sequential splitter is order sensitive there; box-like solids and a single slanted face remain supported. Build the cavity as the intersection of one half-space per face, seeded by a box that contains the input with a numeric margin `max(2 * thickness, 1e-6 * max(1, extent), 1000 * tolerance)` on every side: a closed face cuts with `Plane3{outward[i], offset[i] - thickness}` and keeps `below`; an open face cuts with `Plane3{outward[i], offset[i] + thickness}` and keeps `below`, so the cavity protrudes through the opening. Shifting an open plane outward while starting from the input solid would be an identity cut and leave a coincident cap, so the seed box is required. Cut axis-aligned faces before the one oblique face (stable) so the oblique plane never meets a face an earlier oblique cut already trimmed. Require exactly one solid after each cut. If a plane is at or below every vertex, or a cut leaves no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). If a split fails, test whether the shifted half-spaces still contain a point more than `tolerance` inside every plane by averaging the feasible triple-intersection vertices; if none, return `Errc::degenerate` ("shell_solid: wall thickness leaves no measurable interior at this tolerance"), otherwise propagate the splitter's error code with the `shell_solid:` prefix ("shell_solid: cavity intersection could not be assembled"). Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; a non-finite result is `Errc::non_finite` ("shell_solid: cavity difference failed a numeric check") and any other failure is the "no measurable interior" degenerate case. Require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1` (closed open-list) or `0` when any face is open.
+Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (dead or out-of-range is `Errc::index_out_of_range`; an empty closed set is `Errc::unsupported`). Refuse a solid with any oblique face (`Errc::unsupported`, "shell_solid: only axis-aligned faces are supported"), and refuse a non-empty open-face list (`Errc::unsupported`, "shell_solid: open faces are not supported in M4c-1"): the sequential splitter and the boolean stitch are face-order sensitive for those operands (M4c-2). Build the cavity as the intersection of one half-space per face, seeded by a box that contains the input with a numeric margin `max(2 * thickness, 1e-6 * max(1, extent), 1000 * tolerance)` on every side: a closed face cuts with `Plane3{outward[i], offset[i] - thickness}` and keeps `below`. Require exactly one solid after each cut. If a plane is at or below every vertex, or a cut leaves no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). If a split fails, test whether the shifted half-spaces still contain a point more than `tolerance` inside every plane by averaging the feasible triple-intersection vertices; if none, return `Errc::degenerate` ("shell_solid: wall thickness leaves no measurable interior at this tolerance"), otherwise propagate the splitter's error code with the `shell_solid:` prefix ("shell_solid: cavity intersection could not be assembled"). Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; a non-finite result is `Errc::non_finite` ("shell_solid: cavity difference failed a numeric check") and any other failure is the "no measurable interior" degenerate case. Require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1`.
 
 - [ ] **Step 4: Run Debug and Release tests**
 
 Run both configurations with `--test-case="*shell*"`.
-Expected: eleven added cases (closed, no interior, open top, opposite open, wall below resolution, cavity thinner than the tolerance, all faces open, oblique prism, classifier witness, multiple-oblique refusal, sub-ulp seed); the `*shell*` filter also matches unrelated pre-existing tests, so check the new case names rather than the total.
+Expected: twelve added cases (closed, no interior, 720 Release / 24 Debug face orders, wall below resolution, cavity thinner than the tolerance, all faces open, oblique prism, classifier witness, any-oblique refusal, sub-ulp seed, bad options, duplicate open request); the `*shell*` filter also matches unrelated pre-existing tests, so check the new case names rather than the total.
 
 - [ ] **Step 5: Commit**
 
@@ -479,20 +479,19 @@ git commit -m "feat(brep): shell a convex planar solid with a uniform wall"
 
 ---
 
-### Task 5: Open-face shell and shell diagnostics
+### Task 5: Shell input diagnostics
 
 **Files:**
-- Modify: `include/geom/brep/shell.hpp`
 - Test: `tests/unit/shell_test.cpp`
 
 **Interfaces:**
 - Consumes: Task 4's `shell_solid`.
-- Produces: open-face semantics — every requested face is omitted from the inner half-space intersection, the pocket opens through it, and `cavity_shells` is 0; duplicate open faces are applied once.
+- Produces: negative coverage for option validation, dead handles, and any open-face request (including duplicates), which M4c-1 refuses as a whole.
 
-- [ ] **Step 1: Add diagnostic and duplicate-face tests**
+- [ ] **Step 1: Add diagnostic tests**
 
 ```cpp
-TEST_CASE("shell rejects bad options and unsupported operands") {
+TEST_CASE("shell rejects bad options and dead faces") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 2.0, 2.0});
   const std::array<FaceId, 0> open{};
   ShellOptions options;
@@ -508,7 +507,7 @@ TEST_CASE("shell rejects bad options and unsupported operands") {
   CHECK(shell_solid(box, dead, options).error().code == Errc::index_out_of_range);
 }
 
-TEST_CASE("a duplicate open face is applied once") {
+TEST_CASE("a duplicate open face request is still refused") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
   FaceId top{};
   for (const FaceId face : box.face_ids()) {
@@ -521,31 +520,32 @@ TEST_CASE("a duplicate open face is applied once") {
   options.thickness = 0.25;
   const std::array<FaceId, 2> open{top, top};
   const Result<ShellResult> result = shell_solid(box, open, options);
-  REQUIRE(result.has_value());
-  CHECK(result.value().cavity_shells == 0u);
-  CHECK(std::abs(volume_of(result.value().brep) - 9.9375) <= 1e-9);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::unsupported);
+  CHECK(std::string_view(result.error().message) ==
+        "shell_solid: open faces are not supported in M4c-1");
 }
 ```
 
 - [ ] **Step 2: Run the new cases**
 
 Run: `.\build\Debug\geom_tests.exe --test-case="*shell*"`.
-Expected: both cases pass; the open-face and all-open behavior already landed in Task 4, so this step is test-only. If the duplicate case fails, fix deduplication in `shell_solid` before continuing.
+Expected: both cases pass. Option validation runs before shape validation and before the open-face check; the dead `FaceId` check runs after options and before the open-face refusal.
 
 - [ ] **Step 3: Keep the guards covered**
 
-The Task 4 implementation already deduplicates open faces in first-occurrence order, rejects a dead or out-of-range `FaceId` with `Errc::index_out_of_range`, rejects an empty closed set with `Errc::unsupported` ("shell_solid: at least one face must stay closed"), and maps unrepresentable thin walls to `Errc::degenerate`. A `FaceId` from a *different* `Brep` cannot be detected: handles are only `(index, generation)`. Do not change those contracts here; only adjust the code if Step 2 finds a real defect.
+Open faces are refused before the cavity is built, so duplicate open faces, opposite open faces, and opening every face all produce the same stable `Errc::unsupported`. A `FaceId` from a different `Brep` cannot be detected: handles are only `(index, generation)`. Do not relax these guards in M4c-1.
 
 - [ ] **Step 4: Run Debug and Release tests**
 
 Run both configurations with `--test-case="*shell*"`.
-Expected: the two new cases pass in both configurations alongside the eleven Task 4 cases.
+Expected: the two new cases pass in both configurations alongside the Task 4 cases.
 
 - [ ] **Step 5: Commit**
 
 ```powershell
 git add tests/unit/shell_test.cpp
-git commit -m "test(brep): pin shell diagnostics and duplicate open faces"
+git commit -m "test(brep): pin shell input diagnostics"
 ```
 
 ---
@@ -741,7 +741,7 @@ git commit -m "docs(m4c1): record planar chamfer and shell evidence"
 ## M4c-1 Exit Criteria
 
 - `chamfer_edges` accepts a convex single-shell planar solid and a non-empty list of straight two-coedge edges, returns a valid closed solid, and matches the analytic volume for one edge, two adjacent edges, and all twelve cube edges.
-- `shell_solid` returns a closed cavity for an empty open list and one open pocket for one or more open faces, with the analytic volumes for the box fixtures.
+- `shell_solid` returns a closed cavity for an empty open list on a closed, axis-aligned convex solid, with the analytic volume for the box fixture; it refuses any open face and any oblique face with a stable `Errc::unsupported`, independent of face order (720 Release permutations / 24 Debug permutations).
 - Every unsupported input (curved face, non-convex solid, dead face/edge, empty list, coplanar edge, oversized distance, vanishing wall) returns a stable `Errc` and message and leaves the input unchanged.
 - Tessellation of every output has zero boundary edges; two runs are bit-identical; `validate_topology` is clean.
 - `docs/benchmarks/m4c1-blends.md`, ADR-0041 and the architecture §8.9/§16.4 text carry the measured numbers and the explicit convex-planar limit.
@@ -767,5 +767,5 @@ git commit -m "docs(m4c1): record planar chamfer and shell evidence"
 - **Spec coverage:** The plan implements the two blend operations that reduce exactly to half-space cuts. Fillet, variable radius, chamfer angle, non-convex and curved operands, offset and sweep are explicitly deferred to M4c-2, so §8.9 is only partially covered by design; the deferral is written into ADR-0041 and §16.4 rather than implied.
 - **Step scan:** Each step names the test or the exact function to write; no step says "handle edge cases" or "add validation" without the check and its error.
 - **Type consistency:** `ChamferOptions`/`ChamferResult`/`chamfer_edges` and `ShellOptions`/`ShellResult`/`shell_solid` are used with the same names in tests, QA and bench; the shared detail frame is declared once in Task 1 and consumed by Tasks 2–5.
-- **Review Focus:** face-width overshoot (Task 3), vertex facet (Task 2), open pocket (Task 5), vanishing wall (Task 4), curved/non-convex rejection (Tasks 3 and 5) each have a named test.
+- **Review Focus:** face-width overshoot (Task 3), vertex facet (Task 2), face-order determinism (Task 4), open/oblique refusal (Tasks 4 and 5), vanishing wall (Task 4), curved/non-convex rejection (Tasks 3 and 5) each have a named test.
 - **Proportion:** The plan lists signatures and tests; code bodies are left to the implementer except the test assertions and the exact volume formulas.

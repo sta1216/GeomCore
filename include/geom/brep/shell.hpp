@@ -92,18 +92,16 @@ inline bool shell_half_spaces_have_interior(const std::vector<Plane3>& planes, d
 }  // namespace detail
 
 // Hollows a convex planar solid to a uniform wall of `thickness`, leaving an
-// inner cavity (or, for requested open faces, a pocket that opens through
-// them).
+// inner cavity. M4c-1 accepts closed, axis-aligned solids only: an open face
+// list, an oblique face, a non-convex body, or a curved face is refused with a
+// stable `Errc::unsupported` diagnostic rather than returning an order-
+// dependent solid. M4c-2 lifts the open-face and oblique restrictions together
+// with the splitter/boolean face-order fix.
 //
 // The cavity is built as a half-space intersection, not by cutting the input:
 // a bounding box around the input, expanded by twice the wall thickness, is
-// cut once per face. A closed face is moved inward by `thickness`; an open
-// face is moved outward, so its half-space keeps the cavity open through the
-// face and lets the inner tool protrude. The final regularized difference
-// A - cavity then keeps every closed wall and removes the material in front of
-// an open one. Building the cavity from a seed box (rather than from the input)
-// is what makes an open pocket possible: an inward cut can only remove
-// material, never extend the cavity past the face.
+// cut once per face, with each face plane moved inward by `thickness`. The
+// final regularized difference A - cavity then leaves the uniform wall.
 //
 // A half-space that leaves nothing below it means the requested wall consumes
 // the body in that direction and is reported as degenerate.
@@ -145,27 +143,20 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
     }
     is_open[static_cast<std::size_t>(found - view.value().faces.begin())] = 1;
   }
-  bool any_open = false;
-  for (const char flag : is_open) {
-    if (flag != 0) any_open = true;
-  }
-
+  const bool any_open =
+      std::any_of(is_open.begin(), is_open.end(), [](char flag) { return flag != 0; });
   if (any_open) {
-    std::size_t closed_faces = 0;
-    for (const char flag : is_open) {
-      if (flag == 0) ++closed_faces;
-    }
-    if (closed_faces == 0u) {
-      return Error{Errc::unsupported, "shell_solid: at least one face must stay closed"};
-    }
+    return Error{Errc::unsupported, "shell_solid: open faces are not supported in M4c-1"};
   }
 
   const double tolerance = options.tolerance;
 
-  // This slice of the heal/blend milestone supports box-like shells and a
-  // single slanted face. Sequential half-space clipping of two or more oblique
-  // faces is order sensitive inside the splitter, so refuse it explicitly
-  // instead of producing an order-dependent result.
+  // This slice of the heal/blend milestone supports closed, axis-aligned
+  // convex solids (boxes and prisms built from box faces). Sequential
+  // half-space clipping and the boolean stitch are order sensitive for open
+  // pockets and oblique faces, so refuse those inputs explicitly rather than
+  // returning an order-dependent result. M4c-2 lifts the restriction together
+  // with the splitter/boolean ordering fix.
   std::size_t oblique_faces = 0;
   for (std::size_t i = 0; i < view.value().faces.size(); ++i) {
     int non_axis = 0;
@@ -174,8 +165,8 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
     }
     if (non_axis > 1) ++oblique_faces;
   }
-  if (oblique_faces > 1u) {
-    return Error{Errc::unsupported, "shell_solid: more than one oblique face is not supported"};
+  if (oblique_faces > 0u) {
+    return Error{Errc::unsupported, "shell_solid: only axis-aligned faces are supported"};
   }
 
   // The cavity is the intersection of one half-space per face, seeded by a box
