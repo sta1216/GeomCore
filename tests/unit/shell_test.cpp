@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -174,4 +175,92 @@ TEST_CASE("shell cuts axis-aligned faces before an oblique face") {
   REQUIRE(pocket.has_value());
   CHECK(pocket.value().cavity_shells == 0u);
   CHECK(std::abs(volume_of(pocket.value().brep) - 3.71645021472478) <= 1e-9);
+}
+
+TEST_CASE("shell half-space classifier sees a bounded interior") {
+  const std::vector<Plane3> box{
+      {{-1, 0, 0}, -0.25}, {{1, 0, 0}, 1.75}, {{0, -1, 0}, -0.25},
+      {{0, 1, 0}, 1.75},   {{0, 0, -1}, -0.25}, {{0, 0, 1}, 1.75}};
+  CHECK(detail::shell_half_spaces_have_interior(box, 1e-9));
+
+  std::vector<Plane3> thin = box;
+  thin[1].offset = 0.250000002;  // 2e-9 wide, so the half-width equals the tolerance
+  CHECK_FALSE(detail::shell_half_spaces_have_interior(thin, 1e-9));
+}
+
+TEST_CASE("shell reports an all-oblique splitter failure without calling it thin") {
+  const double a = 30.0 * 3.14159265358979323846 / 180.0;
+  const double b = 20.0 * 3.14159265358979323846 / 180.0;
+  const auto rot = [a, b](const Vec3d& p) {
+    const double x = std::cos(a) * p[0] - std::sin(a) * p[1];
+    const double y = std::sin(a) * p[0] + std::cos(a) * p[1];
+    const double y2 = std::cos(b) * y - std::sin(b) * p[2];
+    const double z2 = std::sin(b) * y + std::cos(b) * p[2];
+    return Vec3d{x, y2, z2};
+  };
+  const Point3d center{1.0, 1.0, 1.0};
+  std::array<Point3d, 8> corners{};
+  std::size_t c = 0;
+  for (int sx = -1; sx <= 1; sx += 2) {
+    for (int sy = -1; sy <= 1; sy += 2) {
+      for (int sz = -1; sz <= 1; sz += 2) {
+        const Vec3d offset = rot(Vec3d{static_cast<double>(sx), static_cast<double>(sy),
+                                       static_cast<double>(sz)});
+        corners[c++] = Point3d{center[0] + offset[0], center[1] + offset[1], center[2] + offset[2]};
+      }
+    }
+  }
+  std::vector<AssembledFace> faces;
+  for (int axis = 0; axis < 3; ++axis) {
+    for (int sign = -1; sign <= 1; sign += 2) {
+      Vec3d n{0, 0, 0};
+      n[axis] = static_cast<double>(sign);
+      const Vec3d normal = rot(n);
+      Vec3d basis{0, 0, 0};
+      basis[(axis + 1) % 3] = 1.0;
+      const Vec3d u = rot(basis);
+      const Vec3d v = cross(normal, u);
+      std::vector<Point3d> points;
+      for (const Point3d& p : corners) {
+        const Vec3d d = p - center;
+        if (dot(d, normal) > 0.0) points.push_back(p);
+      }
+      REQUIRE(points.size() == 4u);
+      std::sort(points.begin(), points.end(), [&](const Point3d& l, const Point3d& r) {
+        const Vec3d dl = l - center;
+        const Vec3d dr = r - center;
+        return std::atan2(dot(dl, v), dot(dl, u)) < std::atan2(dot(dr, v), dot(dr, u));
+      });
+      faces.push_back(AssembledFace{points, {}, normal});
+    }
+  }
+  const Result<Brep> solid = assemble_solid(faces, 1e-9);
+  REQUIRE(solid.has_value());
+  REQUIRE(validate_topology(solid.value()).ok());
+
+  ShellOptions options;
+  options.thickness = 0.25;
+  const Result<ShellResult> result = shell_solid(solid.value(), {}, options);
+  if (result.has_value()) {
+    CHECK(std::abs(volume_of(result.value().brep) - 4.625) <= 1e-9);
+  } else {
+    // The sequential splitter cannot clip this all-oblique cavity yet. That is
+    // a splitter limitation, not a thin wall, so the code must stay honest.
+    CHECK(result.error().code == Errc::invalid_topology);
+    CHECK(std::string_view(result.error().message).starts_with("shell_solid:"));
+  }
+}
+
+
+TEST_CASE("shell keeps a representable seed below one coordinate ulp") {
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
+  ShellOptions options;
+  options.thickness = 1e-300;
+  options.tolerance = 1e-9;
+  const std::array<FaceId, 0> open{};
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::degenerate);
+  CHECK(std::string_view(result.error().message) ==
+        "shell_solid: wall thickness leaves no measurable interior at this tolerance");
 }

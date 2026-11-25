@@ -33,13 +33,21 @@ struct ShellResult {
 
 namespace detail {
 
-// True when the half-spaces have a point at least `tolerance` inside every
-// plane. Used only after a split failure: a genuine splitter bug must not be
-// reported as a wall that is too thin, while a cavity narrower than the
+// True when the half-spaces have a point strictly more than `tolerance` inside
+// every plane. Used only after a split failure: a genuine splitter bug must not
+// be reported as a wall that is too thin, while a cavity narrower than the
 // numeric resolution has no such point and is honestly degenerate.
+//
+// A triple intersection lies exactly on its three planes, so it can never be
+// the witness itself. Instead collect the vertices of the intersection that
+// satisfy every other half-space, and test their centroid: a convex
+// combination of feasible vertices is strictly inside the intersection, and its
+// clearance is the smallest wall half-width for a slab-like cavity.
 inline bool shell_half_spaces_have_interior(const std::vector<Plane3>& planes, double tolerance) {
   const std::size_t count = planes.size();
   if (count > 64u) return true;  // too many triples to certify a failure; surface it
+  std::vector<Point3d> vertices;
+  vertices.reserve(count);
   for (std::size_t i = 0; i < count; ++i) {
     for (std::size_t j = i + 1; j < count; ++j) {
       for (std::size_t k = j + 1; k < count; ++k) {
@@ -55,18 +63,30 @@ inline bool shell_half_spaces_have_interior(const std::vector<Plane3>& planes, d
         if (!std::isfinite(point[0]) || !std::isfinite(point[1]) || !std::isfinite(point[2])) {
           continue;
         }
-        bool interior = true;
+        const Point3d candidate{point[0], point[1], point[2]};
+        bool feasible = true;
         for (const Plane3& plane : planes) {
-          if (!(plane.signed_distance(Point3d{point[0], point[1], point[2]}) < -tolerance)) {
-            interior = false;
+          if (plane.signed_distance(candidate) > tolerance) {
+            feasible = false;
             break;
           }
         }
-        if (interior) return true;
+        if (feasible) vertices.push_back(candidate);
       }
     }
   }
-  return false;
+  if (vertices.empty()) return false;
+  Point3d centroid = vertices.front();
+  for (std::size_t i = 1; i < vertices.size(); ++i) {
+    centroid = centroid + (vertices[i] - centroid) * (1.0 / static_cast<double>(i + 1));
+  }
+  // Equality means the cavity is exactly two tolerances wide: the assembler
+  // cannot stitch that wall, so it counts as unmeasurable rather than interior.
+  const double required = tolerance * (1.0 + 4.0 * std::numeric_limits<double>::epsilon());
+  for (const Plane3& plane : planes) {
+    if (!(plane.signed_distance(centroid) < -required)) return false;
+  }
+  return true;
 }
 
 }  // namespace detail
@@ -217,7 +237,9 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
         return Error{Errc::degenerate,
                      "shell_solid: wall thickness leaves no measurable interior at this tolerance"};
       }
-      return split.error();
+      // A real splitter failure: keep its code, but keep the public prefix.
+      return Error{split.error().code,
+                   "shell_solid: cavity intersection could not be assembled"};
     }
     if (split.value().below.solid_count() == 0u) {
       return Error{Errc::degenerate, "shell_solid: wall thickness leaves no interior"};
@@ -235,7 +257,9 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
   if (!difference.has_value()) {
     // A wall that is only a few tolerances wide cannot be stitched back onto
     // the outer solid; report the geometric limit rather than a stitcher error.
-    if (difference.error().code == Errc::non_finite) return difference.error();
+    if (difference.error().code == Errc::non_finite) {
+      return Error{Errc::non_finite, "shell_solid: cavity difference failed a numeric check"};
+    }
     return Error{Errc::degenerate,
                  "shell_solid: wall thickness leaves no measurable interior at this tolerance"};
   }
