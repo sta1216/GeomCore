@@ -162,6 +162,22 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
 
   const double tolerance = options.tolerance;
 
+  // This slice of the heal/blend milestone supports box-like shells and a
+  // single slanted face. Sequential half-space clipping of two or more oblique
+  // faces is order sensitive inside the splitter, so refuse it explicitly
+  // instead of producing an order-dependent result.
+  std::size_t oblique_faces = 0;
+  for (std::size_t i = 0; i < view.value().faces.size(); ++i) {
+    int non_axis = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+      if (std::abs(view.value().outward[i][axis]) > 1e-9) ++non_axis;
+    }
+    if (non_axis > 1) ++oblique_faces;
+  }
+  if (oblique_faces > 1u) {
+    return Error{Errc::unsupported, "shell_solid: more than one oblique face is not supported"};
+  }
+
   // The cavity is the intersection of one half-space per face, seeded by a box
   // that contains the solid with room to spare on every side. A closed face
   // cuts `thickness` inside the input; an open face cuts `thickness` outside it,
@@ -197,9 +213,10 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
 
   Brep inner = seed.value();
   // Sequential half-space clipping is order sensitive when an oblique plane
-  // meets a face that an earlier oblique cut already trimmed. Cut the
-  // axis-aligned planes first: those only slice box faces, so the remaining
-  // oblique planes meet convex polygonal faces with clean loops.
+  // meets a face that an earlier oblique cut already trimmed. This slice of
+  // M4c supports at most one oblique face; box-like parts and extrusions with a
+  // single slanted face have a deterministic, well-conditioned cut order.
+  // Cutting axis-aligned planes first also keeps those cuts on box faces.
   std::vector<std::size_t> cut_order(view.value().faces.size());
   for (std::size_t i = 0; i < cut_order.size(); ++i) cut_order[i] = i;
   const auto oblique = [&view](std::size_t i) {
@@ -238,7 +255,7 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
                      "shell_solid: wall thickness leaves no measurable interior at this tolerance"};
       }
       // A real splitter failure: keep its code, but keep the public prefix.
-      return Error{split.error().code,
+      return Error{Errc::invalid_topology,
                    "shell_solid: cavity intersection could not be assembled"};
     }
     if (split.value().below.solid_count() == 0u) {

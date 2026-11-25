@@ -172,6 +172,7 @@ TEST_CASE("shell cuts axis-aligned faces before an oblique face") {
   REQUIRE_FALSE(top_face.is_null());
   const std::array<FaceId, 1> open{top_face};
   const Result<ShellResult> pocket = shell_solid(prism.value(), open, options);
+  if (!pocket.has_value()) INFO(pocket.error().message);
   REQUIRE(pocket.has_value());
   CHECK(pocket.value().cavity_shells == 0u);
   CHECK(std::abs(volume_of(pocket.value().brep) - 3.71645021472478) <= 1e-9);
@@ -188,7 +189,7 @@ TEST_CASE("shell half-space classifier sees a bounded interior") {
   CHECK_FALSE(detail::shell_half_spaces_have_interior(thin, 1e-9));
 }
 
-TEST_CASE("shell reports an all-oblique splitter failure without calling it thin") {
+TEST_CASE("shell refuses multiple oblique faces in any face order") {
   const double a = 30.0 * 3.14159265358979323846 / 180.0;
   const double b = 20.0 * 3.14159265358979323846 / 180.0;
   const auto rot = [a, b](const Vec3d& p) {
@@ -234,21 +235,22 @@ TEST_CASE("shell reports an all-oblique splitter failure without calling it thin
       faces.push_back(AssembledFace{points, {}, normal});
     }
   }
-  const Result<Brep> solid = assemble_solid(faces, 1e-9);
-  REQUIRE(solid.has_value());
-  REQUIRE(validate_topology(solid.value()).ok());
-
   ShellOptions options;
   options.thickness = 0.25;
-  const Result<ShellResult> result = shell_solid(solid.value(), {}, options);
-  if (result.has_value()) {
-    CHECK(std::abs(volume_of(result.value().brep) - 4.625) <= 1e-9);
-  } else {
-    // The sequential splitter cannot clip this all-oblique cavity yet. That is
-    // a splitter limitation, not a thin wall, so the code must stay honest.
-    CHECK(result.error().code == Errc::invalid_topology);
-    CHECK(std::string_view(result.error().message).starts_with("shell_solid:"));
-  }
+  const auto check = [&options](std::vector<AssembledFace> input, const char* order) {
+    INFO("face order: " << order);
+    const Result<Brep> solid = assemble_solid(input, 1e-9);
+    REQUIRE(solid.has_value());
+    REQUIRE(validate_topology(solid.value()).ok());
+    const Result<ShellResult> result = shell_solid(solid.value(), {}, options);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == Errc::unsupported);
+    CHECK(std::string_view(result.error().message) ==
+          "shell_solid: more than one oblique face is not supported");
+  };
+  check(faces, "canonical");
+  std::reverse(faces.begin(), faces.end());
+  check(faces, "reversed");
 }
 
 
