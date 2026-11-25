@@ -463,12 +463,12 @@ Expected: compile error for the missing `shell.hpp`.
 
 - [ ] **Step 3: Implement `shell_solid`**
 
-Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (alive, in the solid). Start `inner = brep`; for a closed face cut with `Plane3{outward[i], offset[i] - thickness}` and keep `below`; for a requested open face cut with `Plane3{outward[i], offset[i] + thickness}` and keep `below`, so the inner solid extends past the opening. Require exactly one solid after each cut. If the below result has no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1` (closed open-list) or `0` when any face is open.
+Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (alive, in the solid). Build the cavity as the intersection of one half-space per face, seeded by a box that contains the input with a `2 * thickness` margin on every side: a closed face cuts with `Plane3{outward[i], offset[i] - thickness}` and keeps `below`; an open face cuts with `Plane3{outward[i], offset[i] + thickness}` and keeps `below`, so the cavity protrudes through the opening. Shifting an open plane outward while starting from the input solid would be an identity cut and leave a coincident cap, so the seed box is required. Require exactly one solid after each cut. If a plane is at or below every vertex, or a cut leaves no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). Map a splitter or boolean failure at this stage to `Errc::degenerate` ("shell_solid: wall thickness leaves no measurable interior at this tolerance"): a cavity only a few tolerances wide cannot be represented, and the stitcher message is not part of the contract. Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1` (closed open-list) or `0` when any face is open.
 
 - [ ] **Step 4: Run Debug and Release tests**
 
 Run both configurations with `--test-case="*shell*"`.
-Expected: 2 cases, 9 assertions, 0 failures.
+Expected: 7 added cases (closed, no interior, open top, opposite open, wall below resolution, cavity thinner than the tolerance, all faces open); the `*shell*` filter also matches unrelated pre-existing tests, so check the new case names rather than the total.
 
 - [ ] **Step 5: Commit**
 
@@ -489,50 +489,9 @@ git commit -m "feat(brep): shell a convex planar solid with a uniform wall"
 - Consumes: Task 4's `shell_solid`.
 - Produces: open-face semantics — every requested face is omitted from the inner half-space intersection, the pocket opens through it, and `cavity_shells` is 0; duplicate open faces are applied once.
 
-- [ ] **Step 1: Add the failing open-face and diagnostic tests**
+- [ ] **Step 1: Add diagnostic and duplicate-face tests**
 
 ```cpp
-TEST_CASE("open-top shell opens one pocket") {
-  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
-  // The +Z face is the one whose outward normal is (0,0,1).
-  FaceId top{};
-  for (const FaceId face : box.face_ids()) {
-    const auto& plane = std::get<Plane3>(box.geometry().surfaces[box.face(face).surface]);
-    const Vec3d n = box.face(face).reversed ? plane.normal * -1.0 : plane.normal;
-    if (n[2] > 0.5) top = face;
-  }
-  REQUIRE_FALSE(top.is_null());
-  ShellOptions options;
-  options.thickness = 0.25;
-  const std::array<FaceId, 1> open{top};
-  const Result<ShellResult> result = shell_solid(box, open, options);
-  REQUIRE(result.has_value());
-  CHECK(result.value().cavity_shells == 0u);
-  CHECK(result.value().brep.solid_count() == 1u);
-  CHECK(result.value().brep.solid_shells(result.value().brep.solid_ids().front()).size() == 1u);
-  CHECK(validate_topology(result.value().brep).ok());
-  // 24 - (1.5 * 2.5 * 3.75).
-  CHECK(std::abs(volume_of(result.value().brep) - 9.9375) <= 1e-9);
-}
-
-TEST_CASE("opposite open faces make a through pocket") {
-  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
-  std::array<FaceId, 2> open{};
-  std::size_t count = 0;
-  for (const FaceId face : box.face_ids()) {
-    const auto& plane = std::get<Plane3>(box.geometry().surfaces[box.face(face).surface]);
-    const Vec3d n = box.face(face).reversed ? plane.normal * -1.0 : plane.normal;
-    if (std::abs(n[2]) > 0.5) open[count++] = face;
-  }
-  REQUIRE(count == 2u);
-  ShellOptions options;
-  options.thickness = 0.25;
-  const Result<ShellResult> result = shell_solid(box, open, options);
-  REQUIRE(result.has_value());
-  CHECK(result.value().cavity_shells == 0u);
-  CHECK(std::abs(volume_of(result.value().brep) - 9.0) <= 1e-9);
-}
-
 TEST_CASE("shell rejects bad options and unsupported operands") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 2.0, 2.0});
   const std::array<FaceId, 0> open{};
@@ -544,31 +503,50 @@ TEST_CASE("shell rejects bad options and unsupported operands") {
   options.tolerance = std::numeric_limits<double>::infinity();
   CHECK(shell_solid(box, open, options).error().code == Errc::non_finite);
 
-  const std::array<FaceId, 1> dead{FaceId{}};
+  const Brep other = box_solid(Point3d{10.0, 0.0, 0.0}, Point3d{12.0, 2.0, 2.0});
+  const std::array<FaceId, 1> foreign{other.face_ids().front()};
   options.tolerance = 1e-9;
-  CHECK(shell_solid(box, dead, options).error().code == Errc::index_out_of_range);
+  CHECK(shell_solid(box, foreign, options).error().code == Errc::index_out_of_range);
+}
+
+TEST_CASE("a duplicate open face is applied once") {
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
+  FaceId top{};
+  for (const FaceId face : box.face_ids()) {
+    const auto& plane = std::get<Plane3>(box.geometry().surfaces[box.face(face).surface]);
+    const Vec3d normal = box.face(face).reversed ? plane.normal * -1.0 : plane.normal;
+    if (normal[2] > 0.5) top = face;
+  }
+  REQUIRE_FALSE(top.is_null());
+  ShellOptions options;
+  options.thickness = 0.25;
+  const std::array<FaceId, 2> open{top, top};
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 0u);
+  CHECK(std::abs(volume_of(result.value().brep) - 9.9375) <= 1e-9);
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [ ] **Step 2: Run the new cases**
 
-Run: `.\build\Debug\geom_tests.exe --test-case="*shell*"`
-Expected: the open-top case fails or returns the wrong volume; the dead-face case may crash, so run this exact filter first and fix the guard before rerunning the suite.
+Run: `.\build\Debug\geom_tests.exe --test-case="*shell*"`.
+Expected: both cases pass; the open-face and all-open behavior already landed in Task 4, so this step is test-only. If the duplicate case fails, fix deduplication in `shell_solid` before continuing.
 
-- [ ] **Step 3: Implement open-face handling**
+- [ ] **Step 3: Keep the guards covered**
 
-Omit each requested face from the inner half-space intersection by shifting its plane **outward** by `thickness` and keeping the below side. The inner solid then protrudes through the opening, so the final difference opens the pocket without coincident coplanar caps. If every face is open, return `Errc::unsupported` ("shell_solid: at least one face must stay closed"). Deduplicate open faces in first-occurrence order. Reject a face that is not part of the solid's single shell with `Errc::invalid_topology`.
+The Task 4 implementation already deduplicates open faces in first-occurrence order, rejects a face that is not in the solid with `Errc::index_out_of_range`, rejects an empty closed set with `Errc::unsupported` ("shell_solid: at least one face must stay closed"), and maps unrepresentable thin walls to `Errc::degenerate`. Do not change those contracts here; only adjust the code if Step 2 finds a real defect.
 
 - [ ] **Step 4: Run Debug and Release tests**
 
 Run both configurations with `--test-case="*shell*"`.
-Expected: 5 cases, 22 assertions, 0 failures.
+Expected: the two new cases pass in both configurations alongside the seven Task 4 cases.
 
 - [ ] **Step 5: Commit**
 
 ```powershell
-git add include/geom/brep/shell.hpp tests/unit/shell_test.cpp
-git commit -m "feat(brep): open a shell pocket through selected faces"
+git add tests/unit/shell_test.cpp
+git commit -m "test(brep): pin shell diagnostics and duplicate open faces"
 ```
 
 ---
