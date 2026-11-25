@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add exact constant-distance chamfer and uniform-thickness shell operations for convex, planar-faced, single-shell B-rep solids, with deterministic diagnostics for every unsupported input.
+**Goal:** Add exact constant-distance chamfer and uniform-thickness shell operations for convex, planar-faced, single-shell B-rep solids, with deterministic diagnostics for every unsupported input. Shelling accepts at most one oblique (non-axis-aligned) face; multiple oblique faces are refused explicitly until the splitter is made order independent in M4c-2.
 
 **Architecture:** Both operations reduce to repeated half-space cuts. Chamfering an edge cuts the solid with the plane through the two face setback points and keeps the side away from the edge; shelling cuts the solid with every face plane shifted inward and subtracts the resulting inner solid from the original. A requested open face is shifted **outward** so the inner solid protrudes through the opening and the difference cuts a clean pocket instead of leaving two coplanar caps. Cutting reuses `split_solid_by_plane`; the only new geometry code is frame construction, convexity validation, and distance-vs-face-width checks. No new tolerance regime and no global epsilon are introduced.
 
@@ -16,7 +16,7 @@
 - Public entry points return `Result<T>`; no exceptions cross the API; every failure carries a stable `Errc` and an exact message prefix.
 - Inputs are `const Brep&` and never mutated. Failures leave the caller's document untouched and return no partial solid.
 - Tolerances are explicit arguments; no global epsilon. A geometric guard uses `max(64 * tolerance, 1e-12 * scale)` and the plan states it where used.
-- The only accepted operands in this milestone are a **single solid with a single closed shell, all faces planar, and the solid convex**. Everything else is `Errc::unsupported` with a diagnostic naming the reason.
+- The only accepted operands in this milestone are a **single solid with a single closed shell, all faces planar, and the solid convex**. Everything else is `Errc::unsupported` with a diagnostic naming the reason. `shell_solid` additionally accepts at most **one** oblique (non-axis-aligned) face: two or more oblique faces are order sensitive inside the sequential splitter and are refused explicitly (M4c-2).
 - The only accepted edges are straight `LineCurve3` edges with exactly two coedges on two distinct faces.
 - Tests use doctest, fixed literals, and independent expected values (analytic volumes), not values copied from the implementation. Every public error path has a negative test.
 - Build with `-DGEOM_WERROR=ON`, run both Debug and Release, and keep `/W4 /WX /utf-8` clean on MSVC.
@@ -463,12 +463,12 @@ Expected: compile error for the missing `shell.hpp`.
 
 - [ ] **Step 3: Implement `shell_solid`**
 
-Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (dead or out-of-range is `Errc::index_out_of_range`; an empty closed set is `Errc::unsupported`). Build the cavity as the intersection of one half-space per face, seeded by a box that contains the input with a numeric margin `max(2 * thickness, 1e-6 * max(1, extent), 1000 * tolerance)` on every side: a closed face cuts with `Plane3{outward[i], offset[i] - thickness}` and keeps `below`; an open face cuts with `Plane3{outward[i], offset[i] + thickness}` and keeps `below`, so the cavity protrudes through the opening. Shifting an open plane outward while starting from the input solid would be an identity cut and leave a coincident cap, so the seed box is required. Cut axis-aligned faces before oblique ones (stable) so an oblique plane never meets a face an earlier oblique cut already trimmed. Require exactly one solid after each cut. If a plane is at or below every vertex, or a cut leaves no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). If a split fails, test whether the shifted half-spaces still contain a point more than `tolerance` inside every plane by averaging the feasible triple-intersection vertices; if none, return `Errc::degenerate` ("shell_solid: wall thickness leaves no measurable interior at this tolerance"), otherwise propagate the splitter's error code with the `shell_solid:` prefix ("shell_solid: cavity intersection could not be assembled"). Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; a non-finite result is `Errc::non_finite` ("shell_solid: cavity difference failed a numeric check") and any other failure is the "no measurable interior" degenerate case. Require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1` (closed open-list) or `0` when any face is open.
+Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (dead or out-of-range is `Errc::index_out_of_range`; an empty closed set is `Errc::unsupported`). Refuse a solid with more than one oblique face (`Errc::unsupported`, "shell_solid: more than one oblique face is not supported") because the sequential splitter is order sensitive there; box-like solids and a single slanted face remain supported. Build the cavity as the intersection of one half-space per face, seeded by a box that contains the input with a numeric margin `max(2 * thickness, 1e-6 * max(1, extent), 1000 * tolerance)` on every side: a closed face cuts with `Plane3{outward[i], offset[i] - thickness}` and keeps `below`; an open face cuts with `Plane3{outward[i], offset[i] + thickness}` and keeps `below`, so the cavity protrudes through the opening. Shifting an open plane outward while starting from the input solid would be an identity cut and leave a coincident cap, so the seed box is required. Cut axis-aligned faces before the one oblique face (stable) so the oblique plane never meets a face an earlier oblique cut already trimmed. Require exactly one solid after each cut. If a plane is at or below every vertex, or a cut leaves no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). If a split fails, test whether the shifted half-spaces still contain a point more than `tolerance` inside every plane by averaging the feasible triple-intersection vertices; if none, return `Errc::degenerate` ("shell_solid: wall thickness leaves no measurable interior at this tolerance"), otherwise propagate the splitter's error code with the `shell_solid:` prefix ("shell_solid: cavity intersection could not be assembled"). Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; a non-finite result is `Errc::non_finite` ("shell_solid: cavity difference failed a numeric check") and any other failure is the "no measurable interior" degenerate case. Require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1` (closed open-list) or `0` when any face is open.
 
 - [ ] **Step 4: Run Debug and Release tests**
 
 Run both configurations with `--test-case="*shell*"`.
-Expected: eleven added cases (closed, no interior, open top, opposite open, wall below resolution, cavity thinner than the tolerance, all faces open, oblique prism, classifier witness, all-oblique cavity, sub-ulp seed); the `*shell*` filter also matches unrelated pre-existing tests, so check the new case names rather than the total.
+Expected: eleven added cases (closed, no interior, open top, opposite open, wall below resolution, cavity thinner than the tolerance, all faces open, oblique prism, classifier witness, multiple-oblique refusal, sub-ulp seed); the `*shell*` filter also matches unrelated pre-existing tests, so check the new case names rather than the total.
 
 - [ ] **Step 5: Commit**
 
@@ -539,7 +539,7 @@ The Task 4 implementation already deduplicates open faces in first-occurrence or
 - [ ] **Step 4: Run Debug and Release tests**
 
 Run both configurations with `--test-case="*shell*"`.
-Expected: the two new cases pass in both configurations alongside the eight Task 4 cases.
+Expected: the two new cases pass in both configurations alongside the eleven Task 4 cases.
 
 - [ ] **Step 5: Commit**
 
