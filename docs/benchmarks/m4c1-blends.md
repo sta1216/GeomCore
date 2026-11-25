@@ -31,9 +31,9 @@ and 3 on a checksum mismatch. The executable is built only with
 - `*shell*`: 45 cases / 1,161 assertions in Release (the filter also matches the
   pre-existing `brep_shell_test.cpp` cases); Debug 45 / 465. New shell cases: 12.
 - New QA cases: `chamfer and shell outputs tessellate watertight` (8 assertions)
-  and `blend outputs are deterministic and leave inputs unchanged` (29
-  assertions), 2 cases / 37 assertions in both configurations.
-- Full Release: 1,115 cases / 681,668 assertions, 0 failed (786 s).
+  and `blend outputs are deterministic and leave inputs unchanged` (31
+  assertions), 2 cases / 39 assertions in both configurations.
+- Full Release: 1,115 cases / 681,670 assertions, 0 failed (845 s).
 - Full Debug remains PENDING for the same eight long
   `brep_boolean_curved_test.cpp` half-space booleans documented in M4b-2; the
   Debug shell/QA filters were run separately.

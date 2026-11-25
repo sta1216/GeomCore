@@ -27,6 +27,17 @@ Brep box_solid(Point3d lo, Point3d hi) {
   return box.value();
 }
 
+bool same_positions(const std::vector<Point3d>& lhs,
+                    const std::vector<Point3d>& rhs) {
+  if (lhs.size() != rhs.size()) return false;
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    for (int axis = 0; axis < 3; ++axis) {
+      if (lhs[i][axis] != rhs[i][axis]) return false;
+    }
+  }
+  return true;
+}
+
 // Returns the number of triangle edges used exactly once.
 std::size_t boundary_edges(const TriMesh& mesh) {
   std::map<std::pair<std::uint32_t, std::uint32_t>, int> uses;
@@ -92,7 +103,7 @@ TEST_CASE("blend outputs are deterministic and leave inputs unchanged") {
   const Result<TriMesh> mesh_b = tessellate(second.value().brep, TessellationOptions{});
   REQUIRE(mesh_a.has_value());
   REQUIRE(mesh_b.has_value());
-  CHECK(mesh_a.value().positions.size() == mesh_b.value().positions.size());
+  CHECK(same_positions(mesh_a.value().positions, mesh_b.value().positions));
   CHECK(mesh_a.value().triangles == mesh_b.value().triangles);
 
   ShellOptions shell;
@@ -115,9 +126,11 @@ TEST_CASE("blend outputs are deterministic and leave inputs unchanged") {
   const Result<TriMesh> shell_mesh_b = tessellate(shell_b.value().brep, TessellationOptions{});
   REQUIRE(shell_mesh_a.has_value());
   REQUIRE(shell_mesh_b.has_value());
-  CHECK(shell_mesh_a.value().positions.size() == shell_mesh_b.value().positions.size());
+  CHECK(same_positions(shell_mesh_a.value().positions, shell_mesh_b.value().positions));
   CHECK(shell_mesh_a.value().triangles == shell_mesh_b.value().triangles);
 
+  CHECK(box.vertex_count() == 8u);
+  CHECK(box.edge_count() == 12u);
   CHECK(box.face_count() == 6u);
   const Result<MassProperties> original = mass_properties(box);
   REQUIRE(original.has_value());
