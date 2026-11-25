@@ -58,3 +58,6 @@ cmake -S . -B build-bench -DGEOM_BUILD_BENCH=ON -DGEOM_BUILD_TESTS=OFF -DGEOM_WE
 cmake --build build-bench --config Release --target geom_bench_m4c1
 .\build-bench\Release\geom_bench_m4c1.exe
 ```
+
+
+CI runs the same binary in the bench job (`geom_bench_m4c1`) and uploads `bench-m4c1.txt` with the other benchmark artifacts.
