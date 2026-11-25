@@ -28,7 +28,7 @@ struct ShellOptions {
 
 struct ShellResult {
   Brep brep;
-  std::uint32_t cavity_shells = 0;  // enclosed pockets; 0 when any face is open
+  std::uint32_t cavity_shells = 0;  // enclosed pockets; always >= 1 on success
 };
 
 namespace detail {
@@ -170,10 +170,9 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
   }
 
   // The cavity is the intersection of one half-space per face, seeded by a box
-  // that contains the solid with room to spare on every side. A closed face
-  // cuts `thickness` inside the input; an open face cuts `thickness` outside it,
-  // so the cavity protrudes through the opening and the difference below opens
-  // the pocket instead of leaving a coincident cap.
+  // that contains the solid with room to spare on every side. Every accepted
+  // face is closed and axis-aligned, so each plane cuts `thickness` inside the
+  // input.
   Point3d lo = brep.vertex(brep.vertex_ids().front()).point;
   Point3d hi = lo;
   for (const VertexId id : brep.vertex_ids()) {
@@ -203,29 +202,11 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
   }
 
   Brep inner = seed.value();
-  // Sequential half-space clipping is order sensitive when an oblique plane
-  // meets a face that an earlier oblique cut already trimmed. This slice of
-  // M4c supports at most one oblique face; box-like parts and extrusions with a
-  // single slanted face have a deterministic, well-conditioned cut order.
-  // Cutting axis-aligned planes first also keeps those cuts on box faces.
-  std::vector<std::size_t> cut_order(view.value().faces.size());
-  for (std::size_t i = 0; i < cut_order.size(); ++i) cut_order[i] = i;
-  const auto oblique = [&view](std::size_t i) {
-    int non_axis = 0;
-    for (int axis = 0; axis < 3; ++axis) {
-      if (std::abs(view.value().outward[i][axis]) > 1e-9) ++non_axis;
-    }
-    return non_axis > 1;
-  };
-  std::stable_partition(cut_order.begin(), cut_order.end(),
-                        [&oblique](std::size_t i) { return !oblique(i); });
   std::vector<Plane3> planes;
-  planes.reserve(cut_order.size());
-  for (const std::size_t i : cut_order) {
-    const bool open = is_open[i] != 0;
+  planes.reserve(view.value().faces.size());
+  for (std::size_t i = 0; i < view.value().faces.size(); ++i) {
     planes.push_back(Plane3{view.value().outward[i],
-                            view.value().offset[i] +
-                                (open ? options.thickness : -options.thickness)});
+                            view.value().offset[i] - options.thickness});
   }
   for (const Plane3& plane : planes) {
     // A plane at or below every vertex leaves no interior on its below side;
@@ -245,7 +226,8 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
         return Error{Errc::degenerate,
                      "shell_solid: wall thickness leaves no measurable interior at this tolerance"};
       }
-      // A real splitter failure: keep its code, but keep the public prefix.
+      // A real splitter failure is reported as invalid_topology with the public
+      // prefix; the splitter's own message is intentionally not forwarded.
       return Error{Errc::invalid_topology,
                    "shell_solid: cavity intersection could not be assembled"};
     }

@@ -463,12 +463,12 @@ Expected: compile error for the missing `shell.hpp`.
 
 - [ ] **Step 3: Implement `shell_solid`**
 
-Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (dead or out-of-range is `Errc::index_out_of_range`; an empty closed set is `Errc::unsupported`). Refuse a solid with any oblique face (`Errc::unsupported`, "shell_solid: only axis-aligned faces are supported"), and refuse a non-empty open-face list (`Errc::unsupported`, "shell_solid: open faces are not supported in M4c-1"): the sequential splitter and the boolean stitch are face-order sensitive for those operands (M4c-2). Build the cavity as the intersection of one half-space per face, seeded by a box that contains the input with a numeric margin `max(2 * thickness, 1e-6 * max(1, extent), 1000 * tolerance)` on every side: a closed face cuts with `Plane3{outward[i], offset[i] - thickness}` and keeps `below`. Require exactly one solid after each cut. If a plane is at or below every vertex, or a cut leaves no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). If a split fails, test whether the shifted half-spaces still contain a point more than `tolerance` inside every plane by averaging the feasible triple-intersection vertices; if none, return `Errc::degenerate` ("shell_solid: wall thickness leaves no measurable interior at this tolerance"), otherwise propagate the splitter's error code with the `shell_solid:` prefix ("shell_solid: cavity intersection could not be assembled"). Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; a non-finite result is `Errc::non_finite` ("shell_solid: cavity difference failed a numeric check") and any other failure is the "no measurable interior" degenerate case. Require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1`.
+Build `detail::blend_planar_convex_solid`. Validate options. Validate and deduplicate `open_faces` (dead or out-of-range is `Errc::index_out_of_range`); any non-empty open-face list is refused below. Refuse a solid with any oblique face (`Errc::unsupported`, "shell_solid: only axis-aligned faces are supported"), and refuse a non-empty open-face list (`Errc::unsupported`, "shell_solid: open faces are not supported in M4c-1"): the sequential splitter and the boolean stitch are face-order sensitive for those operands (M4c-2). Build the cavity as the intersection of one half-space per face, seeded by a box that contains the input with a numeric margin `max(2 * thickness, 1e-6 * max(1, extent), 1000 * tolerance)` on every side: a closed face cuts with `Plane3{outward[i], offset[i] - thickness}` and keeps `below`. Require exactly one solid after each cut. If a plane is at or below every vertex, or a cut leaves no solid, return `Errc::degenerate` ("shell_solid: wall thickness leaves no interior"). If a split fails, test whether the shifted half-spaces still contain a point more than `tolerance` inside every plane by averaging the feasible triple-intersection vertices; if none, return `Errc::degenerate` ("shell_solid: wall thickness leaves no measurable interior at this tolerance"), otherwise return `Errc::invalid_topology` ("shell_solid: cavity intersection could not be assembled"). Then `boolean_solid(brep, inner, SolidBooleanOp::difference, {options.tolerance})`; a non-finite result is `Errc::non_finite` ("shell_solid: cavity difference failed a numeric check") and any other failure is the "no measurable interior" degenerate case. Require one solid, `validate_topology`, and set `cavity_shells = result_shells - 1`.
 
 - [ ] **Step 4: Run Debug and Release tests**
 
 Run both configurations with `--test-case="*shell*"`.
-Expected: twelve added cases (closed, no interior, 720 Release / 24 Debug face orders, wall below resolution, cavity thinner than the tolerance, all faces open, oblique prism, classifier witness, any-oblique refusal, sub-ulp seed, bad options, duplicate open request); the `*shell*` filter also matches unrelated pre-existing tests, so check the new case names rather than the total.
+Expected: thirteen shell cases (closed, no interior, open refusal, 720 Release / 24 Debug face orders, wall below resolution, cavity thinner than the tolerance, all faces open, oblique prism, classifier witness, any-oblique refusal, bad options, duplicate open request, sub-ulp seed); the `*shell*` filter also matches unrelated pre-existing tests, so check the new case names rather than the total.
 
 - [ ] **Step 5: Commit**
 
@@ -722,7 +722,7 @@ Expected: exit 0, volumes `999406` and `58808`, and three timing lines.
 
 - [ ] **Step 3: Record the evidence**
 
-Write `docs/benchmarks/m4c1-blends.md` with: compiler and CPU, build type, the five-run min/median/max for both operations, the two volume checksums, the test counts from Task 6, and the explicit scope ("convex, planar, single-shell; fillet deferred to M4c-2"). Add ADR-0041 with the decision (half-space cuts, convex restriction, no faceted fillet) and the alternatives rejected (polyhedral fillet approximation, boolean tool solids). Add a §8.9 scope paragraph and a §16.4 M4c-1 entry with the same counts.
+Write `docs/benchmarks/m4c1-blends.md` with: compiler and CPU, build type, the five-run min/median/max for both operations, the two volume checksums, the test counts from Task 6, and the explicit scope ("convex, planar, closed single-shell; shell limited to axis-aligned faces; open faces, oblique faces and fillet deferred to M4c-2"). Add ADR-0041 with the decision (half-space cuts, convex restriction, no faceted fillet) and the alternatives rejected (polyhedral fillet approximation, boolean tool solids). Add a §8.9 scope paragraph and a §16.4 M4c-1 entry with the same counts.
 
 - [ ] **Step 4: Run the complete suite in both configurations**
 
@@ -755,7 +755,7 @@ git commit -m "docs(m4c1): record planar chamfer and shell evidence"
 | Chamfer one edge volume | TBD |
 | Chamfer all edges volume | TBD |
 | Shell closed volume | TBD |
-| Shell open-top volume | TBD |
+| Shell open-top volume | deferred to M4c-2 |
 | Bench chamfer all edges (min/median) | TBD |
 | Bench closed shell (min/median) | TBD |
 | Debug cases / assertions | TBD |

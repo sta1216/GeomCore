@@ -120,6 +120,10 @@ TEST_CASE("closed axis-aligned shell is independent of face order") {
       first_failure = result.error().message;
       break;
     }
+    if (!validate_topology(result.value().brep).ok()) {
+      first_failure = "invalid output topology";
+      break;
+    }
     if (std::abs(volume_of(result.value().brep) - 10.875) > 1e-9) {
       first_failure = "wrong volume";
       break;
