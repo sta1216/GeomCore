@@ -1268,16 +1268,47 @@ inline Result<SplitSolidResult> split_solid_by_plane(const Brep& brep, SolidId s
                brep.face(info.face).reversed);
     }
     // One chain per cut polyline per face, independent of how many fragments
-    // the cut produced.
+    // the cut produced. The traced cut reaches past a trimmed face boundary, so
+    // clip it to the real loops before stitching: a chain that overshoots a
+    // neighbouring trim edge cannot meet its continuation at the true junction.
     if (needs_cut) {
+      std::vector<std::vector<Point2d>> loop_points;
+      loop_points.reserve(info.loops.size());
+      for (const FaceUvLoop& loop : info.loops) loop_points.push_back(loop.points);
+      const double clip_tolerance = std::max(tolerance, 1e-12 * scale);
+      // Only planar trims are represented by a simple polygon in UV. A curved
+      // face loop may double back along a seam, and clipping a rim against it
+      // drops half of the cut; those faces keep the traced chain.
+      const bool planar_face = std::holds_alternative<Plane3>(*info.surface);
       for (const FaceCut& cut : cuts) {
-        detail::SplitSolidCutChain chain;
-        chain.points.reserve(cut.uv.size());
-        for (const Point2d& point : cut.uv) {
-          chain.points.push_back(detail::face_uv_eval(info.projection, point));
+        const bool closed =
+            detail::split_solid_same2(cut.uv.front(), cut.uv.back(), clip_tolerance);
+        std::vector<std::vector<Point2d>> clipped;
+        if (planar_face) {
+          clipped = detail::trim_face_clip_cut(loop_points, cut.uv, closed, clip_tolerance);
+        } else {
+          clipped.assign(1, cut.uv);
         }
-        if (!circles.empty()) chain.circle = circles.front();
-        chains.push_back(std::move(chain));
+        if (closed) {
+          // A closed chain is one rim. Clipping it against a periodic loop can
+          // split it at the seam and drop the closing run, which leaves the cap
+          // without a loop; keep the traced rim unless clipping preserved the
+          // whole closed chain.
+          const bool kept_closed =
+              clipped.size() == 1 && clipped.front().size() >= 3 &&
+              detail::split_solid_same2(clipped.front().front(), clipped.front().back(),
+                                        clip_tolerance);
+          if (!kept_closed) clipped.assign(1, cut.uv);
+        }
+        for (const std::vector<Point2d>& run : clipped) {
+          detail::SplitSolidCutChain chain;
+          chain.points.reserve(run.size());
+          for (const Point2d& point : run) {
+            chain.points.push_back(detail::face_uv_eval(info.projection, point));
+          }
+          if (!circles.empty()) chain.circle = circles.front();
+          chains.push_back(std::move(chain));
+        }
       }
     }
   }

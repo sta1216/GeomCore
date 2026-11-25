@@ -94,3 +94,43 @@ TEST_CASE("chamfer helper describes a box as six planes") {
     CHECK(std::abs(norm2(outward) - 1.0) <= 1e-12);
   }
 }
+
+TEST_CASE("chamfer two edges sharing a vertex subtracts their overlap once") {
+  const Brep box = make_box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 2.0, 2.0});
+  const std::array<EdgeId, 2> edges{
+      edge_between(box, Point3d{0.0, 0.0, 0.0}, Point3d{0.0, 0.0, 2.0}),
+      edge_between(box, Point3d{0.0, 0.0, 0.0}, Point3d{0.0, 2.0, 0.0})};
+  ChamferOptions options;
+  options.distance = 0.25;
+  const Result<ChamferResult> result = chamfer_edges(box, edges, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().chamfered_edges == 2u);
+  CHECK(validate_topology(result.value().brep).ok());
+  // Two prisms of 0.0625 each, their d^3/3 corner overlap removed once.
+  CHECK(std::abs(volume_of(result.value().brep) - 7.880208333333333) <= 1e-9);
+}
+
+TEST_CASE("chamfer all twelve cube edges leaves the analytic volume") {
+  const Brep box = make_box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 2.0, 2.0});
+  std::vector<EdgeId> edges = box.edge_ids();
+  REQUIRE(edges.size() == 12u);
+  ChamferOptions options;
+  options.distance = 0.25;
+  const Result<ChamferResult> result = chamfer_edges(box, edges, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().chamfered_edges == 12u);
+  CHECK(validate_topology(result.value().brep).ok());
+  // Inclusion-exclusion over the twelve prisms: a^3 - 6*a*d^2 + 6*d^3.
+  CHECK(std::abs(volume_of(result.value().brep) - 7.34375) <= 1e-9);
+}
+
+TEST_CASE("chamfer counts a repeated edge once") {
+  const Brep box = make_box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{1.0, 1.0, 1.0});
+  const EdgeId edge = edge_between(box, Point3d{0.0, 0.0, 0.0}, Point3d{0.0, 0.0, 1.0});
+  const std::array<EdgeId, 2> edges{edge, edge};
+  ChamferOptions options;
+  options.distance = 0.1;
+  const Result<ChamferResult> result = chamfer_edges(box, edges, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().chamfered_edges == 1u);
+}
