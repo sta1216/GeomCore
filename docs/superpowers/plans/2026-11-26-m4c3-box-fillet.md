@@ -87,7 +87,7 @@ Topology anchors: `V = 8 + 2*k`, `E = 12 + 3*k`, `F = 6 + k`, `chi = 2`. Every s
 - Create `include/geom/brep/detail/fillet_box.hpp` — box detection, edge-family mapping, and the `CurvedAssembledFace` builder.
 - Create `tests/unit/fillet_test.cpp` — all fillet tests.
 - Create `bench/bench_m4c3.cpp` — 100-cube fillet benchmark.
-- Modify `tests/CMakeLists.txt`, `bench/CMakeLists.txt`, `.github/workflows/ci.yml`.
+- Modify `tests/CMakeLists.txt`, the root `CMakeLists.txt` (bench targets live there), `.github/workflows/ci.yml`.
 - Create `docs/adr/0042-box-fillet.md`, `docs/benchmarks/m4c3-fillet.md`.
 - Modify `docs/architecture/geometry-library-architecture.md` §8.9 and §16.4.
 - Modify this plan's Results section at the end.
@@ -244,8 +244,8 @@ Expected RED: `C1083` cannot open `geom/brep/fillet.hpp`, or `fillet_edges` is n
 
 In `include/geom/brep/fillet.hpp`:
 
-1. Validate `radius` finite (`non_finite`), positive (`degenerate`), `tolerance` finite (`non_finite`), positive (`tolerance_violation`).
-2. Reject an empty `edges` span with `unsupported "fillet_edges: at least one edge is required"`.
+1. Reject an empty `edges` span with `unsupported "fillet_edges: at least one edge is required"`. This check comes **before** the option checks: the default `FilletOptions{}` has `radius = 0.0`, so the empty + default call must report `unsupported`, not `degenerate`.
+2. Validate `radius` finite (`non_finite "fillet_edges: radius must be finite"`), positive (`degenerate "fillet_edges: radius must be positive"`), `tolerance` finite (`non_finite "fillet_edges: tolerance must be finite"`), positive (`tolerance_violation "fillet_edges: tolerance must be positive"`).
 3. Call `detail::fillet_box_bounds(brep, options.tolerance)`; on failure return it unchanged.
 4. Deduplicate `edges` preserving first occurrence. For each edge: alive check (`index_out_of_range "fillet_edges: edge does not belong to the solid"`), direction exactly one nonzero component (`unsupported "fillet_edges: only axis-aligned box edges are supported"`), all selected edges same family axis (`unsupported "fillet_edges: selected edges must be parallel"`), and the edge must join the two family extremes at a corner (`unsupported "fillet_edges: edge is not a box corner edge"`).
 5. Map each corner to the two other-axis low/high bits, then call `detail::fillet_box_edges`.
@@ -486,7 +486,7 @@ git commit -m "fix(brep): reject invalid box fillet selections before assembly"
 
 **Files:**
 - Create: `bench/bench_m4c3.cpp`
-- Modify: `bench/CMakeLists.txt`
+- Modify: `CMakeLists.txt` (the root file; bench targets live inside `if(GEOM_BUILD_BENCH)`)
 - Modify: `.github/workflows/ci.yml`
 - Create: `docs/adr/0042-box-fillet.md`
 - Create: `docs/benchmarks/m4c3-fillet.md`
@@ -494,7 +494,7 @@ git commit -m "fix(brep): reject invalid box fillet selections before assembly"
 - Modify: this plan's Results section
 
 **Interfaces:**
-- Consumes: `fillet_edges`, `make_box`, `detail::curved_solid_volume` or `mass_properties`.
+- Consumes: `fillet_edges`, `make_box`, `detail::curved_solid_volume` (the fillet patches are arc-trimmed, so `mass_properties` does not accept them).
 - Produces: `geom_bench_m4c3` executable and the M4c-3a documentation.
 
 - [ ] **Step 1: Write the failing benchmark**
@@ -503,8 +503,16 @@ Create `bench/bench_m4c3.cpp` following `bench/bench_m4c1.cpp`: build a 100-cube
 
 - [ ] **Step 2: Build it**
 
-Add `geom_bench_m4c3` to `bench/CMakeLists.txt`; run
-`cmake --build build --config Release --target geom_bench_m4c3` and then the executable.
+Add `geom_bench_m4c3` to the root `CMakeLists.txt` (there is no
+`bench/CMakeLists.txt`; the bench executables live inside `if(GEOM_BUILD_BENCH)`).
+The main `build` tree has `GEOM_BUILD_BENCH=OFF`, so configure and build a bench
+tree instead:
+
+```powershell
+cmake -S . -B build-bench -DGEOM_BUILD_BENCH=ON -DGEOM_BUILD_TESTS=OFF -DGEOM_WERROR=ON
+cmake --build build-bench --config Release --target geom_bench_m4c3
+.\build-bench\Release\geom_bench_m4c3.exe
+```
 
 Expected RED before the target exists: CMake reports an unknown target.
 
@@ -525,7 +533,7 @@ Run it once and paste the min/median/max and volume into the plan Results table.
 Check every quoted count against the actual test output; update the plan Results table. Then:
 
 ```bash
-git add bench/bench_m4c3.cpp bench/CMakeLists.txt .github/workflows/ci.yml docs/adr/0042-box-fillet.md docs/benchmarks/m4c3-fillet.md docs/architecture/geometry-library-architecture.md docs/superpowers/plans/2026-11-26-m4c3-box-fillet.md
+git add bench/bench_m4c3.cpp CMakeLists.txt .github/workflows/ci.yml docs/adr/0042-box-fillet.md docs/benchmarks/m4c3-fillet.md docs/architecture/geometry-library-architecture.md docs/superpowers/plans/2026-11-26-m4c3-box-fillet.md
 git commit -m "docs(brep): record the M4c-3a box fillet contract and benchmark"
 ```
 
@@ -545,13 +553,30 @@ git commit -m "docs(brep): record the M4c-3a box fillet contract and benchmark"
 
 | Item | Value |
 | --- | --- |
-| Debug `*fillet*` | PENDING |
-| Release `*fillet*` | PENDING |
-| Full Release | PENDING |
-| One-edge volume | PENDING |
-| Four-edge volume | PENDING |
-| Benchmark 100-cube 4 edges, r=1 | PENDING |
-| Debug lane (`*fillet*,*blend*,*editor*`) | PENDING |
+| Debug `*fillet*` | 7 cases / 120 assertions, 0 failed |
+| Release `*fillet*` | 7 cases / 120 assertions, 0 failed |
+| Full Release | 1,158 cases / 682,844 assertions, 0 failed (880 s) |
+| One-edge volume | `23.946349540849312` (plan anchor `23.94634954084936`, absolute difference `4.8e-14`, within `1e-9`) |
+| Four-edge volume | `23.785398163397282` (plan anchor `23.78539816339745`, absolute difference `1.7e-13`, within `1e-9`) |
+| Benchmark 100-cube, 4 vertical edges, r=1 | min `7.587` / median `8.247` / max `12.766` ms; volume `999914.159265358` vs `999914.159265359` (relative `1.1e-15`); exit 0 |
+| Debug lane (`*fillet*,*blend*,*editor*`) | 55 cases / 630 assertions, 0 failed |
+
+Task 1 validation-order clarification: `fillet_edges` checks the empty span
+**before** the option checks, because the default `FilletOptions{}` has
+`radius = 0.0`. Validating the radius first would report `degenerate` for an
+empty selection made with default options; "no edges selected" is an
+`unsupported` request, so the empty-span check comes first and the empty +
+default call returns `unsupported "fillet_edges: at least one edge is
+required"`.
+
+The benchmark target lives in the root `CMakeLists.txt` inside
+`if(GEOM_BUILD_BENCH)` (there is no `bench/CMakeLists.txt` in this tree), and it
+was built in `build-bench` because the main `build` tree has
+`GEOM_BUILD_BENCH=OFF`.
+
+Full Debug remains PENDING: the suite still contains the known >20-minute
+cases, so the Debug `*fillet*` lane and the Debug lane above are the Debug
+evidence. They are not a full Debug pass.
 
 ## Self-Review
 

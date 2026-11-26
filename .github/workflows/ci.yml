@@ -110,7 +110,7 @@ jobs:
       - name: Configure
         run: cmake -S . -B build-bench -DGEOM_BUILD_BENCH=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build benchmarks
-        run: cmake --build build-bench -j 4 --target geom_bench_m2 geom_bench_m1b geom_bench_m3c2 geom_bench_m3c3 geom_bench_m3c3b geom_bench_ssi geom_bench_m4c1
+        run: cmake --build build-bench -j 4 --target geom_bench_m2 geom_bench_m1b geom_bench_m3c2 geom_bench_m3c3 geom_bench_m3c3b geom_bench_ssi geom_bench_m4c1 geom_bench_m4c3
       - name: Run M2 benchmarks (QA-10, QA-11)
         run: ./build-bench/geom_bench_m2 | tee bench-m2.txt
       - name: Run M1b benchmarks (QA-1, QA-4)
@@ -121,6 +121,8 @@ jobs:
         run: set -o pipefail; ./build-bench/geom_bench_ssi 1000 | tee bench-ssi.txt
       - name: Run M4c-1 blend benchmark
         run: ./build-bench/geom_bench_m4c1 | tee bench-m4c1.txt
+      - name: Run M4c-3a box fillet benchmark
+        run: set -o pipefail; ./build-bench/geom_bench_m4c3 | tee bench-m4c3.txt
       - name: Upload benchmark output
         if: always()
         uses: actions/upload-artifact@v4
@@ -132,3 +134,4 @@ jobs:
             bench-m3c3b.txt
             bench-ssi.txt
             bench-m4c1.txt
+            bench-m4c3.txt
