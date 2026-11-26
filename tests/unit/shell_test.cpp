@@ -151,16 +151,30 @@ TEST_CASE("shell of a rotated box keeps its wall at coarse tolerance") {
   CHECK(std::abs(volume_of(result.value().brep) - 10.875) <= 1e-6);
 }
 
-TEST_CASE("shell rejects a thickness that leaves no interior") {
+TEST_CASE("shell rejects a wall at or beyond the half-thickness") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
   ShellOptions options;
   options.thickness = 1.0;
+  options.tolerance = 1e-9;
   const std::array<FaceId, 0> open{};
   const Result<ShellResult> result = shell_solid(box, open, options);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == Errc::degenerate);
-  CHECK(std::string_view(result.error().message).find("leaves no interior") !=
-        std::string::npos);
+  CHECK(std::string_view(result.error().message) ==
+        "shell_solid: wall thickness leaves no interior");
+}
+
+TEST_CASE("shell rejects an oblique wall that leaves no interior") {
+  const Brep tetra = right_tetrahedron(2.0);
+  ShellOptions options;
+  options.thickness = 0.7;
+  options.tolerance = 1e-9;
+  const std::array<FaceId, 0> open{};
+  const Result<ShellResult> result = shell_solid(tetra, open, options);
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == Errc::degenerate);
+  CHECK(std::string_view(result.error().message) ==
+        "shell_solid: wall thickness leaves no measurable interior at this tolerance");
 }
 
 TEST_CASE("shell opens a box through one face") {
@@ -299,6 +313,28 @@ TEST_CASE("closed axis-aligned shell is independent of face order") {
       first_failure = "wrong volume";
       break;
     }
+    const std::array<FaceId, 1> open{top_face(solid.value())};
+    const Result<ShellResult> opened = shell_solid(solid.value(), open, options);
+    if (!opened.has_value()) {
+      first_failure = opened.error().message;
+      break;
+    }
+    if (opened.value().cavity_shells != 0u) {
+      first_failure = "open shell retained a cavity shell";
+      break;
+    }
+    if (opened.value().brep.shell_count() != 1u) {
+      first_failure = "open shell has more than one shell";
+      break;
+    }
+    if (!validate_topology(opened.value().brep).ok()) {
+      first_failure = "invalid open output topology";
+      break;
+    }
+    if (std::abs(volume_of(opened.value().brep) - 9.9375) > 1e-9) {
+      first_failure = "wrong open volume";
+      break;
+    }
     ++checked;
   } while (checked < target && std::next_permutation(order.begin(), order.end()));
   INFO("permutations checked: " << checked << " of " << target
@@ -326,8 +362,25 @@ TEST_CASE("shell rejects a cavity thinner than the tolerance") {
   const Result<ShellResult> result = shell_solid(box, open, options);
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == Errc::degenerate);
-  CHECK(std::string_view(result.error().message).find("no measurable interior") !=
-        std::string::npos);
+  CHECK(std::string_view(result.error().message) ==
+        "shell_solid: wall thickness leaves no measurable interior at this tolerance");
+}
+
+TEST_CASE("shell accepts a thin but removable open wall") {
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
+  const std::array<FaceId, 1> open{top_face(box)};
+  ShellOptions options;
+  options.thickness = 1e-6;
+  options.tolerance = 1e-9;
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 0u);
+  CHECK(result.value().brep.shell_count() == 1u);
+  CHECK(validate_topology(result.value().brep).ok());
+  // The inset walls are one micrometre thick: above the boolean resolution,
+  // so the cavity must survive instead of being rejected as unmeasurable.
+  const double expected = 24.0 - (2.0 - 2e-6) * (3.0 - 2e-6) * (4.0 - 1e-6);
+  CHECK(std::abs(volume_of(result.value().brep) - expected) <= 1e-9);
 }
 
 TEST_CASE("shell rejects opening every face") {
