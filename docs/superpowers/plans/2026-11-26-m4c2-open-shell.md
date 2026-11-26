@@ -700,7 +700,7 @@ git commit -m "docs(m4c2): record open-shell evidence"
 | Item | Value |
 | --- | --- |
 | Debug `*shell*` | 52 cases / 531 assertions, 0 failed, 1,099 skipped |
-| Debug lane `*shell*,*half_space*,*blend*,*editor*` | 91 cases / 946 assertions, 0 failed, 1,059 skipped |
+| Debug lane `*shell*,*half_space*,*blend*,*editor*` | 92 cases / 953 assertions, 0 failed, 1,059 skipped |
 | Release `*shell*` | 52 cases / 1,923 assertions, 0 failed, 1,099 skipped |
 | Full Release | 1,151 cases / 682,724 assertions, 0 failed, 0 skipped (exit 0) |
 | Full Debug | PENDING — the eight `brep_boolean_curved_test.cpp` sphere/torus half-space cases exceed 20 min each under `/Od`; the Debug lane above is the gate |
