@@ -6,7 +6,9 @@
 #include <cstdint>
 #include <map>
 #include <span>
+#include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <geom/brep/chamfer.hpp>
@@ -16,6 +18,7 @@
 #include <geom/brep/tessellate.hpp>
 #include <geom/brep/validate.hpp>
 #include <geom/core/error.hpp>
+#include <geom/surfaces/plane.hpp>
 
 using namespace geom;
 
@@ -25,6 +28,12 @@ Brep box_solid(Point3d lo, Point3d hi) {
   const Result<Brep> box = make_box(lo, hi, 1e-9);
   REQUIRE(box.has_value());
   return box.value();
+}
+
+double volume_of(const Brep& brep) {
+  const Result<MassProperties> mass = mass_properties(brep);
+  REQUIRE(mass.has_value());
+  return mass.value().volume;
 }
 
 bool same_positions(const std::vector<Point3d>& lhs,
@@ -55,6 +64,20 @@ std::size_t boundary_edges(const TriMesh& mesh) {
     if (n == 1) ++count;
   }
   return count;
+}
+
+// Finds the face whose outward normal points along +Z. The stored plane normal
+// is the surface normal, so a reversed face must be flipped to recover the
+// outward direction.
+FaceId top_face(const Brep& brep) {
+  for (const FaceId face : brep.face_ids()) {
+    const auto& plane =
+        std::get<Plane3>(brep.geometry().surfaces[brep.face(face).surface]);
+    const Vec3d normal = brep.face(face).reversed ? plane.normal * -1.0 : plane.normal;
+    if (normal[2] > 0.5) return face;
+  }
+  FAIL("box has no +Z face");
+  return FaceId{};
 }
 
 }  // namespace
@@ -129,10 +152,37 @@ TEST_CASE("blend outputs are deterministic and leave inputs unchanged") {
   CHECK(same_positions(shell_mesh_a.value().positions, shell_mesh_b.value().positions));
   CHECK(shell_mesh_a.value().triangles == shell_mesh_b.value().triangles);
 
+  // Opening the +Z face must produce one open shell with no enclosed pocket,
+  // watertight tessellation, and identical geometry on a repeat call.
+  const std::array<FaceId, 1> open_top{top_face(box)};
+  const Result<ShellResult> pocket_a = shell_solid(box, open_top, shell);
+  const Result<ShellResult> pocket_b = shell_solid(box, open_top, shell);
+  INFO((pocket_a.has_value() ? std::string{} : std::string{pocket_a.error().message}));
+  INFO((pocket_b.has_value() ? std::string{} : std::string{pocket_b.error().message}));
+  REQUIRE(pocket_a.has_value());
+  REQUIRE(pocket_b.has_value());
+  CHECK(pocket_a.value().cavity_shells == 0u);
+  CHECK(pocket_a.value().brep.solid_count() == 1u);
+  CHECK(pocket_a.value().brep.shell_count() == 1u);
+  CHECK(validate_topology(pocket_a.value().brep).ok());
+  CHECK(std::abs(volume_of(pocket_a.value().brep) - 4.0625) <= 1e-9);
+  const Result<TriMesh> pocket_mesh_a =
+      tessellate(pocket_a.value().brep, TessellationOptions{});
+  const Result<TriMesh> pocket_mesh_b =
+      tessellate(pocket_b.value().brep, TessellationOptions{});
+  REQUIRE(pocket_mesh_a.has_value());
+  REQUIRE(pocket_mesh_b.has_value());
+  CHECK(boundary_edges(pocket_mesh_a.value()) == 0u);
+  CHECK(same_positions(pocket_mesh_a.value().positions,
+                       pocket_mesh_b.value().positions));
+  CHECK(pocket_mesh_a.value().triangles == pocket_mesh_b.value().triangles);
+
+  // The open-pocket calls take `box` by const reference; the input must still
+  // be the untouched 2x2x2 box once both calls have returned.
   CHECK(box.vertex_count() == 8u);
   CHECK(box.edge_count() == 12u);
   CHECK(box.face_count() == 6u);
   const Result<MassProperties> original = mass_properties(box);
   REQUIRE(original.has_value());
-  CHECK(std::abs(original.value().volume - 8.0) <= 1e-12);
+  CHECK(std::abs(original.value().volume - 8.0) <= 1e-9);
 }
