@@ -1,7 +1,7 @@
 # M4c-3a box fillet benchmark
 
 - Date: 2026-11-26
-- Commit: `sdd/m4c3` (Task 4 tree; code under test `0fbe889..bb79631`; benchmark and docs amended in the Task 4 commit)
+- Commit: `sdd/m4c3` (Task 4 tree; code under test `0fbe889..624bc44`; benchmark and docs amended in the Task 4 commit)
 - Compiler: MSVC 19.44.35217, `/std:c++20 /O2`, `GEOM_WERROR=ON`
 - Machine: Windows 10 Enterprise 22H2 (build 19045), Intel Core i7-8550U (4C/8T), Release
 - Benchmark: `bench/bench_m4c3.cpp`, five timed runs, min/median/max
