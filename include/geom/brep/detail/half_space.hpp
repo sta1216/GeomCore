@@ -259,11 +259,18 @@ inline Result<std::vector<AssembledFace>> half_space_faces(
 }
 
 // Assembles the convex cell defined by `planes` into a closed B-rep solid.
-// Enumerates the cell's vertices first, so an empty intersection is reported
-// as degenerate before any assembly is attempted; then extracts one outward
-// ring per bounding plane and hands them to assemble_solid. An assembly failure
-// (for example coincident duplicate planes producing a non-manifold edge) is
-// returned unchanged.
+// Enumerates the cell's vertices first, so an empty vertex enumeration is
+// reported as degenerate before any assembly is attempted; then extracts one
+// outward ring per bounding plane and hands them to assemble_solid. An assembly
+// failure (for example coincident duplicate planes producing a non-manifold
+// edge) is returned unchanged.
+//
+// Precondition: `planes` must bound a bounded, full-dimensional cell; fewer
+// than four independent planes cannot. Every empty vertex enumeration maps to
+// Errc::degenerate with "half_space: planes have no common point" — whether
+// the input is under-specified (0, 1 or 2 planes), describes an unbounded slab
+// or prism, or genuinely has no common point. Callers such as shell_solid
+// always add their bounding seed box, so that case is unreachable through them.
 inline Result<Brep> half_space_solid(std::span<const HalfSpacePlane> planes,
                                      double tolerance) {
   const Result<std::vector<Point3d>> vertices =

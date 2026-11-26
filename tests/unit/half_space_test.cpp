@@ -564,12 +564,13 @@ TEST_CASE("half-space solid is deterministic for a fixed plane order") {
 TEST_CASE("half-space solid propagates an assembly failure") {
   // The coincident duplicate plane is not removed by half_space_faces, so the
   // assembler sees a non-manifold edge. Its error must reach the caller
-  // unchanged instead of the cell being silently accepted.
+  // unchanged, so pin the exact message as well as the code: a rewrite such as
+  // "half_space: non-manifold cell" must not pass.
   auto planes = unit_box_planes();
   planes.push_back({{1.0, 0.0, 0.0}, 2.0});
   const Result<Brep> solid = detail::half_space_solid(planes, 1e-9);
   REQUIRE_FALSE(solid.has_value());
   CHECK(solid.error().code == Errc::invalid_topology);
-  CHECK(std::string_view(solid.error().message).find("non-manifold") !=
-        std::string_view::npos);
+  CHECK(std::string_view(solid.error().message) ==
+        "assemble_solid: non-manifold edge");
 }
