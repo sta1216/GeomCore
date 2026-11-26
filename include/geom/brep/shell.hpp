@@ -11,6 +11,7 @@
 #include <geom/brep/boolean_solid.hpp>
 #include <geom/brep/detail/blend_common.hpp>
 #include <geom/brep/detail/half_space.hpp>
+#include <geom/brep/mass_properties.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/validate.hpp>
 #include <geom/core/error.hpp>
@@ -103,10 +104,11 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
   }
 
   // The direct inset-box path is only valid for a closed solid whose unit face
-  // normals are coordinate axes. The slack scales with the tolerance, with a
-  // dimensionless floor that keeps an exactly axis-aligned normal exact even
-  // for a very small requested tolerance.
-  const double axis_slack = std::max(64.0 * tolerance, 1e-12);
+  // normals are coordinate axes. The slack is angular (a dimensionless
+  // deviation between unit normals), not a distance: a user tolerance must not
+  // widen it, or a rotated solid at a coarse tolerance would be misclassified
+  // as axis-aligned and hollowed with the wrong AABB-inset cavity.
+  const double axis_slack = 1e-12;
   const auto axis_aligned = [axis_slack](const Vec3d& normal) {
     int dominant = -1;
     for (int axis = 0; axis < 3; ++axis) {
@@ -241,6 +243,22 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
   }
   if (!validate_topology(shelled).ok()) {
     return Error{Errc::invalid_topology, "shell_solid: shell produced an invalid solid"};
+  }
+
+  if (any_open) {
+    // An open pocket that never enters the solid leaves the input unchanged,
+    // which a successful boolean can still do when the relaxed cavity lies
+    // wholly outside the input. Require that material was actually removed
+    // before reporting an open shell; this is also the geometric limit of an
+    // over-thick wall.
+    const Result<MassProperties> before = mass_properties(brep);
+    if (!before.has_value()) return before.error();
+    const Result<MassProperties> after = mass_properties(shelled);
+    if (!after.has_value()) return after.error();
+    const double removed = before.value().volume - after.value().volume;
+    if (removed <= 1e-12 * std::max(1.0, std::fabs(before.value().volume))) {
+      return Error{Errc::degenerate, no_interior};
+    }
   }
 
   ShellResult result;

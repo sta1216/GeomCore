@@ -81,6 +81,42 @@ Brep right_tetrahedron(double a) {
   return tetra.value();
 }
 
+FaceId slant_face(const Brep& brep) {
+  for (const FaceId face : brep.face_ids()) {
+    const auto& plane =
+        std::get<Plane3>(brep.geometry().surfaces[brep.face(face).surface]);
+    const Vec3d normal = brep.face(face).reversed ? plane.normal * -1.0 : plane.normal;
+    if (normal[0] > 0.5 && normal[1] > 0.5 && normal[2] > 0.5) return face;
+  }
+  FAIL("tetrahedron has no slant face");
+  return FaceId{};
+}
+
+// A 2 x 3 x 4 box rotated about +Z, assembled from transformed corners with
+// transformed outward normals. At a coarse tolerance this is exactly the input
+// that an axis-aligned test based on tolerance would misclassify as a box.
+Brep rotated_box(double angle) {
+  const double c = std::cos(angle);
+  const double s = std::sin(angle);
+  const auto p = [c, s](double x, double y, double z) {
+    return Point3d{c * x - s * y, s * x + c * y, z};
+  };
+  const auto n = [c, s](double x, double y, double z) {
+    return Vec3d{c * x - s * y, s * x + c * y, z};
+  };
+  const std::array<AssembledFace, 6> faces{{
+      {{p(0, 0, 0), p(0, 0, 4), p(0, 3, 4), p(0, 3, 0)}, {}, n(-1, 0, 0)},
+      {{p(2, 0, 0), p(2, 3, 0), p(2, 3, 4), p(2, 0, 4)}, {}, n(1, 0, 0)},
+      {{p(0, 0, 0), p(2, 0, 0), p(2, 0, 4), p(0, 0, 4)}, {}, n(0, -1, 0)},
+      {{p(0, 3, 0), p(0, 3, 4), p(2, 3, 4), p(2, 3, 0)}, {}, n(0, 1, 0)},
+      {{p(0, 0, 0), p(0, 3, 0), p(2, 3, 0), p(2, 0, 0)}, {}, n(0, 0, -1)},
+      {{p(0, 0, 4), p(2, 0, 4), p(2, 3, 4), p(0, 3, 4)}, {}, n(0, 0, 1)},
+  }};
+  const Result<Brep> box = assemble_solid(faces, 1e-9);
+  REQUIRE(box.has_value());
+  return box.value();
+}
+
 }  // namespace
 
 TEST_CASE("closed shell leaves a uniform cavity") {
@@ -97,6 +133,22 @@ TEST_CASE("closed shell leaves a uniform cavity") {
   CHECK(validate_topology(result.value().brep).ok());
   // 24 - (1.5 * 2.5 * 3.5).
   CHECK(std::abs(volume_of(result.value().brep) - 10.875) <= 1e-9);
+}
+
+TEST_CASE("shell of a rotated box keeps its wall at coarse tolerance") {
+  const Brep box = rotated_box(0.04);
+  const std::array<FaceId, 0> open{};
+  ShellOptions options;
+  options.thickness = 0.25;
+  options.tolerance = 1e-3;
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 1u);
+  CHECK(result.value().brep.shell_count() == 2u);
+  CHECK(validate_topology(result.value().brep).ok());
+  // A rigid rotation does not change the wall volume; only a genuine
+  // half-space cavity can recover it at this coarse tolerance.
+  CHECK(std::abs(volume_of(result.value().brep) - 10.875) <= 1e-6);
 }
 
 TEST_CASE("shell rejects a thickness that leaves no interior") {
@@ -173,6 +225,33 @@ TEST_CASE("shell of an oblique tetrahedron matches the inset volume") {
   const double s = 2.0 - options.thickness * (3.0 + std::sqrt(3.0));
   const double inner = s * s * s / 6.0;
   CHECK(std::abs(volume_of(result.value().brep) - (outer - inner)) <= 1e-9);
+}
+
+TEST_CASE("shell rejects an open tetrahedron with no removable interior") {
+  const Brep tetra = right_tetrahedron(2.0);
+  const char* const no_interior =
+      "shell_solid: wall thickness leaves no measurable interior at this tolerance";
+
+  // The relaxed slant plane lies wholly outside the solid once the three legs
+  // are inset by 0.7, so the pocket never enters the tetrahedron.
+  ShellOptions options;
+  options.thickness = 0.7;
+  options.tolerance = 1e-9;
+  const std::array<FaceId, 1> slant{slant_face(tetra)};
+  const Result<ShellResult> slant_result = shell_solid(tetra, slant, options);
+  REQUIRE_FALSE(slant_result.has_value());
+  CHECK(slant_result.error().code == Errc::degenerate);
+  CHECK(std::string_view(slant_result.error().message) == no_interior);
+
+  // The open leg cavity is non-empty but sits entirely below z = 0, outside
+  // the tetrahedron, so an unchanged result must be rejected rather than
+  // returned as a successful open shell.
+  options.thickness = 0.54;
+  const std::array<FaceId, 1> leg{bottom_face(tetra)};
+  const Result<ShellResult> leg_result = shell_solid(tetra, leg, options);
+  REQUIRE_FALSE(leg_result.has_value());
+  CHECK(leg_result.error().code == Errc::degenerate);
+  CHECK(std::string_view(leg_result.error().message) == no_interior);
 }
 
 TEST_CASE("closed axis-aligned shell is independent of face order") {
@@ -253,7 +332,9 @@ TEST_CASE("shell rejects a cavity thinner than the tolerance") {
 
 TEST_CASE("shell rejects opening every face") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
-  const auto faces = box.face_ids();
+  const auto ids = box.face_ids();
+  std::vector<FaceId> faces(ids.begin(), ids.end());
+  faces.push_back(top_face(box));  // Repeating a face must not evade all-open.
   ShellOptions options;
   options.thickness = 0.25;
   const Result<ShellResult> result = shell_solid(box, faces, options);
@@ -279,7 +360,7 @@ TEST_CASE("shell rejects bad options and dead faces") {
   CHECK(shell_solid(box, dead, options).error().code == Errc::index_out_of_range);
 }
 
-TEST_CASE("a duplicate open face request is accepted once") {
+TEST_CASE("shell accepts a duplicate open face once") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
   const FaceId top = top_face(box);
   const std::array<FaceId, 2> open{top, top};
