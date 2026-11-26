@@ -563,13 +563,13 @@ git commit -m "docs(brep): record the M4c-3a box fillet contract and benchmark"
 
 | Item | Value |
 | --- | --- |
-| Debug `*fillet*` | 7 cases / 120 assertions, 0 failed |
-| Release `*fillet*` | 7 cases / 120 assertions, 0 failed |
-| Full Release | 1,158 cases / 682,844 assertions, 0 failed (880 s) |
+| Debug `*fillet*` | 8 cases / 882 assertions, 0 failed |
+| Release `*fillet*` | 8 cases / 882 assertions, 0 failed |
+| Full Release | 1,159 cases / 683,606 assertions, 0 failed (880 s) |
 | One-edge volume | `23.946349540849312` (plan anchor `23.94634954084936`, absolute difference `4.8e-14`, within `1e-9`) |
 | Four-edge volume | `23.785398163397282` (plan anchor `23.78539816339745`, absolute difference `1.7e-13`, within `1e-9`) |
 | Benchmark 100-cube, 4 vertical edges, r=1 | min `7.587` / median `8.247` / max `12.766` ms; volume `999914.159265358` vs `999914.159265359` (relative `1.1e-15`); exit 0 |
-| Debug lane (`*fillet*,*blend*,*editor*`) | 55 cases / 630 assertions, 0 failed |
+| Debug lane (`*fillet*,*blend*,*editor*`) | 56 cases / 1,392 assertions, 0 failed |
 
 Task 1 validation-order clarification: `fillet_edges` checks the empty span
 **before** the option checks, because the default `FilletOptions{}` has
