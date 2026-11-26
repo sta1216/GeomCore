@@ -488,3 +488,88 @@ TEST_CASE("half-space faces keep one face per plane for duplicate planes") {
     CHECK(face_ring_area_dot_normal(face) > 0.0);
   }
 }
+
+TEST_CASE("half-space solid of a right tetrahedron has the analytic volume") {
+  const double s = std::sqrt(3.0);
+  // Scaling every equation of the tetrahedron below by s keeps the same
+  // half-spaces; using s here (rather than an unused variable) keeps the test
+  // warning-clean under /W4 /WX.
+  const std::array<detail::HalfSpacePlane, 4> planes{{
+      {{-s, 0.0, 0.0}, 0.0},
+      {{0.0, -s, 0.0}, 0.0},
+      {{0.0, 0.0, -s}, 0.0},
+      {{s, s, s}, 2.0 * s},
+  }};
+  const Result<Brep> solid = detail::half_space_solid(planes, 1e-9);
+  REQUIRE(solid.has_value());
+  CHECK(validate_topology(solid.value()).ok());
+  const Result<MassProperties> mass = mass_properties(solid.value());
+  REQUIRE(mass.has_value());
+  CHECK(std::abs(mass.value().volume - 4.0 / 3.0) <= 1e-9);
+}
+
+TEST_CASE("half-space solid rejects an empty cell") {
+  const std::array<detail::HalfSpacePlane, 2> planes{{
+      {{1.0, 0.0, 0.0}, 0.0},
+      {{-1.0, 0.0, 0.0}, -1.0},
+  }};
+  const Result<Brep> solid = detail::half_space_solid(planes, 1e-9);
+  REQUIRE_FALSE(solid.has_value());
+  CHECK(solid.error().code == Errc::degenerate);
+  CHECK(std::string_view(solid.error().message) ==
+        "half_space: planes have no common point");
+}
+
+TEST_CASE("half-space solid of a box is a closed six-face box") {
+  const auto planes = unit_box_planes();
+  const Result<Brep> solid = detail::half_space_solid(planes, 1e-9);
+  REQUIRE(solid.has_value());
+  CHECK(validate_topology(solid.value()).ok());
+  CHECK(solid.value().shell_count() == 1u);
+  CHECK(solid.value().face_count() == 6u);
+  CHECK(solid.value().edge_count() == 12u);
+  CHECK(solid.value().vertex_count() == 8u);
+  const Result<MassProperties> mass = mass_properties(solid.value());
+  REQUIRE(mass.has_value());
+  CHECK(std::abs(mass.value().volume - 24.0) <= 1e-9);
+}
+
+TEST_CASE("half-space solid is unchanged by a common plane scale") {
+  const auto planes = tetrahedron_planes(3.0);
+  const Result<Brep> solid = detail::half_space_solid(planes, 1e-9);
+  REQUIRE(solid.has_value());
+  CHECK(validate_topology(solid.value()).ok());
+  const Result<MassProperties> mass = mass_properties(solid.value());
+  REQUIRE(mass.has_value());
+  CHECK(std::abs(mass.value().volume - 4.0 / 3.0) <= 1e-9);
+}
+
+TEST_CASE("half-space solid is deterministic for a fixed plane order") {
+  const auto planes = unit_box_planes();
+  const Result<Brep> first = detail::half_space_solid(planes, 1e-9);
+  const Result<Brep> second = detail::half_space_solid(planes, 1e-9);
+  REQUIRE(first.has_value());
+  REQUIRE(second.has_value());
+  CHECK(first.value().shell_count() == second.value().shell_count());
+  CHECK(first.value().face_count() == second.value().face_count());
+  CHECK(first.value().edge_count() == second.value().edge_count());
+  CHECK(first.value().vertex_count() == second.value().vertex_count());
+  const Result<MassProperties> first_mass = mass_properties(first.value());
+  const Result<MassProperties> second_mass = mass_properties(second.value());
+  REQUIRE(first_mass.has_value());
+  REQUIRE(second_mass.has_value());
+  CHECK(first_mass.value().volume == second_mass.value().volume);
+}
+
+TEST_CASE("half-space solid propagates an assembly failure") {
+  // The coincident duplicate plane is not removed by half_space_faces, so the
+  // assembler sees a non-manifold edge. Its error must reach the caller
+  // unchanged instead of the cell being silently accepted.
+  auto planes = unit_box_planes();
+  planes.push_back({{1.0, 0.0, 0.0}, 2.0});
+  const Result<Brep> solid = detail::half_space_solid(planes, 1e-9);
+  REQUIRE_FALSE(solid.has_value());
+  CHECK(solid.error().code == Errc::invalid_topology);
+  CHECK(std::string_view(solid.error().message).find("non-manifold") !=
+        std::string_view::npos);
+}
