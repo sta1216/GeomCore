@@ -87,14 +87,14 @@ M4c-3a implements exactly that slice:
 ## Consequences
 
 - Constant-radius fillet of 1–4 parallel box edges is exact, deterministic and
-  watertight when tessellated; the benchmark on a 100³ box with four vertical
+  watertight when tessellated in the four-edge case tested here; the benchmark on a 100³ box with four vertical
   edges at `r = 1` measures 7.587 / 8.247 / 12.766 ms (min/median/max) and
   volume `999914.159265358`, within `1e-6` relative of `999914.159265359`.
 - The tests pin the per-edge volume `23.94634954084936` and the four-edge volume
   `23.78539816339745` for a `2x3x4` box at `r = 0.25` within `1e-9`, the
   `V/E/F` counts for every `k`, watertight tessellation of the four-edge case,
   bit-identical repeated calls, an unchanged input on success and failure, the
-  option/shape rejection codes, and the mixed-family rejection message
+  tested option/shape rejection codes, and the mixed-family rejection message
   (substring `parallel`).
 - Deferred to M4c-3b: vertex blends where filleted edges meet, variable
   radius, concave edges, general convex and curved operands, chamfer angles,
