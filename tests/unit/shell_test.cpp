@@ -383,6 +383,25 @@ TEST_CASE("shell accepts a thin but removable open wall") {
   CHECK(std::abs(volume_of(result.value().brep) - expected) <= 1e-9);
 }
 
+TEST_CASE("shell keeps a small open shell above its own volume scale") {
+  // The removed-material guard must be relative to the model: 2x3x4 scaled by
+  // 1e-5 has total volume 2.4e-14, and the open pocket removes 1.40625e-14.
+  // An absolute 1e-12 floor would reject this valid shell.
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0},
+                             Point3d{2e-5, 3e-5, 4e-5});
+  const std::array<FaceId, 1> open{top_face(box)};
+  ShellOptions options;
+  options.thickness = 2.5e-6;
+  options.tolerance = 1e-14;
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 0u);
+  CHECK(result.value().brep.shell_count() == 1u);
+  CHECK(validate_topology(result.value().brep).ok());
+  const double expected = 9.9375e-15;
+  CHECK(std::abs(volume_of(result.value().brep) - expected) <= 1e-9 * expected);
+}
+
 TEST_CASE("shell rejects opening every face") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
   const auto ids = box.face_ids();

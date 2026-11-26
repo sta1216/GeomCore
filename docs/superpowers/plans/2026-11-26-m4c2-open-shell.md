@@ -699,14 +699,15 @@ git commit -m "docs(m4c2): record open-shell evidence"
 
 | Item | Value |
 | --- | --- |
-| Debug `*shell*` | 51 cases / 524 assertions, 0 failed, 1,099 skipped |
+| Debug `*shell*` | 52 cases / 531 assertions, 0 failed, 1,099 skipped |
 | Debug lane `*shell*,*half_space*,*blend*,*editor*` | 91 cases / 946 assertions, 0 failed, 1,059 skipped |
-| Release `*shell*` | 51 cases / 1,916 assertions, 0 failed, 1,099 skipped |
-| Full Release | 1,150 cases / 682,717 assertions, 0 failed, 0 skipped (exit 0, ~12m40s) |
+| Release `*shell*` | 52 cases / 1,923 assertions, 0 failed, 1,099 skipped |
+| Full Release | 1,151 cases / 682,724 assertions, 0 failed, 0 skipped (exit 0) |
 | Full Debug | PENDING — the eight `brep_boolean_curved_test.cpp` sphere/torus half-space cases exceed 20 min each under `/Od`; the Debug lane above is the gate |
 | Open top box `2x3x4`, t=0.25 | 9.9375 |
 | Opposite open box, t=0.25 | 9.0 |
 | Oblique tetra, a=2, t=0.1 | 0.740147367097487 (analytic) |
+| Scaled open box `2x3x4x1e-5`, t=2.5e-6 | 9.9375e-15 (relative 1e-9) |
 | Bench 100^3 closed / open | 58,808 / 49,204 |
 
 The QA file now holds 54 assertions (46 in

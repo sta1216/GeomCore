@@ -250,13 +250,15 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
     // which a successful boolean can still do when the relaxed cavity lies
     // wholly outside the input. Require that material was actually removed
     // before reporting an open shell; this is also the geometric limit of an
-    // over-thick wall.
+    // over-thick wall. The floor is a fraction of the input volume, not an
+    // absolute volume: a 1e-5-scale model must keep the same fate as its unit
+    // counterpart.
     const Result<MassProperties> before = mass_properties(brep);
     if (!before.has_value()) return before.error();
     const Result<MassProperties> after = mass_properties(shelled);
     if (!after.has_value()) return after.error();
     const double removed = before.value().volume - after.value().volume;
-    if (removed <= 1e-12 * std::max(1.0, std::fabs(before.value().volume))) {
+    if (removed <= 1e-12 * std::fabs(before.value().volume)) {
       return Error{Errc::degenerate, no_interior};
     }
   }
