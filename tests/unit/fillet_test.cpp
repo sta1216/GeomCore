@@ -323,15 +323,24 @@ TEST_CASE("fillet_edges rejects a radius at the section limit") {
   REQUIRE_FALSE(too_large.has_value());
   CHECK(too_large.error().code == Errc::unsupported);
 
+  // One selected end leaves a flat side of width `extent - r`, so this
+  // near-limit radius is still valid.
   const auto just_below =
-      geom::fillet_edges(box, std::span<const EdgeId>(&edge, 1), {0.999, 1e-9});
+      geom::fillet_edges(box, std::span<const EdgeId>(&edge, 1), {0.9999999999, 1e-9});
   REQUIRE(just_below.has_value());
   CHECK(geom::validate_topology(just_below.value().brep).ok());
+
+  // Two opposite corners on one side leave only `extent - 2r`; the same radius
+  // is valid here as long as that face stays wider than the tolerance.
+  const std::vector<EdgeId> all = family_edges(box);
+  const std::array<EdgeId, 2> diagonal{all[0], all[3]};
+  const auto diagonal_result = geom::fillet_edges(box, diagonal, {0.9999999999, 1e-9});
+  REQUIRE(diagonal_result.has_value());
+  CHECK(geom::validate_topology(diagonal_result.value().brep).ok());
 
   // A radius closer than the tolerance to the limit leaves a 2e-10 side face,
   // which the assembler cannot represent; reject it with a stable public error
   // instead of leaking the assembler message.
-  const std::vector<EdgeId> all = family_edges(box);
   const auto sliver = geom::fillet_edges(box, all, {0.9999999999, 1e-9});
   REQUIRE_FALSE(sliver.has_value());
   CHECK(sliver.error().code == Errc::unsupported);

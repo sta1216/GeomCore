@@ -341,11 +341,8 @@ inline Result<Brep> fillet_box_edges(const FilletBox& box, std::span<const int> 
   if (!(extent_a > 0.0) || !(extent_b > 0.0)) {
     return Error{Errc::unsupported, "fillet_edges: only an axis-aligned box is supported"};
   }
-  const double section_limit = 0.5 * std::min(extent_a, extent_b);
-  if (!(radius < section_limit - 0.5 * tolerance)) {
-    return Error{Errc::unsupported,
-                 "fillet_edges: radius exceeds the box cross-section or leaves a face "
-                 "narrower than the tolerance"};
+  if (!(radius < 0.5 * std::min(extent_a, extent_b))) {
+    return Error{Errc::unsupported, "fillet_edges: radius exceeds the box cross-section"};
   }
 
   std::array<std::array<bool, 2>, 2> selected{};
@@ -360,6 +357,24 @@ inline Result<Brep> fillet_box_edges(const FilletBox& box, std::span<const int> 
       slot = true;
       ++selected_count;
     }
+  }
+
+  // Only a side with both cross-section corners selected keeps `extent - 2r`
+  // flat; a side with one selected end keeps `extent - r` and must not be
+  // rejected for a near-limit radius.
+  const bool side_a_lo_double = selected[0][0] && selected[0][1];
+  const bool side_a_hi_double = selected[1][0] && selected[1][1];
+  const bool side_b_lo_double = selected[0][0] && selected[1][0];
+  const bool side_b_hi_double = selected[0][1] && selected[1][1];
+  if ((side_a_lo_double || side_a_hi_double) &&
+      !(2.0 * radius < extent_b - tolerance)) {
+    return Error{Errc::unsupported,
+                 "fillet_edges: radius leaves a face narrower than the tolerance"};
+  }
+  if ((side_b_lo_double || side_b_hi_double) &&
+      !(2.0 * radius < extent_a - tolerance)) {
+    return Error{Errc::unsupported,
+                 "fillet_edges: radius leaves a face narrower than the tolerance"};
   }
 
   const double a_side_lo = box.lo[axis_b] +

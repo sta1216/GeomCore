@@ -37,7 +37,7 @@ A reviewer who wants general convex fillet should split M4c-3b instead of wideni
 ## Review Focus
 
 - **Mixed edge families.** A selection containing one vertical and one horizontal edge must return `unsupported`, not a solid with only one family filleted.
-- **Radius at the section limit.** `radius >= 0.5*min(other two extents) - 0.5*tolerance` must be rejected before assembly (the remaining side face would be narrower than the tolerance); a value further below the limit (e.g. `0.999` on the 2×3×4 box) must still produce a valid solid.
+- **Radius at the section limit.** `radius >= 0.5*min(other two extents)` must be rejected; additionally, for each side with **both** cross-section corners selected, `2*radius >= side_extent - tolerance` must be rejected before assembly (the remaining flat face would be narrower than the tolerance). A side with only one selected end keeps `side_extent - r`, so `r=0.9999999999` on the 2×3×4 box must still succeed for k=1 and for a diagonal k=2.
 - **All four corners on a cap.** With four selected edges the cap ring alternates four straight segments and four arcs, and the four cylinder patches must share the arcs without duplicate or missing vertices.
 - **Non-box shapes.** A tetrahedron, cylinder, or rotated box must be rejected with the stable box-only message; no accidental acceptance through a coordinate-collapse check.
 - **Failure immutability.** Every rejection (bad radius, mixed family, dead edge, non-box) must leave the input's counts, volume, and surface list unchanged; successful calls must do the same.
@@ -475,7 +475,7 @@ Expected RED: the radius limit and mixed-family tests fail because the builder c
 
 - [ ] **Step 3: Add the guards**
 
-- Before building, enforce `radius < 0.5 * min(a, b) - 0.5 * tolerance`. On failure return `unsupported "fillet_edges: radius exceeds the box cross-section or leaves a face narrower than the tolerance"`. The tolerance term keeps a sub-tolerance sliver from reaching the assembler, which would otherwise leak `assemble_curved_solid: edge is used once`; do not add any other epsilon.
+- Before building, enforce `radius < 0.5 * min(a, b)` (`unsupported "fillet_edges: radius exceeds the box cross-section"`). After building the `selected` mask, for each side whose two corner flags are both set enforce `2*radius < side_extent - tolerance` (`unsupported "fillet_edges: radius leaves a face narrower than the tolerance"`). Only a doubly-filleted side has `side_extent - 2r`; a singly-filleted side has `side_extent - r`, so a global `2r` cap would reject valid k=1/k=2 cases. Do not add any other epsilon.
 - Keep the mixed-family check before any geometry construction.
 - Verify edge endpoints lie at two distinct family extremes and at one of the four cross-section corners; reject with the stable messages from Task 1.
 - Return only after `validate_topology`; do not return the assembled solid if the report has issues.
@@ -563,13 +563,13 @@ git commit -m "docs(brep): record the M4c-3a box fillet contract and benchmark"
 
 | Item | Value |
 | --- | --- |
-| Debug `*fillet*` | 8 cases / 882 assertions, 0 failed |
-| Release `*fillet*` | 8 cases / 882 assertions, 0 failed |
-| Full Release | 1,159 cases / 683,606 assertions, 0 failed (880 s) |
+| Debug `*fillet*` | 8 cases / 884 assertions, 0 failed |
+| Release `*fillet*` | 8 cases / 884 assertions, 0 failed |
+| Full Release | 1,159 cases / 683,608 assertions, 0 failed (880 s) |
 | One-edge volume | `23.946349540849312` (plan anchor `23.94634954084936`, absolute difference `4.8e-14`, within `1e-9`) |
 | Four-edge volume | `23.785398163397282` (plan anchor `23.78539816339745`, absolute difference `1.7e-13`, within `1e-9`) |
 | Benchmark 100-cube, 4 vertical edges, r=1 | min `7.587` / median `8.247` / max `12.766` ms; volume `999914.159265358` vs `999914.159265359` (relative `1.1e-15`); exit 0 |
-| Debug lane (`*fillet*,*blend*,*editor*`) | 56 cases / 1,392 assertions, 0 failed |
+| Debug lane (`*fillet*,*blend*,*editor*`) | 56 cases / 1,394 assertions, 0 failed |
 
 Task 1 validation-order clarification: `fillet_edges` checks the empty span
 **before** the option checks, because the default `FilletOptions{}` has

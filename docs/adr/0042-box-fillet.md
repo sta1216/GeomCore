@@ -50,9 +50,11 @@ M4c-3a implements exactly that slice:
   mixed families (`unsupported "fillet_edges: selected edges must be parallel"`);
   a dead id
   (`index_out_of_range "fillet_edges: edge does not belong to the solid"`); and
-  `radius >= 0.5 * min(cross-section extents) - 0.5 * tolerance`
-  (`unsupported "fillet_edges: radius exceeds the box cross-section or leaves a
-  face narrower than the tolerance"`). The per-edge axis-alignment, box-corner
+  `radius >= 0.5 * min(cross-section extents)`
+  (`unsupported "fillet_edges: radius exceeds the box cross-section"`), and,
+  when both corners of a side are selected, `2*radius >= side_extent - tolerance`
+  (`unsupported "fillet_edges: radius leaves a face narrower than the
+  tolerance"`). The per-edge axis-alignment, box-corner
   and shared-vertex checks remain as defensive branches, but every edge of a
   valid box already satisfies them, so their messages are not part of the
   reachable public contract.

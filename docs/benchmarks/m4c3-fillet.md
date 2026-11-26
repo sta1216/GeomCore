@@ -40,10 +40,10 @@ built only with `-DGEOM_BUILD_BENCH=ON` and is not part of ctest.
 
 ## Test evidence
 
-- `*fillet*`: 8 cases / 882 assertions in Debug and 8 / 882 in Release, 0
+- `*fillet*`: 8 cases / 884 assertions in Debug and 8 / 884 in Release, 0
   failed (post-review Task 3 lane re-run on this tree).
-- Debug lane `*fillet*,*blend*,*editor*`: 56 cases / 1,392 assertions, 0 failed.
-- Full Release: 1,159 cases / 683,606 assertions, 0 failed (880 s).
+- Debug lane `*fillet*,*blend*,*editor*`: 56 cases / 1,394 assertions, 0 failed.
+- Full Release: 1,159 cases / 683,608 assertions, 0 failed (880 s).
 - Full Debug remains PENDING: the suite still contains the known >20-minute
   cases documented in earlier milestones, so the Debug lane above is the fillet
   evidence, not a full Debug pass.
