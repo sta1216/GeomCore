@@ -95,6 +95,7 @@ set(GEOM_TEST_SOURCES
   unit/trimmed_domain_test.cpp
   unit/tessellate_trimmed_test.cpp
   unit/chamfer_test.cpp
+  unit/fillet_test.cpp
   unit/shell_test.cpp
   unit/blend_qa_test.cpp
   unit/half_space_test.cpp
