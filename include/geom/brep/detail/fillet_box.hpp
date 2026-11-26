@@ -313,8 +313,9 @@ inline Result<FilletBox> fillet_box_bounds(const Brep& brep, double tolerance) {
   return box;
 }
 
-// Builds the filleted solid for the box. Task 1 rounds one corner; the corner
-// span carries the Task 2 generalization.
+// Builds the filleted solid for the box. Every selected corner of the one
+// parallel family gets its own quarter-cylinder patch; the two caps and the
+// four side faces are built once and walk all four cross-section corners.
 inline Result<Brep> fillet_box_edges(const FilletBox& box, std::span<const int> corners,
                                      int family_axis, double radius, double tolerance) {
   if (!std::isfinite(radius)) {
@@ -344,14 +345,19 @@ inline Result<Brep> fillet_box_edges(const FilletBox& box, std::span<const int> 
     return Error{Errc::unsupported, "fillet_edges: radius exceeds the box cross-section"};
   }
 
-  const int corner = corners.front();
-  if (corner < 0 || corner > 3) {
-    return Error{Errc::unsupported, "fillet_edges: edge is not a box corner edge"};
-  }
-  const int bits_a = corner & 1;
-  const int bits_b = (corner >> 1) & 1;
   std::array<std::array<bool, 2>, 2> selected{};
-  selected[static_cast<std::size_t>(bits_a)][static_cast<std::size_t>(bits_b)] = true;
+  std::size_t selected_count = 0;
+  for (const int corner : corners) {
+    if (corner < 0 || corner > 3) {
+      return Error{Errc::unsupported, "fillet_edges: edge is not a box corner edge"};
+    }
+    bool& slot = selected[static_cast<std::size_t>(corner & 1)]
+                         [static_cast<std::size_t>((corner >> 1) & 1)];
+    if (!slot) {
+      slot = true;
+      ++selected_count;
+    }
+  }
 
   const double a_side_lo = box.lo[axis_b] +
                            (selected[1][0] ? radius : 0.0);
@@ -371,7 +377,7 @@ inline Result<Brep> fillet_box_edges(const FilletBox& box, std::span<const int> 
                                (selected[1][0] ? radius : 0.0);
 
   std::vector<CurvedAssembledFace> faces;
-  faces.reserve(7);
+  faces.reserve(6u + selected_count);
   faces.push_back(fillet_box_detail::cap_face(box, family_axis, selected, true, radius));
   faces.push_back(fillet_box_detail::cap_face(box, family_axis, selected, false, radius));
   faces.push_back(
@@ -382,7 +388,15 @@ inline Result<Brep> fillet_box_edges(const FilletBox& box, std::span<const int> 
       fillet_box_detail::side_face(box, axis_b, 1, axis_a, b_side_lo, b_side_hi));
   faces.push_back(
       fillet_box_detail::side_face(box, axis_b, -1, axis_a, b_side_lo_rev, b_side_hi_rev));
-  faces.push_back(fillet_box_detail::cylinder_face(box, family_axis, bits_a, bits_b, radius));
+  for (int bits_a = 0; bits_a < 2; ++bits_a) {
+    for (int bits_b = 0; bits_b < 2; ++bits_b) {
+      if (!selected[static_cast<std::size_t>(bits_a)][static_cast<std::size_t>(bits_b)]) {
+        continue;
+      }
+      faces.push_back(
+          fillet_box_detail::cylinder_face(box, family_axis, bits_a, bits_b, radius));
+    }
+  }
 
   Result<Brep> assembled = assemble_curved_solid(faces, tolerance);
   if (!assembled.has_value()) return assembled.error();

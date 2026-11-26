@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -51,6 +52,15 @@ EdgeId vertical_edge_at(const Brep& brep, double x, double y) {
     }
   }
   return EdgeId{};
+}
+
+std::vector<EdgeId> family_edges(const Brep& brep) {
+  std::vector<EdgeId> result;
+  for (const std::array<double, 2>& corner : {std::array{0.0, 0.0}, std::array{2.0, 0.0},
+                                              std::array{2.0, 3.0}, std::array{0.0, 3.0}}) {
+    result.push_back(vertical_edge_at(brep, corner[0], corner[1]));
+  }
+  return result;
 }
 
 }  // namespace
@@ -111,4 +121,40 @@ TEST_CASE("fillet_edges rounds one vertical box edge exactly") {
   }
   CHECK(cylinders == 1u);
   CHECK(arcs == 2u);
+}
+
+TEST_CASE("fillet_edges rounds every subset of one box family") {
+  const Brep box = box_2x3x4();
+  const std::vector<EdgeId> all = family_edges(box);
+  const double pi = std::numbers::pi_v<double>;
+  const double per_edge = (1.0 - pi / 4.0) * 0.25 * 0.25 * 4.0;
+
+  for (std::size_t k = 1; k <= 4; ++k) {
+    const std::vector<EdgeId> selected(all.begin(), all.begin() + static_cast<std::ptrdiff_t>(k));
+    const auto result = geom::fillet_edges(box, selected, {0.25, 1e-9});
+    REQUIRE(result.has_value());
+    const Brep& filleted = result.value().brep;
+    CHECK(result.value().filleted_edges == k);
+    CHECK(filleted.vertex_count() == 8u + 2u * k);
+    CHECK(filleted.edge_count() == 12u + 3u * k);
+    CHECK(filleted.face_count() == 6u + k);
+    CHECK(std::abs(volume_of(filleted) - (24.0 - static_cast<double>(k) * per_edge)) <= 1e-9);
+    CHECK(geom::validate_topology(filleted).ok());
+  }
+}
+
+TEST_CASE("fillet_edges deduplicates and ignores selection order") {
+  const Brep box = box_2x3x4();
+  const std::vector<EdgeId> all = family_edges(box);
+  std::vector<EdgeId> duplicated{all[0], all[1], all[0], all[2], all[1]};
+  const auto forward = geom::fillet_edges(box, duplicated, {0.25, 1e-9});
+  REQUIRE(forward.has_value());
+  CHECK(forward.value().filleted_edges == 3u);
+
+  std::vector<EdgeId> reversed(all.begin(), all.begin() + 3);
+  std::reverse(reversed.begin(), reversed.end());
+  const auto backward = geom::fillet_edges(box, reversed, {0.25, 1e-9});
+  REQUIRE(backward.has_value());
+  CHECK(backward.value().brep.face_count() == forward.value().brep.face_count());
+  CHECK(std::abs(volume_of(backward.value().brep) - volume_of(forward.value().brep)) <= 1e-9);
 }
