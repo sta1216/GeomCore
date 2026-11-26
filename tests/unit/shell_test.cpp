@@ -34,6 +34,53 @@ double volume_of(const Brep& brep) {
   return mass.value().volume;
 }
 
+FaceId top_face(const Brep& brep) {
+  for (const FaceId face : brep.face_ids()) {
+    const auto& plane =
+        std::get<Plane3>(brep.geometry().surfaces[brep.face(face).surface]);
+    const Vec3d normal = brep.face(face).reversed ? plane.normal * -1.0 : plane.normal;
+    if (normal[2] > 0.5) return face;
+  }
+  FAIL("box has no +Z face");
+  return FaceId{};
+}
+
+FaceId bottom_face(const Brep& brep) {
+  for (const FaceId face : brep.face_ids()) {
+    const auto& plane =
+        std::get<Plane3>(brep.geometry().surfaces[brep.face(face).surface]);
+    const Vec3d normal = brep.face(face).reversed ? plane.normal * -1.0 : plane.normal;
+    if (normal[2] < -0.5) return face;
+  }
+  FAIL("box has no -Z face");
+  return FaceId{};
+}
+
+FaceId right_face(const Brep& brep) {
+  for (const FaceId face : brep.face_ids()) {
+    const auto& plane =
+        std::get<Plane3>(brep.geometry().surfaces[brep.face(face).surface]);
+    const Vec3d normal = brep.face(face).reversed ? plane.normal * -1.0 : plane.normal;
+    if (normal[0] > 0.5) return face;
+  }
+  FAIL("box has no +X face");
+  return FaceId{};
+}
+
+Brep right_tetrahedron(double a) {
+  const auto p = [](double x, double y, double z) { return Point3d{x, y, z}; };
+  const std::array<AssembledFace, 4> faces{{
+      {{p(0, 0, 0), p(0, 0, a), p(0, a, 0)}, {}, {-1, 0, 0}},
+      {{p(0, 0, 0), p(a, 0, 0), p(0, 0, a)}, {}, {0, -1, 0}},
+      {{p(0, a, 0), p(a, 0, 0), p(0, 0, 0)}, {}, {0, 0, -1}},
+      {{p(a, 0, 0), p(0, a, 0), p(0, 0, a)}, {}, {1 / std::sqrt(3.0), 1 / std::sqrt(3.0),
+                                                  1 / std::sqrt(3.0)}},
+  }};
+  const Result<Brep> tetra = assemble_solid(faces, 1e-9);
+  REQUIRE(tetra.has_value());
+  return tetra.value();
+}
+
 }  // namespace
 
 TEST_CASE("closed shell leaves a uniform cavity") {
@@ -64,23 +111,68 @@ TEST_CASE("shell rejects a thickness that leaves no interior") {
         std::string::npos);
 }
 
-TEST_CASE("shell refuses an open face") {
+TEST_CASE("shell opens a box through one face") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
-  FaceId top{};
-  for (const FaceId face : box.face_ids()) {
-    const auto& plane = std::get<Plane3>(box.geometry().surfaces[box.face(face).surface]);
-    const Vec3d normal = box.face(face).reversed ? plane.normal * -1.0 : plane.normal;
-    if (normal[2] > 0.5) top = face;
-  }
-  REQUIRE_FALSE(top.is_null());
+  const std::array<FaceId, 1> open{top_face(box)};
   ShellOptions options;
   options.thickness = 0.25;
-  const std::array<FaceId, 1> open{top};
+  options.tolerance = 1e-9;
   const Result<ShellResult> result = shell_solid(box, open, options);
-  REQUIRE_FALSE(result.has_value());
-  CHECK(result.error().code == Errc::unsupported);
-  CHECK(std::string_view(result.error().message) ==
-        "shell_solid: open faces are not supported in M4c-1");
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 0u);
+  CHECK(result.value().brep.shell_count() == 1u);
+  CHECK(validate_topology(result.value().brep).ok());
+  const Result<MassProperties> mass = mass_properties(result.value().brep);
+  REQUIRE(mass.has_value());
+  // 24 - (1.5 * 2.5 * 3.75).
+  CHECK(std::abs(mass.value().volume - 9.9375) <= 1e-9);
+}
+
+TEST_CASE("shell opens a box through two opposite faces") {
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
+  const std::array<FaceId, 2> open{top_face(box), bottom_face(box)};
+  ShellOptions options;
+  options.thickness = 0.25;
+  options.tolerance = 1e-9;
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 0u);
+  CHECK(result.value().brep.shell_count() == 1u);
+  CHECK(validate_topology(result.value().brep).ok());
+  // 24 - (1.5 * 2.5 * 4.0): the pocket runs through both open ends.
+  CHECK(std::abs(volume_of(result.value().brep) - 9.0) <= 1e-9);
+}
+
+TEST_CASE("shell opens a box through one side face") {
+  const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
+  const std::array<FaceId, 1> open{right_face(box)};
+  ShellOptions options;
+  options.thickness = 0.25;
+  options.tolerance = 1e-9;
+  const Result<ShellResult> result = shell_solid(box, open, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 0u);
+  CHECK(result.value().brep.shell_count() == 1u);
+  CHECK(validate_topology(result.value().brep).ok());
+  // 24 - (1.75 * 2.5 * 3.5): opening is on +X, so it must not depend on Z.
+  CHECK(std::abs(volume_of(result.value().brep) - 8.6875) <= 1e-9);
+}
+
+TEST_CASE("shell of an oblique tetrahedron matches the inset volume") {
+  const Brep tetra = right_tetrahedron(2.0);
+  const std::array<FaceId, 0> open{};
+  ShellOptions options;
+  options.thickness = 0.1;
+  options.tolerance = 1e-9;
+  const Result<ShellResult> result = shell_solid(tetra, open, options);
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 1u);
+  CHECK(result.value().brep.shell_count() == 2u);
+  CHECK(validate_topology(result.value().brep).ok());
+  const double outer = 4.0 / 3.0;
+  const double s = 2.0 - options.thickness * (3.0 + std::sqrt(3.0));
+  const double inner = s * s * s / 6.0;
+  CHECK(std::abs(volume_of(result.value().brep) - (outer - inner)) <= 1e-9);
 }
 
 TEST_CASE("closed axis-aligned shell is independent of face order") {
@@ -168,96 +260,8 @@ TEST_CASE("shell rejects opening every face") {
   REQUIRE_FALSE(result.has_value());
   CHECK(result.error().code == Errc::unsupported);
   CHECK(std::string_view(result.error().message) ==
-        "shell_solid: open faces are not supported in M4c-1");
+        "shell_solid: at least one face must stay closed");
 }
-
-TEST_CASE("shell refuses an oblique face") {
-  const double s = std::sqrt(2.0);
-  const auto p = [](double x, double y, double z) { return Point3d{x, y, z}; };
-  const AssembledFace bottom{{p(0, 0, 0), p(0, 1.5, 0), p(1.5, 0, 0)}, {}, {0, 0, -1}};
-  const AssembledFace top{{p(0, 0, 4), p(1.5, 0, 4), p(0, 1.5, 4)}, {}, {0, 0, 1}};
-  const AssembledFace front{{p(0, 0, 0), p(1.5, 0, 0), p(1.5, 0, 4), p(0, 0, 4)}, {}, {0, -1, 0}};
-  const AssembledFace diagonal{
-      {p(1.5, 0, 0), p(0, 1.5, 0), p(0, 1.5, 4), p(1.5, 0, 4)}, {}, {1 / s, 1 / s, 0}};
-  const AssembledFace left{{p(0, 1.5, 0), p(0, 0, 0), p(0, 0, 4), p(0, 1.5, 4)}, {}, {-1, 0, 0}};
-  const std::vector<AssembledFace> faces{bottom, top, front, diagonal, left};
-  const Result<Brep> prism = assemble_solid(faces, 1e-9);
-  REQUIRE(prism.has_value());
-
-  ShellOptions options;
-  options.thickness = 0.25;
-  const std::array<FaceId, 0> closed{};
-  const Result<ShellResult> result = shell_solid(prism.value(), closed, options);
-  REQUIRE_FALSE(result.has_value());
-  CHECK(result.error().code == Errc::unsupported);
-  CHECK(std::string_view(result.error().message) ==
-        "shell_solid: only axis-aligned faces are supported");
-}
-
-TEST_CASE("shell refuses any oblique face in any face order") {
-  const double a = 30.0 * 3.14159265358979323846 / 180.0;
-  const double b = 20.0 * 3.14159265358979323846 / 180.0;
-  const auto rot = [a, b](const Vec3d& p) {
-    const double x = std::cos(a) * p[0] - std::sin(a) * p[1];
-    const double y = std::sin(a) * p[0] + std::cos(a) * p[1];
-    const double y2 = std::cos(b) * y - std::sin(b) * p[2];
-    const double z2 = std::sin(b) * y + std::cos(b) * p[2];
-    return Vec3d{x, y2, z2};
-  };
-  const Point3d center{1.0, 1.0, 1.0};
-  std::array<Point3d, 8> corners{};
-  std::size_t c = 0;
-  for (int sx = -1; sx <= 1; sx += 2) {
-    for (int sy = -1; sy <= 1; sy += 2) {
-      for (int sz = -1; sz <= 1; sz += 2) {
-        const Vec3d offset = rot(Vec3d{static_cast<double>(sx), static_cast<double>(sy),
-                                       static_cast<double>(sz)});
-        corners[c++] = Point3d{center[0] + offset[0], center[1] + offset[1], center[2] + offset[2]};
-      }
-    }
-  }
-  std::vector<AssembledFace> faces;
-  for (int axis = 0; axis < 3; ++axis) {
-    for (int sign = -1; sign <= 1; sign += 2) {
-      Vec3d n{0, 0, 0};
-      n[axis] = static_cast<double>(sign);
-      const Vec3d normal = rot(n);
-      Vec3d basis{0, 0, 0};
-      basis[(axis + 1) % 3] = 1.0;
-      const Vec3d u = rot(basis);
-      const Vec3d v = cross(normal, u);
-      std::vector<Point3d> points;
-      for (const Point3d& p : corners) {
-        const Vec3d d = p - center;
-        if (dot(d, normal) > 0.0) points.push_back(p);
-      }
-      REQUIRE(points.size() == 4u);
-      std::sort(points.begin(), points.end(), [&](const Point3d& l, const Point3d& r) {
-        const Vec3d dl = l - center;
-        const Vec3d dr = r - center;
-        return std::atan2(dot(dl, v), dot(dl, u)) < std::atan2(dot(dr, v), dot(dr, u));
-      });
-      faces.push_back(AssembledFace{points, {}, normal});
-    }
-  }
-  ShellOptions options;
-  options.thickness = 0.25;
-  const auto check = [&options](std::vector<AssembledFace> input, const char* order) {
-    INFO("face order: " << order);
-    const Result<Brep> solid = assemble_solid(input, 1e-9);
-    REQUIRE(solid.has_value());
-    REQUIRE(validate_topology(solid.value()).ok());
-    const Result<ShellResult> result = shell_solid(solid.value(), {}, options);
-    REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == Errc::unsupported);
-    CHECK(std::string_view(result.error().message) ==
-          "shell_solid: only axis-aligned faces are supported");
-  };
-  check(faces, "canonical");
-  std::reverse(faces.begin(), faces.end());
-  check(faces, "reversed");
-}
-
 
 TEST_CASE("shell rejects bad options and dead faces") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 2.0, 2.0});
@@ -275,23 +279,19 @@ TEST_CASE("shell rejects bad options and dead faces") {
   CHECK(shell_solid(box, dead, options).error().code == Errc::index_out_of_range);
 }
 
-TEST_CASE("a duplicate open face request is still refused") {
+TEST_CASE("a duplicate open face request is accepted once") {
   const Brep box = box_solid(Point3d{0.0, 0.0, 0.0}, Point3d{2.0, 3.0, 4.0});
-  FaceId top{};
-  for (const FaceId face : box.face_ids()) {
-    const auto& plane = std::get<Plane3>(box.geometry().surfaces[box.face(face).surface]);
-    const Vec3d normal = box.face(face).reversed ? plane.normal * -1.0 : plane.normal;
-    if (normal[2] > 0.5) top = face;
-  }
-  REQUIRE_FALSE(top.is_null());
+  const FaceId top = top_face(box);
+  const std::array<FaceId, 2> open{top, top};
   ShellOptions options;
   options.thickness = 0.25;
-  const std::array<FaceId, 2> open{top, top};
+  options.tolerance = 1e-9;
   const Result<ShellResult> result = shell_solid(box, open, options);
-  REQUIRE_FALSE(result.has_value());
-  CHECK(result.error().code == Errc::unsupported);
-  CHECK(std::string_view(result.error().message) ==
-        "shell_solid: open faces are not supported in M4c-1");
+  REQUIRE(result.has_value());
+  CHECK(result.value().cavity_shells == 0u);
+  CHECK(result.value().brep.shell_count() == 1u);
+  CHECK(validate_topology(result.value().brep).ok());
+  CHECK(std::abs(volume_of(result.value().brep) - 9.9375) <= 1e-9);
 }
 
 TEST_CASE("shell rejects a wall below one coordinate ulp") {

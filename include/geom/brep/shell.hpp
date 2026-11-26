@@ -10,6 +10,7 @@
 
 #include <geom/brep/boolean_solid.hpp>
 #include <geom/brep/detail/blend_common.hpp>
+#include <geom/brep/detail/half_space.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/validate.hpp>
 #include <geom/core/error.hpp>
@@ -26,25 +27,29 @@ struct ShellOptions {
 
 struct ShellResult {
   Brep brep;
-  std::uint32_t cavity_shells = 0;  // enclosed pockets; always >= 1 on success
+  std::uint32_t cavity_shells = 0;  // enclosed pockets; 0 when a face is open
 };
 
-
-// Hollows a convex planar solid to a uniform wall of `thickness`, leaving an
-// inner cavity. M4c-1 accepts closed, axis-aligned solids only: an open face
-// list, an oblique face, a non-convex body, or a curved face is refused with a
-// stable `Errc::unsupported` diagnostic rather than returning an order-
-// dependent solid. M4c-2 lifts the open-face and oblique restrictions together
-// with the splitter/boolean face-order fix.
+// Hollows a convex planar solid to a uniform wall of `thickness` at every face
+// that is not listed in `open_faces`. A listed face is left unwalled: its
+// cavity half-space is relaxed outward past the input surface, so the pocket
+// breaks through and the result is an open shell with no enclosed pocket.
+// M4c-2 supports any closed convex planar solid, including oblique faces, and
+// any non-empty proper subset of open faces. Duplicate open-face ids are
+// accepted once; opening every face is refused because no wall would remain.
 //
-// The cavity is the axis-aligned box inset by `thickness` on every side, then
-// the final regularized difference A - cavity leaves the uniform wall. The box
-// is built directly instead of being cut out of a seed: every accepted face is
-// axis-aligned, so a convex solid with only axis-aligned faces is a box, and
-// constructing it directly avoids the order-sensitive splitter path.
+// A closed solid whose faces are all axis-aligned is a box, and intersecting
+// its half-spaces leaves one interval per axis. That case keeps the direct
+// inset-box path: the cavity is the input AABB inset by `thickness` on every
+// side and no boolean splitter is involved. Every other input, including a
+// closed oblique solid and any open shell, uses the general path: the
+// inward-offset face half-spaces are intersected with a bounding seed box (the
+// input AABB expanded by at least the wall thickness), which keeps the cavity
+// bounded when an open face is relaxed outward. The final regularized
+// difference A - cavity leaves the uniform wall.
 //
-// A thickness that consumes the body in any axis leaves no interior and is
-// reported as degenerate.
+// `cavity_shells` is the number of enclosed pockets after the cut and is 0
+// when any face is open.
 //
 // Diagnostics are static texts because Error::message is a const char*.
 inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId> open_faces = {},
@@ -67,89 +72,167 @@ inline Result<ShellResult> shell_solid(const Brep& brep, std::span<const FaceId>
   const Result<detail::BlendPlanarSolid> view =
       detail::blend_planar_convex_solid(brep, options.tolerance, "shell_solid");
   if (!view.has_value()) return view.error();
+  const detail::BlendPlanarSolid& solid = view.value();
+  const double tolerance = options.tolerance;
 
-  // Requested open faces are validated against the single shell of the input
-  // and deduplicated by marking their shell position; a repeat is a no-op.
-  std::vector<char> is_open(view.value().faces.size(), 0);
+  // Requested open faces are validated against the single shell of the input,
+  // then deduplicated: a repeat is accepted once. Opening every face leaves
+  // nothing to wall and is refused before any geometry is built.
+  std::vector<std::size_t> open_indices;
+  open_indices.reserve(open_faces.size());
   for (const FaceId face : open_faces) {
     if (!brep.face_alive(face)) {
       return Error{Errc::index_out_of_range,
                    "shell_solid: open face does not belong to the solid"};
     }
-    const auto found = std::find(view.value().faces.begin(), view.value().faces.end(), face);
-    if (found == view.value().faces.end()) {
+    const auto found = std::find(solid.faces.begin(), solid.faces.end(), face);
+    if (found == solid.faces.end()) {
       return Error{Errc::index_out_of_range,
                    "shell_solid: open face does not belong to the solid"};
     }
-    is_open[static_cast<std::size_t>(found - view.value().faces.begin())] = 1;
+    open_indices.push_back(static_cast<std::size_t>(found - solid.faces.begin()));
   }
-  const bool any_open =
-      std::any_of(is_open.begin(), is_open.end(), [](char flag) { return flag != 0; });
-  if (any_open) {
-    return Error{Errc::unsupported, "shell_solid: open faces are not supported in M4c-1"};
+  std::sort(open_indices.begin(), open_indices.end());
+  open_indices.erase(std::unique(open_indices.begin(), open_indices.end()),
+                     open_indices.end());
+
+  const bool any_open = !open_indices.empty();
+  if (any_open && open_indices.size() == solid.faces.size()) {
+    return Error{Errc::unsupported,
+                 "shell_solid: at least one face must stay closed"};
   }
 
-  const double tolerance = options.tolerance;
-
-  // This slice of the heal/blend milestone supports closed, axis-aligned
-  // convex solids (boxes and prisms built from box faces). Sequential
-  // half-space clipping and the boolean stitch are order sensitive for open
-  // pockets and oblique faces, so refuse those inputs explicitly rather than
-  // returning an order-dependent result. M4c-2 lifts the restriction together
-  // with the splitter/boolean ordering fix.
-  std::size_t oblique_faces = 0;
-  for (std::size_t i = 0; i < view.value().faces.size(); ++i) {
-    int non_axis = 0;
+  // The direct inset-box path is only valid for a closed solid whose unit face
+  // normals are coordinate axes. The slack scales with the tolerance, with a
+  // dimensionless floor that keeps an exactly axis-aligned normal exact even
+  // for a very small requested tolerance.
+  const double axis_slack = std::max(64.0 * tolerance, 1e-12);
+  const auto axis_aligned = [axis_slack](const Vec3d& normal) {
+    int dominant = -1;
     for (int axis = 0; axis < 3; ++axis) {
-      if (std::abs(view.value().outward[i][axis]) > 1e-9) ++non_axis;
+      if (std::fabs(normal[axis]) > axis_slack) {
+        if (dominant >= 0) return false;
+        dominant = axis;
+      }
     }
-    if (non_axis > 1) ++oblique_faces;
-  }
-  if (oblique_faces > 0u) {
-    return Error{Errc::unsupported, "shell_solid: only axis-aligned faces are supported"};
+    return dominant >= 0 &&
+           std::fabs(std::fabs(normal[dominant]) - 1.0) <= axis_slack;
+  };
+  bool all_axis_aligned = true;
+  for (const Vec3d& outward : solid.outward) {
+    if (!axis_aligned(outward)) {
+      all_axis_aligned = false;
+      break;
+    }
   }
 
-  // Every accepted face is axis-aligned. A closed convex solid whose faces are
-  // all axis-aligned is a box: intersecting the half-spaces leaves one interval
-  // per axis, independent of the other axes. The cavity is therefore the input
-  // bounding box inset by the wall thickness on every side.
-  Point3d lo = brep.vertex(brep.vertex_ids().front()).point;
-  Point3d hi = lo;
-  for (const VertexId id : brep.vertex_ids()) {
-    const Point3d& point = brep.vertex(id).point;
+  // A wall that is only a few tolerances wide cannot be measured or stitched
+  // back onto the outer solid; both paths report the same geometric limit.
+  const char* const no_interior =
+      "shell_solid: wall thickness leaves no measurable interior at this tolerance";
+
+  const auto build_cavity = [&]() -> Result<Brep> {
+    if (!any_open && all_axis_aligned) {
+      // Every accepted face is axis-aligned, so the cavity is the input
+      // bounding box inset by the wall thickness on every side.
+      Point3d lo = brep.vertex(brep.vertex_ids().front()).point;
+      Point3d hi = lo;
+      for (const VertexId id : brep.vertex_ids()) {
+        const Point3d& point = brep.vertex(id).point;
+        for (int axis = 0; axis < 3; ++axis) {
+          lo[axis] = std::min(lo[axis], point[axis]);
+          hi[axis] = std::max(hi[axis], point[axis]);
+        }
+      }
+      const Point3d inner_lo{lo[0] + options.thickness, lo[1] + options.thickness,
+                             lo[2] + options.thickness};
+      const Point3d inner_hi{hi[0] - options.thickness, hi[1] - options.thickness,
+                             hi[2] - options.thickness};
+      for (int axis = 0; axis < 3; ++axis) {
+        if (!(inner_hi[axis] > inner_lo[axis])) {
+          return Error{Errc::degenerate,
+                       "shell_solid: wall thickness leaves no interior"};
+        }
+      }
+      const Result<Brep> inner_box = make_box(inner_lo, inner_hi, tolerance);
+      if (!inner_box.has_value()) {
+        return Error{Errc::degenerate, no_interior};
+      }
+      return inner_box.value();
+    }
+
+    // General path. The seed box is the input AABB expanded on every axis by
+    // a margin of at least the wall thickness: a relaxed open face must push
+    // the pocket past the input surface, and the seed box keeps it bounded.
+    Point3d lo = brep.vertex(brep.vertex_ids().front()).point;
+    Point3d hi = lo;
+    for (const VertexId id : brep.vertex_ids()) {
+      const Point3d& point = brep.vertex(id).point;
+      for (int axis = 0; axis < 3; ++axis) {
+        lo[axis] = std::min(lo[axis], point[axis]);
+        hi[axis] = std::max(hi[axis], point[axis]);
+      }
+    }
+    double extent = 0.0;
     for (int axis = 0; axis < 3; ++axis) {
-      lo[axis] = std::min(lo[axis], point[axis]);
-      hi[axis] = std::max(hi[axis], point[axis]);
+      extent = std::max(extent, hi[axis] - lo[axis]);
     }
-  }
-  const Point3d inner_lo{lo[0] + options.thickness, lo[1] + options.thickness,
-                         lo[2] + options.thickness};
-  const Point3d inner_hi{hi[0] - options.thickness, hi[1] - options.thickness,
-                         hi[2] - options.thickness};
-  for (int axis = 0; axis < 3; ++axis) {
-    if (!(inner_hi[axis] > inner_lo[axis])) {
-      return Error{Errc::degenerate, "shell_solid: wall thickness leaves no interior"};
-    }
-  }
-  const Result<Brep> inner_box = make_box(inner_lo, inner_hi, tolerance);
-  if (!inner_box.has_value()) {
-    return Error{Errc::degenerate, "shell_solid: wall thickness leaves no measurable interior"};
-  }
+    const double margin = std::max({options.thickness, 1e-6 * std::max(1.0, extent),
+                                    1000.0 * tolerance});
 
-  Brep inner = inner_box.value();
+    std::vector<detail::HalfSpacePlane> planes;
+    planes.reserve(6u + solid.faces.size());
+    for (int axis = 0; axis < 3; ++axis) {
+      Vec3d positive{};
+      positive[axis] = 1.0;
+      planes.push_back(detail::HalfSpacePlane{positive, hi[axis] + margin});
+      Vec3d negative{};
+      negative[axis] = -1.0;
+      planes.push_back(detail::HalfSpacePlane{negative, -(lo[axis] - margin)});
+    }
+
+    // A relaxed open face at an input extreme can land exactly on the matching
+    // seed-box plane when the margin equals the thickness. Coincident
+    // half-spaces would build the same face twice and fail assembly, so the
+    // seed box keeps the plane in that case.
+    const double plane_slack = std::max(1000.0 * tolerance, 1e-12 * solid.scale);
+    for (std::size_t i = 0; i < solid.faces.size(); ++i) {
+      const bool is_open =
+          std::binary_search(open_indices.begin(), open_indices.end(), i);
+      const Vec3d& normal = solid.outward[i];
+      const double offset =
+          solid.offset[i] + (is_open ? options.thickness : -options.thickness);
+      const bool duplicate = std::any_of(
+          planes.begin(), planes.end(),
+          [&](const detail::HalfSpacePlane& existing) {
+            return dot(existing.normal, normal) >= 1.0 - 1e-12 &&
+                   std::fabs(existing.offset - offset) <= plane_slack;
+          });
+      if (!duplicate) {
+        planes.push_back(detail::HalfSpacePlane{normal, offset});
+      }
+    }
+
+    const Result<Brep> cavity = detail::half_space_solid(planes, tolerance);
+    if (!cavity.has_value()) {
+      if (cavity.error().code == Errc::non_finite) return cavity.error();
+      return Error{Errc::degenerate, no_interior};
+    }
+    return cavity.value();
+  };
+
+  const Result<Brep> cavity = build_cavity();
+  if (!cavity.has_value()) return cavity.error();
 
   SolidBooleanOptions boolean_options;
   boolean_options.tolerance = tolerance;
   const Result<SolidBooleanResult> difference = boolean_solid(
-      brep, inner, SolidBooleanOp::difference, boolean_options);
+      brep, cavity.value(), SolidBooleanOp::difference, boolean_options);
   if (!difference.has_value()) {
     // A wall that is only a few tolerances wide cannot be stitched back onto
     // the outer solid; report the geometric limit rather than a stitcher error.
-    if (difference.error().code == Errc::non_finite) {
-      return Error{Errc::non_finite, "shell_solid: cavity difference failed a numeric check"};
-    }
-    return Error{Errc::degenerate,
-                 "shell_solid: wall thickness leaves no measurable interior at this tolerance"};
+    if (difference.error().code == Errc::non_finite) return difference.error();
+    return Error{Errc::degenerate, no_interior};
   }
 
   Brep shelled = std::move(difference.value().brep);
