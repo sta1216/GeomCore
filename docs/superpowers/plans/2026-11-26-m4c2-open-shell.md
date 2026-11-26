@@ -689,7 +689,7 @@ Run `.\build\tests\Release\geom_tests.exe`; expected 0 failures. Record the exac
 - [ ] **Step 5: Commit**
 
 ```bash
-git add bench/bench_m4c1.cpp docs/benchmarks/m4c2-shell.md docs/adr/0041-planar-blends-via-half-space-cuts.md docs/architecture/geometry-library-architecture.md
+git add bench/bench_m4c1.cpp docs/benchmarks/m4c2-shell.md docs/adr/0041-planar-blends-via-half-space-cuts.md docs/architecture/geometry-library-architecture.md docs/superpowers/plans/2026-11-26-m4c2-open-shell.md
 git commit -m "docs(m4c2): record open-shell evidence"
 ```
 
@@ -699,10 +699,16 @@ git commit -m "docs(m4c2): record open-shell evidence"
 
 | Item | Value |
 | --- | --- |
-| Debug `*shell*` | PENDING |
-| Release `*shell*` | PENDING |
-| Full Release | PENDING |
-| Open top box `2x3x4`, t=0.25 | PENDING (expect 9.9375) |
-| Opposite open box, t=0.25 | PENDING (expect 9.0) |
-| Oblique tetra, a=2, t=0.1 | PENDING (analytic) |
-| Bench 100^3 closed / open | PENDING |
+| Debug `*shell*` | 51 cases / 524 assertions, 0 failed, 1,099 skipped |
+| Debug lane `*shell*,*half_space*,*blend*,*editor*` | 91 cases / 946 assertions, 0 failed, 1,059 skipped |
+| Release `*shell*` | 51 cases / 1,916 assertions, 0 failed, 1,099 skipped |
+| Full Release | 1,150 cases / 682,717 assertions, 0 failed, 0 skipped (exit 0, ~12m40s) |
+| Open top box `2x3x4`, t=0.25 | 9.9375 |
+| Opposite open box, t=0.25 | 9.0 |
+| Oblique tetra, a=2, t=0.1 | 0.740147367097487 (analytic) |
+| Bench 100^3 closed / open | 58,808 / 49,204 |
+
+The QA file now holds 54 assertions (46 in
+`blend outputs are deterministic and leave inputs unchanged` + 8 in
+`chamfer and shell outputs tessellate watertight`); this supersedes the
+52-assertion figure in `task-6-report.md`.

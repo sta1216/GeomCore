@@ -1,9 +1,11 @@
 # ADR-0041: Planar chamfer and shell as exact half-space operations
 
-- Status: accepted (M4c-1)
-- Date: 2026-11-25
-- Related: architecture §8.9, §16.4; `docs/benchmarks/m4c1-blends.md`; plan
-  `docs/superpowers/plans/2026-11-25-m4c1-planar-chamfer-shell.md`
+- Status: accepted (M4c-1; extended by M4c-2)
+- Date: 2026-11-25 (M4c-2 extension added 2026-11-26)
+- Related: architecture §8.9, §16.4; `docs/benchmarks/m4c1-blends.md`,
+  `docs/benchmarks/m4c2-shell.md`; plans
+  `docs/superpowers/plans/2026-11-25-m4c1-planar-chamfer-shell.md`,
+  `docs/superpowers/plans/2026-11-26-m4c2-open-shell.md`
 
 ## Context
 
@@ -48,6 +50,35 @@ M4c-1 implements exactly the two operations above:
   remain M4c-2. A faceted "fillet" would look like a blend but fail the
   geometric contract, so it is explicitly rejected.
 
+## M4c-2 extension (2026-11-26)
+
+M4c-2 supersedes the two M4c-1 shell limits above:
+
+- **Open faces are supported.** `shell_solid` accepts any non-empty proper
+  subset of the input faces in `open_faces`. For an open face the cavity
+  half-space is relaxed outward by the wall thickness, so the pocket breaks
+  through that face and the result has `cavity_shells == 0` and one shell.
+  Duplicate ids are accepted once; opening every face is refused with
+  `Errc::unsupported` and the message
+  `shell_solid: at least one face must stay closed`, because no wall would
+  remain.
+- **Oblique convex faces are supported.** The closed-shell domain is every
+  closed, convex, single-shell, all-planar solid, not only an axis-aligned box.
+  The cavity is the intersection of the inward-offset face half-spaces with a
+  bounding seed box, and the result is the regularized difference `A - cavity`.
+  The direct inset-box shortcut is retained only for the all-axis-aligned case.
+
+The M4c-1 rejection messages `shell_solid: open faces are not supported in
+M4c-1` and `shell_solid: only axis-aligned faces are supported` are therefore
+superseded and no longer emitted. What remains rejected before mutation is:
+curved or non-planar faces, non-convex bodies, open or multiple input shells,
+non-`LineCurve3` edges, dead/foreign open-face ids, opening every face, and a
+wall that leaves no measurable interior (`Errc::degenerate`).
+
+**Fillet stays deferred.** Rolling-ball fillet, including variable radius,
+is not part of M4c-2 and moves to M4c-3; a faceted approximation is still
+explicitly rejected.
+
 ## Alternatives rejected
 
 - **Polyhedral fillet approximation**: a chain of planar strips around a
@@ -65,16 +96,19 @@ M4c-1 implements exactly the two operations above:
 - **Open pockets via an outward cut**: shifting the open face's plane outward
   and keeping `below` is the identity for a convex body; a seed-box
   intersection produces the pocket but the splitter's cut-chain stitching is
-  order sensitive (failed on 312/720 face orders for one box). Deferred with the
-  splitter/boolean face-order hardening rather than shipped as a best-effort
-  result.
+  order sensitive (failed on 312/720 face orders for one box). Deferred in
+  M4c-1 with the splitter/boolean face-order hardening. **Superseded by the
+  M4c-2 extension above**: the order-independent half-space cavity plus the
+  regularized difference now ships open shells without depending on splitter
+  cut-chain order.
 
 ## Consequences
 
 - Chamfer and shell are exact for the stated domain and reuse `SolidEditor`,
   `split_solid_by_plane`, `boolean_solid` and the existing validators.
-- The shell domain is effectively boxes; this is narrower than §8.9's eventual
-  contract and is documented as such in §8.9 and §16.4.
+- The M4c-1 shell domain was effectively boxes; M4c-2 widens it to every
+  closed convex planar solid and to non-empty proper open-face subsets, as
+  recorded in the extension above and in §8.9 and §16.4.
 - The splitter's cut-chain clipping remains a documented weak point for oblique
   cuts and coplanar multi-edge unions; it is listed as an M4c-2 item, not hidden
   behind a silent fallback.

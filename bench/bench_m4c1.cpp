@@ -4,13 +4,16 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <variant>
 #include <vector>
 
+#include <geom/brep/assemble.hpp>
 #include <geom/brep/chamfer.hpp>
 #include <geom/brep/mass_properties.hpp>
 #include <geom/brep/primitives.hpp>
 #include <geom/brep/shell.hpp>
 #include <geom/core/error.hpp>
+#include <geom/surfaces/plane.hpp>
 
 namespace {
 
@@ -38,6 +41,37 @@ void print_stats(const char* label, const Stats& stats, std::size_t runs) {
 
 bool close_to(double actual, double expected) {
   return std::abs(actual - expected) <= 1e-6 * std::abs(expected);
+}
+
+geom::FaceId top_face(const geom::Brep& brep) {
+  for (const geom::FaceId face : brep.face_ids()) {
+    const auto& plane =
+        std::get<geom::Plane3>(brep.geometry().surfaces[brep.face(face).surface]);
+    const geom::Vec3d normal =
+        brep.face(face).reversed ? plane.normal * -1.0 : plane.normal;
+    if (normal[2] > 0.5) return face;
+  }
+  return geom::FaceId{};
+}
+
+// The four faces of the right tetrahedron with legs `a` along +X, +Y and +Z,
+// copied from the acceptance test: outward normals and CCW rings about them.
+geom::Brep right_tetrahedron(double a) {
+  const auto p = [](double x, double y, double z) { return geom::Point3d{x, y, z}; };
+  const std::array<geom::AssembledFace, 4> faces{{
+      {{p(0, 0, 0), p(0, 0, a), p(0, a, 0)}, {}, {-1, 0, 0}},
+      {{p(0, 0, 0), p(a, 0, 0), p(0, 0, a)}, {}, {0, -1, 0}},
+      {{p(0, a, 0), p(a, 0, 0), p(0, 0, 0)}, {}, {0, 0, -1}},
+      {{p(a, 0, 0), p(0, a, 0), p(0, 0, a)}, {},
+       {1 / std::sqrt(3.0), 1 / std::sqrt(3.0), 1 / std::sqrt(3.0)}},
+  }};
+  const geom::Result<geom::Brep> tetra = geom::assemble_solid(faces, 1e-9);
+  if (!tetra.has_value()) {
+    std::fprintf(stderr, "assemble_solid(tetra) failed: %s\n",
+                 geom::to_string(tetra.error().code));
+    return {};
+  }
+  return tetra.value();
 }
 
 }  // namespace
@@ -106,10 +140,80 @@ int main() {
     }
   }
 
+  // Open top: the cavity protrudes through +Z and the outer box clips it.
+  const std::array<geom::FaceId, 1> open{top_face(box.value())};
+  geom::ShellOptions open_options;
+  open_options.thickness = 1.0;
+  open_options.tolerance = 1e-9;
+  std::array<double, 5> open_samples{};
+  double open_volume = 0.0;
+  for (std::size_t i = 0; i < open_samples.size(); ++i) {
+    const Clock::time_point start = Clock::now();
+    const geom::Result<geom::ShellResult> opened =
+        geom::shell_solid(box.value(), open, open_options);
+    open_samples[i] = seconds_since(start) * 1000.0;
+    if (!opened.has_value()) {
+      std::fprintf(stderr, "shell_solid(open) failed: %s: %s\n",
+                   geom::to_string(opened.error().code), opened.error().message);
+      return 3;
+    }
+    const geom::Result<geom::MassProperties> props =
+        geom::mass_properties(opened.value().brep);
+    if (!props.has_value()) {
+      std::fprintf(stderr, "mass_properties(open shell) failed: %s\n",
+                   geom::to_string(props.error().code));
+      return 3;
+    }
+    open_volume = props.value().volume;
+    if (opened.value().cavity_shells != 0) {
+      std::fprintf(stderr, "open shell reported %u cavity shells\n",
+                   opened.value().cavity_shells);
+      return 3;
+    }
+  }
+  // Removed: 98 * 98 * 99 = 950,796; shell = 1,000,000 - 950,796 = 49,204.
+  if (!close_to(open_volume, 49204.0)) return 4;
+
+  // Oblique tetrahedron, t = 0.1: analytic shell volume.
+  const geom::Brep tetra = right_tetrahedron(2.0);
+  if (tetra.face_ids().empty()) return 5;
+  geom::ShellOptions tetra_options;
+  tetra_options.thickness = 0.1;
+  tetra_options.tolerance = 1e-9;
+  const double expected =
+      4.0 / 3.0 -
+      std::pow(2.0 - 0.1 * (3.0 + std::sqrt(3.0)), 3) / 6.0;
+  std::array<double, 5> tetra_samples{};
+  double tetra_volume = 0.0;
+  for (std::size_t i = 0; i < tetra_samples.size(); ++i) {
+    const Clock::time_point start = Clock::now();
+    const geom::Result<geom::ShellResult> tet =
+        geom::shell_solid(tetra, {}, tetra_options);
+    tetra_samples[i] = seconds_since(start) * 1000.0;
+    if (!tet.has_value()) {
+      std::fprintf(stderr, "shell_solid(tetra) failed: %s: %s\n",
+                   geom::to_string(tet.error().code), tet.error().message);
+      return 5;
+    }
+    const geom::Result<geom::MassProperties> props =
+        geom::mass_properties(tet.value().brep);
+    if (!props.has_value()) {
+      std::fprintf(stderr, "mass_properties(tetra shell) failed: %s\n",
+                   geom::to_string(props.error().code));
+      return 5;
+    }
+    tetra_volume = props.value().volume;
+  }
+  if (!close_to(tetra_volume, expected)) return 6;
+
   std::printf("chamfer volume: %.12f (expected 999406)\n", chamfer_volume);
   std::printf("shell volume:   %.12f (expected 58808)\n", shell_volume);
+  std::printf("open top volume: %.12f (expected 49204)\n", open_volume);
+  std::printf("tetra volume:    %.12f (expected %.12f)\n", tetra_volume, expected);
   print_stats("chamfer all 12 edges", summarize(chamfer_samples), chamfer_samples.size());
   print_stats("closed shell", summarize(shell_samples), shell_samples.size());
+  print_stats("open top shell", summarize(open_samples), open_samples.size());
+  print_stats("oblique tetra shell", summarize(tetra_samples), tetra_samples.size());
 
   if (!close_to(chamfer_volume, 999406.0) || !close_to(shell_volume, 58808.0)) {
     std::fprintf(stderr, "volume checksum mismatch\n");
