@@ -8,7 +8,10 @@
 #include <string_view>
 #include <vector>
 
+#include <geom/brep/assemble.hpp>
 #include <geom/brep/detail/half_space.hpp>
+#include <geom/brep/mass_properties.hpp>
+#include <geom/brep/validate.hpp>
 
 using namespace geom;
 
@@ -35,6 +38,31 @@ std::vector<detail::HalfSpacePlane> cube_planes(double extent) {
       {{0.0, 0.0, 1.0}, extent},
       {{0.0, 0.0, -1.0}, 0.0},
   };
+}
+
+// Four half-spaces of the tetrahedron with corners (2,0,0), (0,2,0), (0,0,2)
+// and the origin. `factor` scales every equation, which must leave the cell and
+// the emitted faces unchanged.
+std::array<detail::HalfSpacePlane, 4> tetrahedron_planes(double factor = 1.0) {
+  return {{
+      {{-factor, 0.0, 0.0}, 0.0},
+      {{0.0, -factor, 0.0}, 0.0},
+      {{0.0, 0.0, -factor}, 0.0},
+      {{factor, factor, factor}, 2.0 * factor},
+  }};
+}
+
+// Twice the signed area vector of an open ring, dotted with the face normal.
+// It is positive exactly when the ring winds counter-clockwise about the
+// outward normal.
+double face_ring_area_dot_normal(const AssembledFace& face) {
+  Vec3d sum{};
+  for (std::size_t i = 0; i < face.outer.size(); ++i) {
+    const Point3d& a = face.outer[i];
+    const Point3d& b = face.outer[(i + 1u) % face.outer.size()];
+    sum = sum + cross(Vec3d{a[0], a[1], a[2]}, Vec3d{b[0], b[1], b[2]});
+  }
+  return 0.5 * dot(sum, face.normal);
 }
 
 }  // namespace
@@ -179,4 +207,142 @@ TEST_CASE("half-space vertices reject a zero normal") {
       detail::half_space_vertices(planes, 1e-9);
   REQUIRE_FALSE(vertices.has_value());
   CHECK(vertices.error().code == Errc::degenerate);
+}
+
+TEST_CASE("half-space faces of a box are six outward quads") {
+  const auto planes = unit_box_planes();
+  const Result<std::vector<Point3d>> vertices =
+      detail::half_space_vertices(planes, 1e-9);
+  REQUIRE(vertices.has_value());
+  const Result<std::vector<AssembledFace>> faces =
+      detail::half_space_faces(planes, vertices.value(), 1e-9);
+  REQUIRE(faces.has_value());
+  CHECK(faces.value().size() == 6u);
+  for (const AssembledFace& face : faces.value()) {
+    CHECK(face.outer.size() == 4u);
+    CHECK(face.holes.empty());
+    CHECK(face_ring_area_dot_normal(face) > 0.0);
+  }
+  const Result<Brep> solid =
+      assemble_solid(faces.value(), 1e-9);
+  REQUIRE(solid.has_value());
+  const Result<MassProperties> mass = mass_properties(solid.value());
+  REQUIRE(mass.has_value());
+  CHECK(std::abs(mass.value().volume - 24.0) <= 1e-9);
+}
+
+TEST_CASE("half-space faces of a tetrahedron are four outward triangles") {
+  const auto planes = tetrahedron_planes();
+  const Result<std::vector<Point3d>> vertices =
+      detail::half_space_vertices(planes, 1e-9);
+  REQUIRE(vertices.has_value());
+  REQUIRE(vertices.value().size() == 4u);
+  const Result<std::vector<AssembledFace>> faces =
+      detail::half_space_faces(planes, vertices.value(), 1e-9);
+  REQUIRE(faces.has_value());
+  REQUIRE(faces.value().size() == 4u);
+  for (const AssembledFace& face : faces.value()) {
+    CHECK(face.outer.size() == 3u);
+    CHECK(face.holes.empty());
+    CHECK(face_ring_area_dot_normal(face) > 0.0);
+  }
+  const Result<Brep> solid = assemble_solid(faces.value(), 1e-9);
+  REQUIRE(solid.has_value());
+  const Result<MassProperties> mass = mass_properties(solid.value());
+  REQUIRE(mass.has_value());
+  CHECK(std::abs(mass.value().volume - 4.0 / 3.0) <= 1e-9);
+}
+
+TEST_CASE("half-space faces ignore a common plane scale") {
+  const auto planes = tetrahedron_planes(3.0);
+  const Result<std::vector<Point3d>> vertices =
+      detail::half_space_vertices(planes, 1e-9);
+  REQUIRE(vertices.has_value());
+  REQUIRE(vertices.value().size() == 4u);
+  const Result<std::vector<AssembledFace>> faces =
+      detail::half_space_faces(planes, vertices.value(), 1e-9);
+  REQUIRE(faces.has_value());
+  REQUIRE(faces.value().size() == 4u);
+  for (const AssembledFace& face : faces.value()) {
+    CHECK(face.outer.size() == 3u);
+    CHECK(face_ring_area_dot_normal(face) > 0.0);
+  }
+  const Result<Brep> solid = assemble_solid(faces.value(), 1e-9);
+  REQUIRE(solid.has_value());
+  const Result<MassProperties> mass = mass_properties(solid.value());
+  REQUIRE(mass.has_value());
+  CHECK(std::abs(mass.value().volume - 4.0 / 3.0) <= 1e-9);
+}
+
+TEST_CASE("half-space faces skip a redundant far plane") {
+  auto planes = unit_box_planes();
+  planes.push_back({{0.0, 0.0, 1.0}, 1e12});
+  const Result<std::vector<Point3d>> vertices =
+      detail::half_space_vertices(planes, 1e-9);
+  REQUIRE(vertices.has_value());
+  const Result<std::vector<AssembledFace>> faces =
+      detail::half_space_faces(planes, vertices.value(), 1e-9);
+  REQUIRE(faces.has_value());
+  CHECK(faces.value().size() == 6u);
+  for (const AssembledFace& face : faces.value()) {
+    CHECK(face.outer.size() == 4u);
+    CHECK(face_ring_area_dot_normal(face) > 0.0);
+  }
+}
+
+TEST_CASE("half-space faces reject an empty vertex set") {
+  const auto planes = unit_box_planes();
+  const std::vector<Point3d> vertices;
+  const Result<std::vector<AssembledFace>> faces =
+      detail::half_space_faces(planes, vertices, 1e-9);
+  REQUIRE_FALSE(faces.has_value());
+  CHECK(faces.error().code == Errc::degenerate);
+  CHECK(std::string_view(faces.error().message) ==
+        "half_space: fewer than three planes bound a cell");
+}
+
+TEST_CASE("half-space faces reject invalid tolerances") {
+  const auto planes = unit_box_planes();
+  const Result<std::vector<Point3d>> vertices =
+      detail::half_space_vertices(planes, 1e-9);
+  REQUIRE(vertices.has_value());
+  const std::array<double, 4> tolerances{
+      0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
+      std::numeric_limits<double>::infinity()};
+  for (const double tolerance : tolerances) {
+    const Result<std::vector<AssembledFace>> faces =
+        detail::half_space_faces(planes, vertices.value(), tolerance);
+    REQUIRE_FALSE(faces.has_value());
+    CHECK(faces.error().code == Errc::tolerance_violation);
+  }
+}
+
+TEST_CASE("half-space faces reject invalid planes") {
+  const std::vector<Point3d> vertices{
+      Point3d{0.0, 0.0, 0.0}, Point3d{1.0, 0.0, 0.0},
+      Point3d{0.0, 1.0, 0.0}, Point3d{0.0, 0.0, 1.0}};
+
+  SUBCASE("zero normal") {
+    const std::array<detail::HalfSpacePlane, 1> planes{{
+        {{0.0, 0.0, 0.0}, 1.0},
+    }};
+    const Result<std::vector<AssembledFace>> faces =
+        detail::half_space_faces(planes, vertices, 1e-9);
+    REQUIRE_FALSE(faces.has_value());
+    CHECK(faces.error().code == Errc::degenerate);
+    CHECK(std::string_view(faces.error().message) ==
+          "half_space: plane normal is zero or non-finite");
+  }
+
+  SUBCASE("non-finite offset") {
+    const std::array<detail::HalfSpacePlane, 1> planes{{
+        {{1.0, 0.0, 0.0}, std::nan("")},
+    }};
+    const Result<std::vector<AssembledFace>> faces =
+        detail::half_space_faces(planes, vertices, 1e-9);
+    REQUIRE_FALSE(faces.has_value());
+    CHECK(faces.error().code == Errc::non_finite);
+    CHECK(std::string_view(faces.error().message) ==
+          "half_space: plane offset is not finite");
+  }
 }
