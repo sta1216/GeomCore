@@ -72,7 +72,8 @@ The M4c-1 rejection messages `shell_solid: open faces are not supported in
 M4c-1` and `shell_solid: only axis-aligned faces are supported` are therefore
 superseded and no longer emitted. What remains rejected before mutation is:
 curved or non-planar faces, non-convex bodies, open or multiple input shells,
-non-`LineCurve3` edges, dead/foreign open-face ids, opening every face, and a
+non-`LineCurve3` chamfer edges (every shell edge of an all-planar solid is a
+line), dead/foreign open-face ids, opening every face, and a
 wall that leaves no measurable interior (`Errc::degenerate`).
 
 **Fillet stays deferred.** Rolling-ball fillet, including variable radius,

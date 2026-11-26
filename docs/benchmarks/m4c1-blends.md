@@ -3,7 +3,7 @@
 - Date: 2026-11-25
 - Commit: `sdd/m4c1` (Task 7 evidence; see the plan Results for the merged hash)
 - Compiler: MSVC 19.44.35217, `/std:c++20 /O2`, `GEOM_WERROR=ON`
-- Machine: Windows 11, Intel Core i7-8550U (4C/8T), Release
+- Machine: Windows 10 Enterprise 22H2 (build 19045), Intel Core i7-8550U (4C/8T), Release
 - Benchmark: `bench/bench_m4c1.cpp`, five timed runs per operation, min/median/max
 
 ## Workload

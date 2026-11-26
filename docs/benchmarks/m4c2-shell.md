@@ -1,9 +1,9 @@
 # M4c-2 open-shell and oblique-shell benchmarks
 
 - Date: 2026-11-26
-- Commit: `sdd/m4c2` (Task 7 evidence; the measured tree is `4575ce0`)
+- Commit: `sdd/m4c2` Task 7 harness `72e0d3c`; library tree measured `4575ce0`
 - Compiler: MSVC 19.44.35217.0, `/std:c++20 /O2`, `GEOM_WERROR=ON`
-- Machine: Windows 11, Intel Core i7-8550U (4C/8T), Release
+- Machine: Windows 10 Enterprise 22H2 (build 19045), Intel Core i7-8550U (4C/8T), Release
 - Benchmark: `bench/bench_m4c1.cpp`, five timed runs per workload, min/median/max
 
 ## Workloads
