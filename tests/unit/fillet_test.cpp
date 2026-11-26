@@ -330,10 +330,10 @@ TEST_CASE("fillet_edges rejects a radius at the section limit") {
   REQUIRE(just_below.has_value());
   CHECK(geom::validate_topology(just_below.value().brep).ok());
 
-  // Two opposite corners on one side leave only `extent - 2r`; the same radius
-  // is valid here as long as that face stays wider than the tolerance.
+  // A true diagonal pair shares no side, so both remaining side widths are
+  // `extent - r`; the same radius is valid.
   const std::vector<EdgeId> all = family_edges(box);
-  const std::array<EdgeId, 2> diagonal{all[0], all[3]};
+  const std::array<EdgeId, 2> diagonal{all[0], all[2]};
   const auto diagonal_result = geom::fillet_edges(box, diagonal, {0.9999999999, 1e-9});
   REQUIRE(diagonal_result.has_value());
   CHECK(geom::validate_topology(diagonal_result.value().brep).ok());
@@ -345,6 +345,15 @@ TEST_CASE("fillet_edges rejects a radius at the section limit") {
   REQUIRE_FALSE(sliver.has_value());
   CHECK(sliver.error().code == Errc::unsupported);
   CHECK(std::string_view(sliver.error().message).find("narrower than the tolerance") !=
+        std::string_view::npos);
+
+  // Three corners include an adjacent pair on the short side, so the same
+  // radius is also rejected there.
+  const std::array<EdgeId, 3> three{all[0], all[1], all[2]};
+  const auto three_result = geom::fillet_edges(box, three, {0.9999999999, 1e-9});
+  REQUIRE_FALSE(three_result.has_value());
+  CHECK(three_result.error().code == Errc::unsupported);
+  CHECK(std::string_view(three_result.error().message).find("narrower than the tolerance") !=
         std::string_view::npos);
 }
 

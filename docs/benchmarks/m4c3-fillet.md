@@ -1,7 +1,7 @@
 # M4c-3a box fillet benchmark
 
 - Date: 2026-11-26
-- Commit: `sdd/m4c3` (Task 4 tree; code under test `0fbe889..624bc44`; benchmark and docs amended in the Task 4 commit)
+- Commit: `sdd/m4c3` (code under test `0fbe889..624bc44`; benchmark and docs amended on the branch through Task 7)
 - Compiler: MSVC 19.44.35217, `/std:c++20 /O2`, `GEOM_WERROR=ON`
 - Machine: Windows 10 Enterprise 22H2 (build 19045), Intel Core i7-8550U (4C/8T), Release
 - Benchmark: `bench/bench_m4c3.cpp`, five timed runs, min/median/max
@@ -40,10 +40,10 @@ built only with `-DGEOM_BUILD_BENCH=ON` and is not part of ctest.
 
 ## Test evidence
 
-- `*fillet*`: 8 cases / 884 assertions in Debug and 8 / 884 in Release, 0
+- `*fillet*`: 8 cases / 887 assertions in Debug and 8 / 887 in Release, 0
   failed (post-review Task 3 lane re-run on this tree).
-- Debug lane `*fillet*,*blend*,*editor*`: 56 cases / 1,394 assertions, 0 failed.
-- Full Release: 1,159 cases / 683,608 assertions, 0 failed (880 s).
+- Debug lane `*fillet*,*blend*,*editor*`: 56 cases / 1,397 assertions, 0 failed.
+- Full Release: 1,159 cases / 683,611 assertions, 0 failed (880 s).
 - Full Debug remains PENDING: the suite still contains the known >20-minute
   cases documented in earlier milestones, so the Debug lane above is the fillet
   evidence, not a full Debug pass.
