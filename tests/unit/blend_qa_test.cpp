@@ -172,6 +172,8 @@ TEST_CASE("blend outputs are deterministic and leave inputs unchanged") {
       tessellate(pocket_b.value().brep, TessellationOptions{});
   REQUIRE(pocket_mesh_a.has_value());
   REQUIRE(pocket_mesh_b.has_value());
+  CHECK(pocket_mesh_a.value().positions.size() == 16u);
+  CHECK(pocket_mesh_a.value().triangles.size() == 28u);
   CHECK(boundary_edges(pocket_mesh_a.value()) == 0u);
   CHECK(same_positions(pocket_mesh_a.value().positions,
                        pocket_mesh_b.value().positions));
@@ -184,5 +186,5 @@ TEST_CASE("blend outputs are deterministic and leave inputs unchanged") {
   CHECK(box.face_count() == 6u);
   const Result<MassProperties> original = mass_properties(box);
   REQUIRE(original.has_value());
-  CHECK(std::abs(original.value().volume - 8.0) <= 1e-9);
+  CHECK(std::abs(original.value().volume - 8.0) <= 1e-12);
 }
