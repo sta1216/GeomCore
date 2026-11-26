@@ -107,6 +107,37 @@ std::vector<EdgeId> family_edges(const Brep& brep) {
   return result;
 }
 
+// Edge spanning the whole box along `axis` at the given coordinates on the two
+// cross axes (passed in ascending axis order).
+EdgeId parallel_edge_at(const Brep& brep, int axis, double first, double second) {
+  const int axis_u = (axis + 1) % 3;
+  const int axis_v = (axis + 2) % 3;
+  for (const EdgeId id : brep.edge_ids()) {
+    const geom::Edge& edge = brep.edge(id);
+    const Point3d a = brep.vertex(edge.v0).point;
+    const Point3d b = brep.vertex(edge.v1).point;
+    if (std::abs(a[axis_u] - first) <= 1e-12 && std::abs(b[axis_u] - first) <= 1e-12 &&
+        std::abs(a[axis_v] - second) <= 1e-12 && std::abs(b[axis_v] - second) <= 1e-12 &&
+        std::abs(b[axis] - a[axis]) > 0.0) {
+      return id;
+    }
+  }
+  return EdgeId{};
+}
+
+std::vector<EdgeId> family_edges_on(const Brep& brep, int axis) {
+  const int axis_u = (axis + 1) % 3;
+  const int axis_v = (axis + 2) % 3;
+  const double extent[3] = {2.0, 3.0, 4.0};
+  std::vector<EdgeId> result;
+  for (const double first : {0.0, extent[axis_u]}) {
+    for (const double second : {0.0, extent[axis_v]}) {
+      result.push_back(parallel_edge_at(brep, axis, first, second));
+    }
+  }
+  return result;
+}
+
 }  // namespace
 
 TEST_CASE("fillet_edges rejects options and non-box shapes") {
@@ -167,7 +198,55 @@ TEST_CASE("fillet_edges rounds one vertical box edge exactly") {
   CHECK(arcs == 2u);
 }
 
-TEST_CASE("fillet_edges rounds every subset of one box family") {
+TEST_CASE("fillet_edges rounds every non-empty subset of every box family") {
+  const Brep box = box_2x3x4();
+  const double pi = std::numbers::pi_v<double>;
+  const double extent[3] = {2.0, 3.0, 4.0};
+
+  for (int axis = 0; axis < 3; ++axis) {
+    const std::vector<EdgeId> all = family_edges_on(box, axis);
+    REQUIRE(all.size() == 4u);
+    for (const EdgeId id : all) REQUIRE(id.index() != 0xFFFFFFFFu);
+
+    for (unsigned mask = 1; mask < 16u; ++mask) {
+      std::vector<EdgeId> selected;
+      for (int bit = 0; bit < 4; ++bit) {
+        if ((mask & (1u << bit)) != 0u) selected.push_back(all[static_cast<std::size_t>(bit)]);
+      }
+      const auto k = static_cast<double>(selected.size());
+      const double per_edge = (1.0 - pi / 4.0) * 0.25 * 0.25 * extent[axis];
+      const auto result = geom::fillet_edges(box, selected, {0.25, 1e-9});
+      REQUIRE(result.has_value());
+      const Brep& filleted = result.value().brep;
+      CHECK(result.value().filleted_edges == selected.size());
+      CHECK(filleted.vertex_count() == 8u + 2u * selected.size());
+      CHECK(filleted.edge_count() == 12u + 3u * selected.size());
+      CHECK(filleted.face_count() == 6u + selected.size());
+      CHECK(std::abs(volume_of(filleted) - (24.0 - k * per_edge)) <= 1e-9);
+      CHECK(geom::validate_topology(filleted).ok());
+
+      std::size_t cylinders = 0;
+      for (const geom::FaceId face : filleted.face_ids()) {
+        const auto& surface = filleted.geometry().surfaces[filleted.face(face).surface];
+        if (!std::holds_alternative<geom::Cylinder3>(surface)) continue;
+        const geom::Cylinder3& cylinder = std::get<geom::Cylinder3>(surface);
+        ++cylinders;
+        CHECK(std::abs(cylinder.radius - 0.25) <= 1e-12);
+        CHECK(std::abs(cylinder.origin[axis] - 0.0) <= 1e-12);
+        for (int other = 0; other < 3; ++other) {
+          if (other == axis) continue;
+          const double coordinate = cylinder.origin[other];
+          const bool at_low = std::abs(coordinate - 0.25) <= 1e-12;
+          const bool at_high = std::abs(coordinate - (extent[other] - 0.25)) <= 1e-12;
+          CHECK((at_low || at_high));
+        }
+      }
+      CHECK(cylinders == selected.size());
+    }
+  }
+}
+
+TEST_CASE("fillet_edges rounds the four vertical prefixes") {
   const Brep box = box_2x3x4();
   const std::vector<EdgeId> all = family_edges(box);
   const double pi = std::numbers::pi_v<double>;
@@ -245,9 +324,19 @@ TEST_CASE("fillet_edges rejects a radius at the section limit") {
   CHECK(too_large.error().code == Errc::unsupported);
 
   const auto just_below =
-      geom::fillet_edges(box, std::span<const EdgeId>(&edge, 1), {0.9999999999, 1e-9});
+      geom::fillet_edges(box, std::span<const EdgeId>(&edge, 1), {0.999, 1e-9});
   REQUIRE(just_below.has_value());
   CHECK(geom::validate_topology(just_below.value().brep).ok());
+
+  // A radius closer than the tolerance to the limit leaves a 2e-10 side face,
+  // which the assembler cannot represent; reject it with a stable public error
+  // instead of leaking the assembler message.
+  const std::vector<EdgeId> all = family_edges(box);
+  const auto sliver = geom::fillet_edges(box, all, {0.9999999999, 1e-9});
+  REQUIRE_FALSE(sliver.has_value());
+  CHECK(sliver.error().code == Errc::unsupported);
+  CHECK(std::string_view(sliver.error().message).find("narrower than the tolerance") !=
+        std::string_view::npos);
 }
 
 TEST_CASE("fillet_edges rejects a mixed family and a dead edge") {

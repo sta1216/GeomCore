@@ -37,7 +37,7 @@ A reviewer who wants general convex fillet should split M4c-3b instead of wideni
 ## Review Focus
 
 - **Mixed edge families.** A selection containing one vertical and one horizontal edge must return `unsupported`, not a solid with only one family filleted.
-- **Radius at the section limit.** `2*radius >= min(other two extents)` must be rejected before assembly; a value just below the limit must still produce a valid solid.
+- **Radius at the section limit.** `radius >= 0.5*min(other two extents) - 0.5*tolerance` must be rejected before assembly (the remaining side face would be narrower than the tolerance); a value further below the limit (e.g. `0.999` on the 2×3×4 box) must still produce a valid solid.
 - **All four corners on a cap.** With four selected edges the cap ring alternates four straight segments and four arcs, and the four cylinder patches must share the arcs without duplicate or missing vertices.
 - **Non-box shapes.** A tetrahedron, cylinder, or rotated box must be rejected with the stable box-only message; no accidental acceptance through a coordinate-collapse check.
 - **Failure immutability.** Every rejection (bad radius, mixed family, dead edge, non-box) must leave the input's counts, volume, and surface list unchanged; successful calls must do the same.
@@ -189,7 +189,7 @@ TEST_CASE("fillet_edges rejects options and non-box shapes") {
   const Brep cylinder = geom::make_cylinder(Point3d{0.0, 0.0, 0.0}, Vec3d{0.0, 0.0, 1.0},
                                             1.0, 2.0, 1e-9)
                             .value();
-  const std::array<EdgeId, 1> dead{EdgeId{999u}};
+  const std::array<EdgeId, 1> dead{EdgeId::make(999u, 0u)};
   CHECK(geom::fillet_edges(cylinder, dead, {0.25, 1e-9}).error().code == Errc::unsupported);
 }
 
@@ -297,7 +297,7 @@ std::vector<EdgeId> family_edges(const Brep& brep) {
 Then add one `TEST_CASE`:
 
 ```cpp
-TEST_CASE("fillet_edges rounds every subset of one box family") {
+TEST_CASE("fillet_edges rounds the four vertical prefixes") {
   const Brep box = box_2x3x4();
   const std::vector<EdgeId> all = family_edges(box);
   const double pi = std::numbers::pi_v<double>;
@@ -377,6 +377,8 @@ git commit -m "feat(brep): fillet any subset of one box edge family"
 
 - [ ] **Step 1: Write the failing tests**
 
+Replace the Task 2 prefix loop with an exhaustive `axis = 0..2` × `mask = 1..15` loop: every non-empty subset of every family must produce `V=8+2k`, `E=12+3k`, `F=6+k`, the exact volume, and exactly `k` cylinders whose origin is at the family low end and at a `lo+r`/`hi-r` cross-section corner. Rename the old prefix case accordingly.
+
 Add:
 
 ```cpp
@@ -390,6 +392,14 @@ TEST_CASE("fillet_edges rejects a radius at the section limit") {
   const auto just_below = geom::fillet_edges(box, std::span<const EdgeId>(&edge, 1), {0.999, 1e-9});
   REQUIRE(just_below.has_value());
   CHECK(geom::validate_topology(just_below.value().brep).ok());
+
+  // Four edges at 1-1e-10 leave a 2e-10 face; reject before assembly.
+  const std::vector<EdgeId> all = family_edges(box);
+  const auto sliver = geom::fillet_edges(box, all, {0.9999999999, 1e-9});
+  REQUIRE_FALSE(sliver.has_value());
+  CHECK(sliver.error().code == Errc::unsupported);
+  CHECK(std::string_view(sliver.error().message).find("narrower than the tolerance") !=
+        std::string_view::npos);
 }
 
 TEST_CASE("fillet_edges rejects a mixed family and a dead edge") {
@@ -401,7 +411,7 @@ TEST_CASE("fillet_edges rejects a mixed family and a dead edge") {
   REQUIRE_FALSE(mixed_result.has_value());
   CHECK(mixed_result.error().code == Errc::unsupported);
 
-  const std::array<EdgeId, 1> dead{EdgeId{999u}};
+  const std::array<EdgeId, 1> dead{EdgeId::make(999u, 0u)};
   const auto dead_result = geom::fillet_edges(box, dead, {0.25, 1e-9});
   REQUIRE_FALSE(dead_result.has_value());
   CHECK(dead_result.error().code == Errc::index_out_of_range);
@@ -465,7 +475,7 @@ Expected RED: the radius limit and mixed-family tests fail because the builder c
 
 - [ ] **Step 3: Add the guards**
 
-- Before building, enforce `radius < 0.5 * min(a, b)`. On failure return `unsupported "fillet_edges: radius exceeds the box cross-section"`. Compare with a strict `<`; do not add an epsilon.
+- Before building, enforce `radius < 0.5 * min(a, b) - 0.5 * tolerance`. On failure return `unsupported "fillet_edges: radius exceeds the box cross-section or leaves a face narrower than the tolerance"`. The tolerance term keeps a sub-tolerance sliver from reaching the assembler, which would otherwise leak `assemble_curved_solid: edge is used once`; do not add any other epsilon.
 - Keep the mixed-family check before any geometry construction.
 - Verify edge endpoints lie at two distinct family extremes and at one of the four cross-section corners; reject with the stable messages from Task 1.
 - Return only after `validate_topology`; do not return the assembled solid if the report has issues.

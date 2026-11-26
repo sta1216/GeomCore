@@ -46,17 +46,16 @@ M4c-3a implements exactly that slice:
   (`degenerate "fillet_edges: radius must be positive"`); non-positive
   tolerance (`tolerance_violation "fillet_edges: tolerance must be positive"`);
   a non-box solid
-  (`unsupported "fillet_edges: only an axis-aligned box is supported"`); an
-  edge that is not axis-aligned
-  (`unsupported "fillet_edges: only axis-aligned box edges are supported"`);
+  (`unsupported "fillet_edges: only an axis-aligned box is supported"`);
   mixed families (`unsupported "fillet_edges: selected edges must be parallel"`);
-  an edge that is not a box corner edge
-  (`unsupported "fillet_edges: edge is not a box corner edge"`); a dead id
-  (`index_out_of_range "fillet_edges: edge does not belong to the solid"`);
-  two selected edges sharing a vertex
-  (`unsupported "fillet_edges: filleted edges must not share a vertex"`); and
-  `radius >= 0.5 * min(cross-section extents)`
-  (`unsupported "fillet_edges: radius exceeds the box cross-section"`).
+  a dead id
+  (`index_out_of_range "fillet_edges: edge does not belong to the solid"`); and
+  `radius >= 0.5 * min(cross-section extents) - 0.5 * tolerance`
+  (`unsupported "fillet_edges: radius exceeds the box cross-section or leaves a
+  face narrower than the tolerance"`). The per-edge axis-alignment, box-corner
+  and shared-vertex checks remain as defensive branches, but every edge of a
+  valid box already satisfies them, so their messages are not part of the
+  reachable public contract.
 - **Empty span is checked before the options.** `FilletOptions{}` defaults to
   `radius = 0.0`, so validating the radius first would report `degenerate` for
   the empty+default call. "No edges selected" is an unsupported request, not a

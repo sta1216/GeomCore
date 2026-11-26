@@ -341,8 +341,11 @@ inline Result<Brep> fillet_box_edges(const FilletBox& box, std::span<const int> 
   if (!(extent_a > 0.0) || !(extent_b > 0.0)) {
     return Error{Errc::unsupported, "fillet_edges: only an axis-aligned box is supported"};
   }
-  if (!(radius < 0.5 * std::min(extent_a, extent_b))) {
-    return Error{Errc::unsupported, "fillet_edges: radius exceeds the box cross-section"};
+  const double section_limit = 0.5 * std::min(extent_a, extent_b);
+  if (!(radius < section_limit - 0.5 * tolerance)) {
+    return Error{Errc::unsupported,
+                 "fillet_edges: radius exceeds the box cross-section or leaves a face "
+                 "narrower than the tolerance"};
   }
 
   std::array<std::array<bool, 2>, 2> selected{};
@@ -399,7 +402,11 @@ inline Result<Brep> fillet_box_edges(const FilletBox& box, std::span<const int> 
   }
 
   Result<Brep> assembled = assemble_curved_solid(faces, tolerance);
-  if (!assembled.has_value()) return assembled.error();
+  if (!assembled.has_value()) {
+    // The radius guard keeps sliver caps out; if assembly still fails, the
+    // public API must not leak the assembler's internal diagnostic.
+    return Error{Errc::invalid_topology, "fillet_edges: fillet could not be assembled"};
+  }
   if (!validate_topology(assembled.value()).ok()) {
     return Error{Errc::invalid_topology, "fillet_edges: fillet produced an invalid solid"};
   }
