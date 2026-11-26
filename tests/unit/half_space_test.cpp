@@ -52,6 +52,50 @@ std::array<detail::HalfSpacePlane, 4> tetrahedron_planes(double factor = 1.0) {
   }};
 }
 
+constexpr double kPi = 3.141592653589793238462643383279502884;
+
+// The axis-aligned box [0, extent]^3 rotated by Rz(30 deg) * Rx(20 deg), then
+// translated. The rotation is orthonormal, so the volume stays extent^3.
+struct RotatedBox {
+  std::vector<detail::HalfSpacePlane> planes;
+  std::vector<Point3d> vertices;
+  double volume = 0.0;
+};
+
+RotatedBox rotated_box(double extent, const Vec3d& translation) {
+  const double a = 30.0 * kPi / 180.0;
+  const double b = 20.0 * kPi / 180.0;
+  const double ca = std::cos(a);
+  const double sa = std::sin(a);
+  const double cb = std::cos(b);
+  const double sb = std::sin(b);
+  const Vec3d axes[3] = {
+      Vec3d{ca, sa, 0.0},
+      Vec3d{-sa * cb, ca * cb, sb},
+      Vec3d{sa * sb, -ca * sb, cb},
+  };
+
+  RotatedBox box;
+  box.planes.reserve(6u);
+  box.vertices.reserve(8u);
+  for (const Vec3d& axis : axes) {
+    for (const double sign : {1.0, -1.0}) {
+      const Vec3d normal = axis * sign;
+      const double base = sign > 0.0 ? extent : 0.0;
+      box.planes.push_back({normal, base + dot(normal, translation)});
+    }
+  }
+  for (int mask = 0; mask < 8; ++mask) {
+    Vec3d corner = translation;
+    for (int axis = 0; axis < 3; ++axis) {
+      if ((mask & (1 << axis)) != 0) corner = corner + axes[axis] * extent;
+    }
+    box.vertices.push_back(Point3d{corner[0], corner[1], corner[2]});
+  }
+  box.volume = extent * extent * extent;
+  return box;
+}
+
 // Twice the signed area vector of an open ring, dotted with the face normal.
 // It is positive exactly when the ring winds counter-clockwise about the
 // outward normal.
@@ -344,5 +388,103 @@ TEST_CASE("half-space faces reject invalid planes") {
     CHECK(faces.error().code == Errc::non_finite);
     CHECK(std::string_view(faces.error().message) ==
           "half_space: plane offset is not finite");
+  }
+}
+
+TEST_CASE("half-space faces of a rotated box at planetary scale") {
+  // The corners sit at ~1e12, so evaluating a plane equation rounds by ~1e-4.
+  // That is far above the 1e-9 tolerance and only the per-plane relative slack
+  // (1e-12 * scale) keeps every corner incident; a slack of plain `tolerance`
+  // would drop the whole cell.
+  const RotatedBox box = rotated_box(1e12, Vec3d{5e12, -3e12, 7e12});
+  const Result<std::vector<Point3d>> vertices =
+      detail::half_space_vertices(box.planes, 1e-9);
+  REQUIRE(vertices.has_value());
+  REQUIRE(vertices.value().size() == 8u);
+  const Result<std::vector<AssembledFace>> faces =
+      detail::half_space_faces(box.planes, vertices.value(), 1e-9);
+  REQUIRE(faces.has_value());
+  REQUIRE(faces.value().size() == 6u);
+  for (const AssembledFace& face : faces.value()) {
+    CHECK(face.outer.size() == 4u);
+    CHECK(face.holes.empty());
+    CHECK(face_ring_area_dot_normal(face) > 0.0);
+  }
+  // assemble_solid takes an absolute tolerance, and at 1e12 the ring planarity
+  // residual is ~1e-4, so it needs 1e-3 rather than the 1e-9 used for the cell
+  // size of the other boxes. The geometry is unchanged: distinct corners are
+  // 1e12 apart.
+  const Result<Brep> solid = assemble_solid(faces.value(), 1e-3);
+  REQUIRE(solid.has_value());
+  const Result<MassProperties> mass = mass_properties(solid.value());
+  REQUIRE(mass.has_value());
+  CHECK(std::abs(mass.value().volume - box.volume) <= 1e-9 * box.volume);
+}
+
+TEST_CASE("half-space faces ignore a far plane on a unit cell") {
+  // A global slack of 1e-12 * max|offset| would be 1.0 here, because of the far
+  // plane's 1e12 offset, and would then capture every vertex within one unit of
+  // the unit cube's planes.
+  auto planes = cube_planes(1.0);
+  planes.push_back({{0.0, 0.0, 1.0}, 1e12});
+  const Result<std::vector<Point3d>> vertices =
+      detail::half_space_vertices(planes, 1e-9);
+  REQUIRE(vertices.has_value());
+  REQUIRE(vertices.value().size() == 8u);
+  const Result<std::vector<AssembledFace>> faces =
+      detail::half_space_faces(planes, vertices.value(), 1e-9);
+  REQUIRE(faces.has_value());
+  REQUIRE(faces.value().size() == 6u);
+  for (const AssembledFace& face : faces.value()) {
+    CHECK(face.outer.size() == 4u);
+    CHECK(face_ring_area_dot_normal(face) > 0.0);
+  }
+  const Result<Brep> solid = assemble_solid(faces.value(), 1e-9);
+  REQUIRE(solid.has_value());
+  const Result<MassProperties> mass = mass_properties(solid.value());
+  REQUIRE(mass.has_value());
+  CHECK(std::abs(mass.value().volume - 1.0) <= 1e-9);
+}
+
+TEST_CASE("half-space faces skip a plane that supports only an edge") {
+  // x - y = 2 touches the box [0,2] x [0,3] x [0,4] only along the edge x = 2,
+  // y = 0, so it has exactly two incident vertices and must not become a face.
+  auto planes = unit_box_planes();
+  planes.push_back({{1.0, -1.0, 0.0}, 2.0});
+  const Result<std::vector<Point3d>> vertices =
+      detail::half_space_vertices(planes, 1e-9);
+  REQUIRE(vertices.has_value());
+  const Result<std::vector<AssembledFace>> faces =
+      detail::half_space_faces(planes, vertices.value(), 1e-9);
+  REQUIRE(faces.has_value());
+  REQUIRE(faces.value().size() == 6u);
+  for (const AssembledFace& face : faces.value()) {
+    CHECK(face.outer.size() == 4u);
+    CHECK(face_ring_area_dot_normal(face) > 0.0);
+  }
+  const Result<Brep> solid = assemble_solid(faces.value(), 1e-9);
+  REQUIRE(solid.has_value());
+  const Result<MassProperties> mass = mass_properties(solid.value());
+  REQUIRE(mass.has_value());
+  CHECK(std::abs(mass.value().volume - 24.0) <= 1e-9);
+}
+
+TEST_CASE("half-space faces keep one face per plane for duplicate planes") {
+  // Coincident planes are not deduplicated: the duplicate supports the same
+  // four vertices and is emitted as a second, coincident face. Callers must
+  // deduplicate coincident planes before calling; two coincident faces cannot
+  // be assembled into one solid, so only the ring shape is checked here.
+  auto planes = unit_box_planes();
+  planes.push_back({{1.0, 0.0, 0.0}, 2.0});
+  const Result<std::vector<Point3d>> vertices =
+      detail::half_space_vertices(planes, 1e-9);
+  REQUIRE(vertices.has_value());
+  const Result<std::vector<AssembledFace>> faces =
+      detail::half_space_faces(planes, vertices.value(), 1e-9);
+  REQUIRE(faces.has_value());
+  REQUIRE(faces.value().size() == 7u);
+  for (const AssembledFace& face : faces.value()) {
+    CHECK(face.outer.size() == 4u);
+    CHECK(face_ring_area_dot_normal(face) > 0.0);
   }
 }

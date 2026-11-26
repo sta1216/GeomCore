@@ -128,6 +128,11 @@ inline Result<std::vector<Point3d>> half_space_vertices(
 // redundant planes disappear. The returned ring is an open ring: the last
 // point is not repeated.
 //
+// Coincident or duplicate planes are not detected: every plane that supports at
+// least three vertices contributes its own face, so two equal planes produce two
+// equal faces and the result cannot be assembled into a solid. Callers must
+// deduplicate coincident planes before calling.
+//
 // A vertex belongs to plane i when `|dot(n_i, p) - offset_i| <= slack`, with the
 // per-(plane, vertex) slack `max(tolerance, 1e-12 * max(|offset_i|, |p|
 // components))`. The relative term scales with that plane's own equation and
