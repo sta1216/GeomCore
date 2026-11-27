@@ -7,6 +7,7 @@
 #include <map>
 #include <numbers>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -147,6 +148,9 @@ TEST_CASE("fillet_edges rounds every vertical edge of a triangular prism") {
   CHECK(volume_of(result.value().brep) ==
         doctest::Approx(3.0 * std::sqrt(3.0) - 9.0 * corner_area(0.2, kPi / 3.0))
             .epsilon(1e-9));
+  CHECK(geom::validate_topology(result.value().brep).ok());
+  CHECK(result.value().brep.solid_ids().size() == 1u);
+  CHECK(result.value().brep.shell_count() == 1u);
   CHECK(result.value().brep.vertex_count() == 12u);
   CHECK(result.value().brep.edge_count() == 18u);
   CHECK(result.value().brep.face_count() == 8u);
@@ -166,6 +170,9 @@ TEST_CASE("fillet_edges rounds an adjacent pair on a hexagonal prism") {
   const double expected =
       area * 2.0 - 2.0 * 2.0 * corner_area(0.2, 2.0 * kPi / 3.0);
   CHECK(volume_of(result.value().brep) == doctest::Approx(expected).epsilon(1e-9));
+  CHECK(geom::validate_topology(result.value().brep).ok());
+  CHECK(result.value().brep.solid_ids().size() == 1u);
+  CHECK(result.value().brep.shell_count() == 1u);
   CHECK(result.value().brep.vertex_count() == 16u);
   CHECK(result.value().brep.edge_count() == 24u);
   CHECK(result.value().brep.face_count() == 10u);
@@ -197,4 +204,40 @@ TEST_CASE("fillet_edges deduplicates and reorders vertical edge selections") {
   CHECK(from_duplicated.value().brep.edge_count() == 15u);
   CHECK(from_duplicated.value().brep.face_count() == 7u);
   CHECK(geom::validate_topology(from_duplicated.value().brep).ok());
+}
+
+TEST_CASE("fillet_edges enforces the prism face-width guard") {
+  const geom::Result<geom::Brep> prism = make_prism(triangle(), 0.0, 3.0, kTolerance);
+  REQUIRE(prism.has_value());
+  const geom::Brep& solid = prism.value();
+  const std::vector<geom::EdgeId> edges{
+      vertical_edge_at(solid, geom::Point2d{0.0, 0.0}),
+      vertical_edge_at(solid, geom::Point2d{2.0, 0.0})};
+  REQUIRE(edges[0] != geom::EdgeId{});
+  REQUIRE(edges[1] != geom::EdgeId{});
+
+  // Each base corner keeps a tangent length t = radius * sqrt(3), so the two
+  // fillets leave a straight strip of 2 - 2 * t = 5e-7 on the base side. A
+  // tolerance at or above the strip rejects the radius; one below it accepts.
+  const double radius = (2.0 - 5e-7) / (2.0 * std::sqrt(3.0));
+
+  const geom::Result<geom::FilletResult> rejected =
+      geom::fillet_edges(solid, edges, geom::FilletOptions{radius, 1e-6});
+  REQUIRE(!rejected.has_value());
+  CHECK(rejected.error().code == geom::Errc::unsupported);
+  CHECK(std::string(rejected.error().message) ==
+        "fillet_edges: radius leaves a prism face narrower than the tolerance");
+
+  const geom::Result<geom::FilletResult> accepted =
+      geom::fillet_edges(solid, edges, geom::FilletOptions{radius, 1e-7});
+  REQUIRE(accepted.has_value());
+  CHECK(accepted.value().filleted_edges == 2u);
+  CHECK(geom::validate_topology(accepted.value().brep).ok());
+  CHECK(accepted.value().brep.solid_ids().size() == 1u);
+  CHECK(accepted.value().brep.shell_count() == 1u);
+  CHECK(volume_of(accepted.value().brep) ==
+        doctest::Approx(3.82644659481533).epsilon(1e-9));
+  CHECK(accepted.value().brep.vertex_count() == 10u);
+  CHECK(accepted.value().brep.edge_count() == 15u);
+  CHECK(accepted.value().brep.face_count() == 7u);
 }
