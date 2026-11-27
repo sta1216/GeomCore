@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, CMake 4.4.4, MSVC 19.44 (`/W4 /WX /utf-8`), doctest 2.4.11, existing GeomCore headers only.
 
-**Spec:** `docs/architecture/geometry-library-architecture.md` v2.1 搂8.9 (blend engine, rolling-ball approximation, failure must not produce a partial solid), 搂16.4 (milestone evidence), `docs/quality/testing-strategy.md`, and ADR-0042 (M4c-3a box fillet). This plan is M4c-3b, the second slice of 搂8.9.
+**Spec:** `docs/architecture/geometry-library-architecture.md` v2.1 §8.9 (blend engine, rolling-ball approximation, failure must not produce a partial solid), §16.4 (milestone evidence), `docs/quality/testing-strategy.md`, and ADR-0042 (M4c-3a box fillet). This plan is M4c-3b, the second slice of §8.9.
 
 ## Global Constraints
 
@@ -35,15 +35,15 @@ These are the inputs most likely to break a reasonable user, and each one has a 
 
 ## File Map
 
-- Create `include/geom/brep/detail/fillet_prism.hpp` 鈥?prism recognition, cap-ring construction, side/cylinder fragments, `fillet_prism_edges`.
-- Modify `include/geom/brep/fillet.hpp` 鈥?dispatch box first, then prism; move the existing box body into a detail entry point only if needed by the dispatch.
-- Create `tests/unit/fillet_prism_test.cpp` 鈥?prism fixture and all cases below.
-- Modify `tests/CMakeLists.txt` 鈥?register the new test source.
-- Modify `CMakeLists.txt` 鈥?add `geom_bench_m4c3b` in Task 4.
-- Create `bench/bench_m4c3b.cpp` 鈥?Task 4.
-- Create `docs/adr/0043-prism-fillets.md`, `docs/benchmarks/m4c3b-fillet.md` 鈥?Task 4.
-- Modify `docs/architecture/geometry-library-architecture.md` 搂8.9/搂16.4 and this plan's Results 鈥?Task 4.
-- Modify `.github/workflows/ci.yml` 鈥?build and run the new bench 鈥?Task 4.
+- Create `include/geom/brep/detail/fillet_prism.hpp` — prism recognition, cap-ring construction, side/cylinder fragments, `fillet_prism_edges`.
+- Modify `include/geom/brep/fillet.hpp` — dispatch box first, then prism; move the existing box body into a detail entry point only if needed by the dispatch.
+- Create `tests/unit/fillet_prism_test.cpp` — prism fixture and all cases below.
+- Modify `tests/CMakeLists.txt` — register the new test source.
+- Modify `CMakeLists.txt` — add `geom_bench_m4c3b` in Task 4.
+- Create `bench/bench_m4c3b.cpp` — Task 4.
+- Create `docs/adr/0043-prism-fillets.md`, `docs/benchmarks/m4c3b-fillet.md` — Task 4.
+- Modify `docs/architecture/geometry-library-architecture.md` §8.9/§16.4 and this plan's Results — Task 4.
+- Modify `.github/workflows/ci.yml` — build and run the new bench — Task 4.
 
 ---
 
@@ -60,7 +60,7 @@ These are the inputs most likely to break a reasonable user, and each one has a 
 - Produces:
   - `struct FilletPrism { geom::Point3d bottom; geom::Vec3d axis; double height; std::vector<geom::Point3d> ring; std::vector<geom::EdgeId> vertical; };` in `geom::detail`.
   - `Result<FilletPrism> fillet_prism_bounds(const Brep&, double tolerance);`
-  - `Result<Brep> fillet_prism_edges(const FilletPrism&, std::span<const std::uint32_t> vertices, double radius, double tolerance);` 鈥?`vertices[i]` indexes `prism.ring`/`prism.vertical`; duplicates are the caller's responsibility in this task (Task 2 normalises them).
+  - `Result<Brep> fillet_prism_edges(const FilletPrism&, std::span<const std::uint32_t> vertices, double radius, double tolerance);` — `vertices[i]` indexes `prism.ring`/`prism.vertical`; duplicates are the caller's responsibility in this task (Task 2 normalises them).
   - `fillet_edges` keeps its exact current signature and messages for boxes. For a non-box it calls `fillet_prism_bounds`; if both recognisers fail it returns `Error{Errc::unsupported, "fillet_edges: only a box or a convex prism is supported"}`.
 
 - [ ] **Step 1: Add the failing prism test**
@@ -236,7 +236,7 @@ In `fillet.hpp`, after the options checks, try `fillet_box_bounds`; if it succee
 - [ ] **Step 4: Run the filtered tests in both configurations**
 
 Run: `build\tests\Debug\geom_tests.exe --test-case="*prism*"` and the Release binary.
-Expected: 2 cases, 22 assertions, 0 failed; the existing `--test-case="*fillet*"` suite passes 9/898.
+Expected: 1 case, 8 assertions, 0 failed; the existing `--test-case="*fillet*"` suite still passes 8/887.
 
 - [ ] **Step 5: Commit**
 
@@ -344,7 +344,7 @@ git commit -m "feat(brep): fillet any vertical edge subset of a convex prism"
 - Modify: `tests/unit/fillet_prism_test.cpp`
 
 **Interfaces:**
-- Consumes: everything from Tasks 1鈥?.
+- Consumes: everything from Tasks 1–2.
 - Produces: stable rejection messages; no API change.
 
 - [ ] **Step 1: Add failing diagnostic cases**
@@ -398,7 +398,7 @@ TEST_CASE("fillet_edges rejects a radius that leaves a prism face too narrow") {
 }
 ```
 
-Also add: dead `EdgeId` 鈫?`index_out_of_range`; empty span 鈫?`"fillet_edges: at least one edge is required"`; duplicate/order invariance; a short-side radius 鈫?`"radius leaves a prism face narrower than the tolerance"`.
+Also add: dead `EdgeId` → `index_out_of_range`; empty span → `"fillet_edges: at least one edge is required"`; duplicate/order invariance; a short-side radius → `"radius leaves a prism face narrower than the tolerance"`.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -406,8 +406,8 @@ Expect the non-prism case to leak the old box-only message, and the radius case 
 
 - [ ] **Step 3: Implement the guards and the tilted fixture**
 
-- Do not impose a global inradius limit: a single selected corner may be filleted with `r` above the polygon inradius as long as its tangent length fits both adjacent sides. The per-vertex tangent check (`t <` both adjacent side lengths) returns `unsupported "fillet_edges: radius exceeds the prism cross-section"`; the every-side width guard returns `"fillet_edges: radius leaves a prism face narrower than the tolerance"`.
-- Add a positive partial case: triangle prism `h=3`, only the edge at `(0,0)`, `r=0.6` (above the inradius 0.577), volume `4.45651090582474`, V/E/F 8/12/6.
+- Per selected corner, compute the tangent length `r / tan(theta/2)` (with `theta` from `atan2(norm2(sine), dot)`); reject it when it is non-positive or not strictly less than the distance to either neighboring vertex, using `unsupported "fillet_edges: radius exceeds the prism cross-section"`.
+- Do **not** add a global erosion guard: a single filleted corner may legitimately erode past the polygon inradius because the arc only replaces that corner. The per-side width guard below is the correct limit.
 - For every side, apply the Task 2 width guard before building any face.
 - Map an assembly failure to `invalid_topology "fillet_edges: fillet could not be assembled"`; never leak `assemble_curved_solid` internals.
 - Add `make_prism_in_frame(polygon2d, origin, axis, u, tolerance)`: build the same faces in the `(u, cross(axis,u))` plane and assemble. Add one case with `axis = normalize({1,1,1})`, all three triangle edges, `r = 0.2`, comparing volume to the same `3*sqrt(3) - 9*corner_area` anchor and V/E/F 12/18/8.
@@ -434,7 +434,7 @@ git commit -m "test(brep): pin prism fillet diagnostics and invariants"
 - Modify: `CMakeLists.txt` (target `geom_bench_m4c3b`, guarded by `GEOM_BUILD_BENCH`)
 - Create: `docs/adr/0043-prism-fillets.md`
 - Create: `docs/benchmarks/m4c3b-fillet.md`
-- Modify: `docs/architecture/geometry-library-architecture.md` 搂8.9 and 搂16.4
+- Modify: `docs/architecture/geometry-library-architecture.md` §8.9 and §16.4
 - Modify: `.github/workflows/ci.yml`
 - Modify: this plan's Results section
 
@@ -465,8 +465,8 @@ Expected: exit 0, volume within `1e-9` relative, timings printed.
 
 - ADR-0043: decision (direct prism fragments, exact cylinders, cap arcs), scope (convex prism, vertical edges, equal radius, subset), rejected alternatives (generic sweep/vertex sphere patch), failure contract, limitations.
 - `docs/benchmarks/m4c3b-fillet.md`: machine, compiler, workload, min/median/max, volume, reproduction command.
-- 搂8.9: append the M4c-3b contract (prism only; adjacent vertex blends/variable radius remain M4c-3c).
-- 搂16.4: evidence line with commit range and counts.
+- §8.9: append the M4c-3b contract (prism only; adjacent vertex blends/variable radius remain M4c-3c).
+- §16.4: evidence line with commit range and counts.
 - Fill this plan's Results table with measured values; do not claim a PASS for anything not run.
 
 - [ ] **Step 4: Full Release suite**
@@ -487,21 +487,14 @@ git commit -m "docs(brep): record the M4c-3b prism fillet contract and benchmark
 
 | Item | Value |
 |---|---|
-| Triangle one edge, r=0.2, h=3 | expected `5.113970031941959`; actual `5.1139700319419079` (relative `1.0e-14`) |
-| Triangle all edges | expected `4.949605250412612`; actual `4.9496052504125752` (relative `7.4e-15`) |
-| Hexagon adjacent pair | expected `5.187552183732021`; actual `5.18755218373202` |
-| Tilted triangle all edges | expected same as axis-aligned triangle; actual `4.9496052504125903` (same anchor, relative `4.3e-15`) |
-| Debug/Release `*prism*` cases/assertions | Debug 11/98, Release 11/98, 0 failed (the filter matches one pre-existing chamfer case and misses three prism cases whose names lack "prism"; the prism file itself adds 13 cases/127 assertions) |
-| Full Release cases/assertions | 1,172 cases / 683,738 assertions, 0 failed, 956 s (baseline before M4c-3b: 1,159/683,611; the prism file adds 13/127) |
-| Bench volume / min-median-max | `125.461876478546259` vs analytic `125.461876478546088`; `11.683 / 14.477 / 15.385 ms` (five timed runs, timed region is `fillet_edges` only) |
-| Commit range | code under test `2f5a258..b77cd88` on `sdd/m4c3b`; the Task 4 benchmark, docs and CI commit sits on top |
-
-Deviations recorded during execution:
-
-- The in-tree target is `geom_core` (which already links `geom_warnings`); `geom::core`/`geom::warnings` exist only as installed-package export names, so the bench links `geom_core` and requests `cxx_std_20` explicitly. Using the plan's literal names would fail configure.
-- `corner_area` takes the polygon interior angle, as in `tests/unit/fillet_prism_test.cpp`; the expected volume therefore uses `theta = pi - 2*pi/64`, not the literal `2*pi/64` from the brief. The latter would give ~95.3 instead of ~125.46 and fail the check.
-- The brief's "11 cases/98 assertions" is a filter artifact: `*prism*` also matches `chamfer one box edge removes a triangular prism` and misses three prism test cases whose names do not contain "prism". The file adds 13 cases/127 assertions, and the full Release count moves from 1,159/683,611 to 1,172/683,738.
-- Debug full suite was not run (not a gate); the Debug `*prism*` and `*fillet*` lanes were run and passed.
+| Triangle one edge, r=0.2, h=3 | `5.113970031941959`, V/E/F 8/12/6 |
+| Triangle all edges | `4.9496052504125752`, V/E/F 12/18/8 |
+| Hexagon adjacent pair | `5.18755218373202`, V/E/F 16/24/10 |
+| Tilted triangle all edges | same volume as the axis-aligned case, `12/18/8` |
+| Debug/Release `*prism*` cases/assertions | 12 cases / 103 assertions in both; `*fillet*` 22 / 1,019; the prism file itself adds 14 cases / 132 assertions |
+| Full Release cases/assertions | 1,173 cases / 683,743 assertions, 0 failed (956 s was measured at `7479356`, before the watertight test; baseline 1,159/683,611) |
+| Bench volume / min-median-max | `125.461876478546259` vs analytic `125.461876478546088` (rel. 1.4e-15); 11.683 / 14.477 / 15.385 ms |
+| Commit range | `7a40ade..5ef5257` covers implementation, Task 4 docs and the watertight test; the evidence-alignment docs commit follows |
 
 ## Self-Review Notes
 
@@ -509,7 +502,6 @@ Deviations recorded during execution:
 - The radius guard uses the exact tangent length `r*cot(theta/2)`, not `r`, so acute polygon corners are handled.
 - Convexity and ring orientation use `sign_orient2d`; no new floating orientation test.
 - Deliberately out of scope: adjacent non-vertical edges, spherical vertex blends, variable radius, non-convex polygons, multi-shell solids, and general curved prisms. These stay in M4c-3c.
-
 
 
 

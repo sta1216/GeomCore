@@ -1,8 +1,8 @@
 # M4c-3b convex prism fillet benchmark
 
 - Date: 2026-11-27
-- Commit: `sdd/m4c3b` (prism code under test `2f5a258..b77cd88`; benchmark and
-  docs added in the Task 4 commit)
+- Commit: `sdd/m4c3b` (prism code under test `2f5a258^..b77cd88`; benchmark and
+  docs added in the Task 4 commit; `5ef5257` adds the watertight test on top)
 - Compiler: MSVC 19.44.35217, `/std:c++20 /O2`, `GEOM_WERROR=ON`
 - Machine: Windows 10 Enterprise 22H2 (build 19045), Intel Core i7-8550U
   (4C/8T), Release
@@ -47,11 +47,11 @@ code change, so the table is one representative five-run batch rather than a
 best-of-N.
 
 The benchmark does **not** tessellate. It therefore makes no watertightness
-claim: watertightness is the tessellation boundary check exercised by the prism
-unit tests (`fillet_edges rounds a prism in a tilted frame` and
-`fillet_edges leaves its input unchanged and is deterministic`), not something
-this benchmark measures. Topology validation here means
-`validate_topology` accepts the B-rep, not that a triangle mesh is watertight.
+claim: watertightness is the tessellation boundary check exercised by
+`fillet prism tessellation is watertight`
+(`tests/unit/fillet_prism_test.cpp`, `boundary_edges == 0`), not something this
+benchmark measures. Topology validation here means `validate_topology` accepts
+the B-rep, not that a triangle mesh is watertight.
 
 The binary exits 0 only when all five sample checks pass, and 2 on assembly or
 fillet failure, a wrong `filleted_edges` count, wrong solid/shell or `V/E/F`
@@ -61,24 +61,28 @@ volume outside the `1e-9` relative band. It is built only with
 
 ## Test evidence
 
-- `*prism*`: 11 cases / 98 assertions in Debug and 11 / 98 in Release, 0
+- `*prism*`: 12 cases / 103 assertions in Debug and 12 / 103 in Release, 0
   failed. This filter also matches the pre-existing
   `chamfer one box edge removes a triangular prism` case and misses three prism
   fillet cases whose names do not contain "prism"; the prism file itself adds
-  13 cases / 127 assertions.
-- `*fillet*`: 21 cases / 1,014 assertions in Debug and 21 / 1,014 in Release,
-  0 failed (8 box cases / 887 assertions plus the 13 prism cases / 127
+  14 cases / 132 assertions.
+- `*fillet*`: 22 cases / 1,019 assertions in Debug and 22 / 1,019 in Release,
+  0 failed (8 box cases / 887 assertions plus the 14 prism cases / 132
   assertions).
-- Full Release: 1,172 cases / 683,738 assertions, 0 failed, 956 s.
+- Full Release: 1,173 cases / 683,743 assertions, 0 failed; the 956 s figure was
+  measured at `7479356`, before the watertight test added one case / five
+  assertions.
 - Full Debug remains PENDING: the suite still contains the known >20-minute
   cases documented in earlier milestones, so the Debug `*prism*` lane is the
   prism evidence, not a full Debug pass.
 
 ## Scope
 
-Accepted: a single-shell, closed, convex, all-planar prism whose filletable
-edges are parallel to the prism axis; any non-empty subset of those vertical
-edges; one uniform radius. At each selected corner the radius must satisfy
+Accepted: a single-shell, closed, convex, all-planar prism with a 3–64 vertex
+cross-section and exactly one vertical edge per cap-ring vertex (a side face
+split along the height is rejected); its filletable edges are parallel to the
+prism axis; any non-empty subset of those vertical edges; one uniform radius.
+At each selected corner the radius must satisfy
 `r * cot(theta/2) < both incident side lengths`, and every side must keep a
 positive strip after both trims. Each patch is an exact cylinder trimmed by
 cap-plane arcs; no Boolean and no faceted approximation.

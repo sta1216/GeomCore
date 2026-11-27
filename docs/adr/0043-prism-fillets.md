@@ -28,7 +28,9 @@ radius guards, or to wait for the generic edge-chain/SSI blend engine.
 ## Decision
 
 M4c-3b extends `fillet_edges(const Brep&, span<const EdgeId>, const
-FilletOptions&)` to a single-shell, closed, convex, all-planar prism:
+FilletOptions&)` to a single-shell, closed, convex, all-planar prism with a
+cross-section of 3–64 vertices and exactly one vertical edge per cap-ring
+vertex (a side face split along the height is rejected):
 
 - **Recognition.** The solid must have exactly two cap faces with opposite
   outward normals and one common axis, matching cap rings, and a strictly
@@ -44,12 +46,13 @@ FilletOptions&)` to a single-shell, closed, convex, all-planar prism:
   are rebuilt once, trimmed at the tangent points, assembled with
   `assemble_curved_solid`, and returned only after `validate_topology` is
   clean. No Boolean, no sampled fit and no faceted ring are involved.
-- **Scope.** Any non-empty subset of the vertical edges may be selected;
-  duplicate ids collapse and the result is independent of selection order.
-  The radius is uniform across the selection. Adjacent selected corners simply
-  trim the shared cap edge from both ends. Non-convex polygons, curved side
-  faces, multi-shell solids, vertical-edge subsets that do not exist, and
-  non-vertical edges are out of scope.
+- **Scope.** Any non-empty subset of the recognised vertical edges may be
+  selected; duplicate ids collapse and the result is independent of selection
+  order. The radius is uniform across the selection. Adjacent selected corners
+  simply trim the shared cap edge from both ends. Non-convex polygons, curved
+  side faces, multi-shell solids, cross-sections outside 3–64 vertices, prisms
+  whose side faces are split along the height, vertical-edge subsets that do
+  not exist, and non-vertical edges are out of scope.
 - **Radius limit is per selected corner, not a global inradius cap.** At a
   corner with interior angle `theta`, the tangent length along each incident
   side is `t = r * cot(theta/2)`. The corner is accepted when `t` is strictly
@@ -69,8 +72,10 @@ FilletOptions&)` to a single-shell, closed, convex, all-planar prism:
   `V = 2n + 2k`, `E = 3n + 3k`, `F = n + 2 + k` for an `n`-gon with `k`
   selected vertical edges. The all-64-edges 64-gon fixture therefore has
   `256/384/130`, and `chi = 2`.
-- **Failure contract.** Every rejection happens before assembly, with a stable
-  `Errc` and message, and leaves the input unchanged:
+- **Failure contract.** Every recognition, option and radius rejection happens
+  before assembly, with a stable `Errc` and message, and leaves the input
+  unchanged; assembly can still fail defensively and is mapped to
+  `invalid_topology`:
   - empty selection: `unsupported "fillet_edges: at least one edge is
     required"` (checked before the options, because the default radius is zero);
   - non-finite radius or tolerance: `non_finite "fillet_edges: radius must be
@@ -129,24 +134,26 @@ support.
 
 ## Consequences
 
-- Constant-radius fillet of any non-empty subset of a convex prism's vertical
-  edges is exact, deterministic and returned as a valid closed B-rep. On the
-  64-gon, radius 2, height 10 fixture with all 64 vertical edges at `r = 0.05`,
-  the benchmark measures `11.683 / 14.477 / 15.385 ms` (min/median/max) and
-  volume `125.461876478546259` against the analytic
+- Constant-radius fillet of any non-empty subset of a supported convex prism's
+  vertical edges is exact, deterministic and returned as a valid closed B-rep.
+  On the 64-gon, radius 2, height 10 fixture with all 64 vertical edges at
+  `r = 0.05`, the benchmark measures `11.683 / 14.477 / 15.385 ms`
+  (min/median/max) and volume `125.461876478546259` against the analytic
   `125.461876478546088` (relative error about `1.4e-15`). Five timed runs reuse
   the same input; checks and volume integration run outside the timed region.
 - Unit tests pin one-edge, all-edge, adjacent-pair, reordered/duplicated
   selection, the face-width guard, one corner beyond the polygon inradius, a
   tilted frame, dead/empty inputs, exact messages, and input immutability plus
-  deterministic tessellation. The `*prism*` filter is 11 cases / 98 assertions
-  in both configurations; the prism file itself adds 13 cases / 127 assertions
-  (three of its cases do not contain the word "prism" in their names).
+  deterministic and watertight tessellation (`boundary_edges == 0`).
+  The `*prism*` filter is 12 cases / 103 assertions in both configurations; the
+  prism file itself adds 14 cases / 132 assertions (three of its cases do not
+  contain the word "prism" in their names).
 - The caps are arc-trimmed surfaces, so `mass_properties` does not accept them;
   volume evidence uses `detail::curved_solid_volume`.
 - The benchmark checks topology, validation and the analytic volume. It does
-  not tessellate, so it makes no watertightness claim; tessellation
-  watertightness remains the unit-test boundary check.
+  not tessellate, so it makes no watertightness claim; watertightness is
+  asserted by `fillet prism tessellation is watertight`
+  (`tests/unit/fillet_prism_test.cpp`, `boundary_edges == 0`).
 - Deferred to M4c-3c: adjacent non-vertical edge blends, spherical vertex
   patches, variable radius, non-convex polygons, multi-shell solids, curved
   side surfaces and general operands. No document claims general fillet
