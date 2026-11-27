@@ -17,9 +17,11 @@
 #include <geom/brep/fillet.hpp>
 #include <geom/brep/mass_properties.hpp>
 #include <geom/brep/primitives.hpp>
+#include <geom/brep/solid_editor.hpp>
 #include <geom/brep/tessellate.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/brep/validate.hpp>
+#include <geom/core/error.hpp>
 #include <geom/curves/analytic_curve.hpp>
 #include <geom/surfaces/analytic.hpp>
 
@@ -39,6 +41,56 @@ std::vector<EdgeId> all_edges(const Brep& brep) {
 
 double volume_of(const Brep& brep) {
   return geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9).value();
+}
+
+geom::Vec3d unit_vector(const geom::Vec3d& v) {
+  return v * (1.0 / std::sqrt(geom::dot(v, v)));
+}
+
+// One spherical face bounded by three great-circle arcs a -> b -> c -> a. The
+// `reversed` flag lets a test ask for the same trim with the face normal flipped.
+Brep sphere_face_from_corners(const geom::Sphere3& sphere, const Point3d& a, const Point3d& b,
+                              const Point3d& c, bool reversed) {
+  geom::SolidEditor editor;
+  const std::uint32_t surface = editor.add_surface(sphere);
+  const geom::VertexId va = editor.add_vertex(a, 0.0).value();
+  const geom::VertexId vb = editor.add_vertex(b, 0.0).value();
+  const geom::VertexId vc = editor.add_vertex(c, 0.0).value();
+  const auto add_arc = [&](const Point3d& from, const Point3d& to, geom::VertexId v0,
+                           geom::VertexId v1) -> EdgeId {
+    const geom::Vec3d x = unit_vector(from - sphere.center);
+    const geom::Vec3d z = unit_vector(geom::cross(x, to - sphere.center));
+    const geom::Vec3d y = geom::cross(z, x);
+    const double angle = std::atan2(geom::dot(to - sphere.center, y),
+                                    geom::dot(to - sphere.center, x));
+    const std::uint32_t curve =
+        editor.add_curve(geom::CircleCurve3{sphere.center, x, y, sphere.radius});
+    return editor.add_edge(v0, v1, curve, 0.0, angle, 0.0).value();
+  };
+  const EdgeId ab = add_arc(a, b, va, vb);
+  const EdgeId bc = add_arc(b, c, vb, vc);
+  const EdgeId ca = add_arc(c, a, vc, va);
+
+  const geom::FaceId face = editor.add_face(surface, reversed, 0.0).value();
+  const std::vector<geom::CoedgeSpec> loop{geom::CoedgeSpec{ab}, geom::CoedgeSpec{bc},
+                                           geom::CoedgeSpec{ca}};
+  editor.add_loop(face, loop, true).value();
+  const geom::ShellId shell =
+      editor.add_shell(std::array<geom::FaceId, 1>{face}, false).value();
+  editor.add_solid(std::array<geom::ShellId, 1>{shell}, 0.0).value();
+  return editor.commit().value();
+}
+
+// A single spherical face bounded by three great-circle arcs through +x, +y and
+// Sphere3::eval(pi/4, pi/3). One corner is nearer the pole than the other two and
+// the equator corners span exactly pi/2 of longitude, but the two side arcs are
+// not meridians: the trim is a triangular lune sector, not a spherical octant.
+Brep non_octant_sphere_face() {
+  constexpr double kPi = 3.14159265358979323846;
+  const geom::Sphere3 sphere{
+      Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, geom::Vec3d{1.0, 0.0, 0.0}, 0.25};
+  return sphere_face_from_corners(sphere, Point3d{0.25, 0.0, 0.0}, Point3d{0.0, 0.25, 0.0},
+                                  sphere.eval(0.25 * kPi, kPi / 3.0), false);
 }
 }  // namespace
 
@@ -104,6 +156,30 @@ TEST_CASE("rounded box tessellates watertight") {
     const geom::Vec3d n = geom::cross(b - a, c - a);
     CHECK(geom::dot(n, n) > 0.0);
   }
+  // The corner patches must wind outward: a spherical triangle whose normal
+  // points back at its sphere centre would be inside out.
+  const Brep& solid = rounded.value().brep;
+  std::vector<const geom::Sphere3*> face_sphere(solid.face_count(), nullptr);
+  for (const geom::FaceId id : solid.face_ids()) {
+    const geom::SurfaceGeometry& surface = solid.geometry().surfaces[solid.face(id).surface];
+    if (const geom::Sphere3* sphere = std::get_if<geom::Sphere3>(&surface)) {
+      face_sphere[id.index()] = sphere;
+    }
+  }
+  bool saw_outward_sphere_triangle = false;
+  for (std::size_t t = 0; t < mesh.value().triangles.size(); ++t) {
+    const geom::Sphere3* sphere = face_sphere[mesh.value().triangle_face[t]];
+    if (sphere == nullptr) continue;
+    const auto& triangle = mesh.value().triangles[t];
+    const geom::Point3d& a = mesh.value().positions[triangle[0]];
+    const geom::Point3d& b = mesh.value().positions[triangle[1]];
+    const geom::Point3d& c = mesh.value().positions[triangle[2]];
+    if (geom::dot(geom::cross(b - a, c - a), a - sphere->center) > 0.0) {
+      saw_outward_sphere_triangle = true;
+      break;
+    }
+  }
+  CHECK(saw_outward_sphere_triangle);
 }
 
 TEST_CASE("rounded box has exact bounds and corner patches") {
@@ -152,4 +228,34 @@ TEST_CASE("rounded box mass properties match the Steiner volume") {
   CHECK(mass.value().centroid[0] == doctest::Approx(1.0).epsilon(1e-9));
   CHECK(mass.value().centroid[1] == doctest::Approx(1.5).epsilon(1e-9));
   CHECK(mass.value().centroid[2] == doctest::Approx(2.0).epsilon(1e-9));
+}
+
+TEST_CASE("sphere patch rejects a non-octant trim") {
+  const Brep face = non_octant_sphere_face();
+  const auto mesh = geom::tessellate(face, geom::TessellationOptions{});
+  REQUIRE_FALSE(mesh.has_value());
+  CHECK(mesh.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view{mesh.error().message} == "tessellate: sphere patch is not a single octant");
+}
+
+// A reversed octant winds inward if the patch builder trusts the uv order alone,
+// so this case fails if the outward-orientation guard is removed.
+TEST_CASE("sphere patch orients a reversed octant outward") {
+  const geom::Sphere3 sphere{
+      Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, geom::Vec3d{1.0, 0.0, 0.0}, 0.25};
+  const Brep face = sphere_face_from_corners(sphere, Point3d{0.25, 0.0, 0.0},
+                                             Point3d{0.0, 0.25, 0.0}, Point3d{0.0, 0.0, 0.25},
+                                             true);
+  const auto mesh = geom::tessellate(face, geom::TessellationOptions{});
+  REQUIRE(mesh.has_value());
+  REQUIRE_FALSE(mesh.value().triangles.empty());
+  std::size_t inward = 0;
+  for (const auto& triangle : mesh.value().triangles) {
+    const geom::Point3d& a = mesh.value().positions[triangle[0]];
+    const geom::Point3d& b = mesh.value().positions[triangle[1]];
+    const geom::Point3d& c = mesh.value().positions[triangle[2]];
+    if (geom::dot(geom::cross(b - a, c - a), a - sphere.center) <= 0.0) ++inward;
+  }
+  CHECK(inward == 0u);
+  CHECK(mesh.value().triangles.size() == 153u);
 }

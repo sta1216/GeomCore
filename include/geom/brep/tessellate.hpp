@@ -944,6 +944,30 @@ inline Result<void> tessellate_sphere_patch(TessellateState& state, const Brep& 
     pole_to_first.assign(chains[(pole + 2) % 3].rbegin(), chains[(pole + 2) % 3].rend());
     second_to_pole.assign(chains[pole].rbegin(), chains[pole].rend());
   }
+  // A spherical octant is bounded by two meridian arcs and one equator arc. The
+  // pole and longitude-span gates above are not enough on their own: a trim that
+  // merely passes through the pole and the two equator corners can still bulge in
+  // longitude, and the row builder below would then sweep the whole lune. Every
+  // non-pole sample of each side chain must therefore sit on its meridian. The
+  // pole itself has no longitude, so it is skipped.
+  const auto on_meridian = [&](std::uint32_t index, double meridian_u) -> bool {
+    const Result<Point2d> projected =
+        face_uv_project_sphere(sphere, state.mesh.positions[index], meridian_u, true);
+    if (!projected.has_value()) return false;
+    return std::fabs(projected.value()[0] - meridian_u) <= angle_tolerance;
+  };
+  for (std::size_t sample = 1; sample < pole_to_first.size(); ++sample) {
+    if (!on_meridian(pole_to_first[sample], u0)) {
+      return Error{Errc::unsupported, "tessellate: sphere patch is not a single octant",
+                   id.index(), 0u};
+    }
+  }
+  for (std::size_t sample = 0; sample + 1 < second_to_pole.size(); ++sample) {
+    if (!on_meridian(second_to_pole[sample], u1)) {
+      return Error{Errc::unsupported, "tessellate: sphere patch is not a single octant",
+                   id.index(), 0u};
+    }
+  }
   const std::size_t columns = equator.size() - 1;
   const std::size_t n_v = pole_to_first.size() - 1;
   if (n_v == 0 || second_to_pole.size() != n_v + 1) {
