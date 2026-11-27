@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <type_traits>
 #include <vector>
 
 #include <geom/brep/face_uv.hpp>
@@ -432,7 +433,12 @@ template <class Surface>
 inline Result<void> mass_add_trimmed_face(const Brep& brep, FaceId id, const Surface& surface,
                                           const MassPropertiesOptions& options,
                                           const Vec3d& reference, MassIntegrals& acc) {
-  if (!tessellate_face_has_polyline_edge(brep, id)) return mass_unsupported_rectangle(id);
+  // Sphere3 is relaxed through this gate: a spherical octant is bounded by three
+  // arcs that are not polylines, yet the trimmed integrator below handles its
+  // projectable uv loop. Cylinders, cones and tori stay strict.
+  if (!tessellate_face_has_polyline_edge(brep, id) && !std::is_same_v<Surface, Sphere3>) {
+    return mass_unsupported_rectangle(id);
+  }
   const Result<FaceUvProjection> projection =
       face_uv_projection(brep, brep.face(id), options.curved_sampling_deflection);
   if (!projection.has_value()) return projection.error();

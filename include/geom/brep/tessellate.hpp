@@ -53,6 +53,12 @@ namespace detail {
 
 constexpr double kPi = 3.14159265358979323846;
 
+// Upper bound on the triangles a single tessellation may produce. The trimmed uv
+// path checks it after triangulating the (already bounded) boundary rings, before
+// appending anything to the mesh; the analytic patch builders check it before
+// they emit their grids.
+constexpr std::size_t kTrimmedMaxTriangles = 2000000u;
+
 inline bool tessellate_point_finite(const Point3d& point) noexcept {
   return std::isfinite(point[0]) && std::isfinite(point[1]) && std::isfinite(point[2]);
 }
@@ -803,6 +809,232 @@ inline Result<void> tessellate_cone_face(TessellateState& state, const Brep& bre
   return {};
 }
 
+// Spherical octant patch: an eighth-sphere face is bounded by three quarter arcs
+// (two meridians from the chart pole and the equator arc between them). The
+// boundary samples supply the whole grid - the meridians give the latitude rows
+// and the equator gives the longitude columns - so the patch reuses exactly the
+// vertices of the adjacent cylinder bands. Every interior row is a constant
+// latitude arc; the last row collapses to the single welded pole vertex.
+inline Result<void> tessellate_sphere_patch(TessellateState& state, const Brep& brep, FaceId id,
+                                            const Sphere3& sphere, double deflection,
+                                            const std::vector<TessellateBoundaryEdge>& collected) {
+  // The rows are built from the boundary samples, so the edge builder has already
+  // fixed the sampling step.
+  (void)deflection;
+  const Face& face = brep.face(id);
+  if (collected.size() != 3) {
+    return Error{Errc::invalid_topology, "tessellate: sphere face has too many seam arcs",
+                 id.index(), 0u};
+  }
+  for (const TessellateBoundaryEdge& boundary : collected) {
+    if (boundary.positions.size() < 2) {
+      return Error{Errc::invalid_topology, "tessellate: sphere face has too many seam arcs",
+                   id.index(), 0u};
+    }
+  }
+
+  // Walk the single loop so every chain follows the face's traversal direction.
+  std::vector<std::vector<std::uint32_t>> chains;
+  chains.reserve(3);
+  const std::size_t loop_limit = brep.loops().size();
+  const std::size_t coedge_limit = brep.coedges().size();
+  std::size_t loop_count = 0;
+  for (LoopId loop_id = face.first_loop; !loop_id.is_null(); loop_id = brep.loop(loop_id).next) {
+    if (loop_count++ > loop_limit) {
+      return Error{Errc::invalid_topology, "tessellate: loop chain is cyclic", id.index(), 0u};
+    }
+    const Loop& loop = brep.loop(loop_id);
+    CoedgeId coedge_id = loop.start;
+    if (coedge_id.is_null()) {
+      return Error{Errc::degenerate, "tessellate: loop has no coedges", id.index(), 0u};
+    }
+    std::size_t coedge_count = 0;
+    do {
+      if (coedge_count++ > coedge_limit) {
+        return Error{Errc::invalid_topology, "tessellate: coedge cycle is cyclic", id.index(), 0u};
+      }
+      const Coedge& coedge = brep.coedge(coedge_id);
+      const TessellateBoundaryEdge* boundary = nullptr;
+      for (const TessellateBoundaryEdge& candidate : collected) {
+        if (candidate.edge == coedge.edge) {
+          boundary = &candidate;
+          break;
+        }
+      }
+      if (boundary == nullptr) {
+        return Error{Errc::invalid_topology, "tessellate: sphere patch is not a single octant",
+                     id.index(), 0u};
+      }
+      if (coedge.reversed) {
+        chains.emplace_back(boundary->positions.rbegin(), boundary->positions.rend());
+      } else {
+        chains.emplace_back(boundary->positions.begin(), boundary->positions.end());
+      }
+      coedge_id = coedge.next;
+    } while (!coedge_id.is_null() && coedge_id != loop.start);
+    if (coedge_id.is_null()) {
+      return Error{Errc::invalid_topology, "tessellate: loop is not closed", id.index(), 0u};
+    }
+  }
+  if (chains.size() != 3) {
+    return Error{Errc::invalid_topology, "tessellate: sphere patch is not a single octant",
+                 id.index(), 0u};
+  }
+  for (std::size_t chain = 0; chain < chains.size(); ++chain) {
+    if (chains[chain].front() != chains[(chain + 2) % 3].back()) {
+      return Error{Errc::invalid_topology, "tessellate: sphere patch boundary is not closed",
+                   id.index(), 0u};
+    }
+  }
+
+  // chain[i] connects corner[i] to corner[i + 1]; project the corners in loop
+  // order so the longitude unwrapping never jumps across the chart seam.
+  double corner_u[3] = {0.0, 0.0, 0.0};
+  double corner_v[3] = {0.0, 0.0, 0.0};
+  double previous_u = 0.0;
+  bool has_previous_u = false;
+  for (std::size_t corner = 0; corner < 3; ++corner) {
+    const Result<Point2d> projected = face_uv_project_sphere(
+        sphere, state.mesh.positions[chains[corner].front()], previous_u, has_previous_u);
+    if (!projected.has_value()) return projected.error();
+    corner_u[corner] = projected.value()[0];
+    corner_v[corner] = projected.value()[1];
+    previous_u = corner_u[corner];
+    has_previous_u = true;
+  }
+
+  std::size_t pole = 0;
+  for (std::size_t corner = 1; corner < 3; ++corner) {
+    if (std::fabs(corner_v[corner]) > std::fabs(corner_v[pole])) pole = corner;
+  }
+  const std::size_t equator_a = (pole + 1) % 3;
+  const std::size_t equator_b = (pole + 2) % 3;
+  // One corner must be strictly nearer the pole than the other two, and the two
+  // equator corners must span exactly one quarter turn of longitude. Anything
+  // else is a trim this patch builder does not model.
+  if (!(std::fabs(corner_v[pole]) > std::fabs(corner_v[equator_a])) ||
+      !(std::fabs(corner_v[pole]) > std::fabs(corner_v[equator_b]))) {
+    return Error{Errc::unsupported, "tessellate: sphere patch is not a single octant",
+                 id.index(), 0u};
+  }
+  const bool first_is_a = corner_u[equator_a] <= corner_u[equator_b];
+  const std::size_t first = first_is_a ? equator_a : equator_b;
+  const std::size_t second = first_is_a ? equator_b : equator_a;
+  const double u0 = corner_u[first];
+  const double u1 = corner_u[second];
+  const double longitude_span = u1 - u0;
+  const double angle_tolerance = 1e-9;
+  if (!(longitude_span > 0.0) || !(longitude_span <= 0.5 * kPi + angle_tolerance)) {
+    return Error{Errc::unsupported, "tessellate: sphere patch is not a single octant",
+                 id.index(), 0u};
+  }
+
+  // chain[pole] runs pole -> equator_a, chain[pole + 1] is the equator and
+  // chain[pole + 2] runs equator_b -> pole.
+  const std::vector<std::uint32_t>& equator_chain = chains[(pole + 1) % 3];
+  std::vector<std::uint32_t> equator;
+  std::vector<std::uint32_t> pole_to_first;
+  std::vector<std::uint32_t> second_to_pole;
+  if (first_is_a) {
+    equator = equator_chain;
+    pole_to_first = chains[pole];
+    second_to_pole = chains[(pole + 2) % 3];
+  } else {
+    equator.assign(equator_chain.rbegin(), equator_chain.rend());
+    pole_to_first.assign(chains[(pole + 2) % 3].rbegin(), chains[(pole + 2) % 3].rend());
+    second_to_pole.assign(chains[pole].rbegin(), chains[pole].rend());
+  }
+  const std::size_t columns = equator.size() - 1;
+  const std::size_t n_v = pole_to_first.size() - 1;
+  if (n_v == 0 || second_to_pole.size() != n_v + 1) {
+    return Error{Errc::numeric_failure, "tessellate: sphere patch meridians do not match",
+                 id.index(), 0u};
+  }
+  const std::size_t triangle_count = columns * (2 * n_v - 1);
+  if (triangle_count > kTrimmedMaxTriangles ||
+      state.mesh.triangles.size() > kTrimmedMaxTriangles - triangle_count) {
+    return Error{Errc::numeric_failure, "tessellate: sphere patch exceeds the triangle limit",
+                 id.index(), static_cast<std::uint32_t>(kTrimmedMaxTriangles)};
+  }
+
+  const auto latitude = [&](std::uint32_t index) -> Result<double> {
+    const Result<Point2d> projected =
+        face_uv_project_sphere(sphere, state.mesh.positions[index], 0.0, false);
+    if (!projected.has_value()) return projected.error();
+    return projected.value()[1];
+  };
+
+  // Row 0 is the equator chain; row j carries the meridian samples at latitude
+  // v_j and new interior points along that constant-latitude arc; the final row
+  // is the welded pole vertex.
+  std::vector<std::vector<std::uint32_t>> rows;
+  rows.reserve(n_v + 1);
+  rows.push_back(std::move(equator));
+  for (std::size_t j = 1; j < n_v; ++j) {
+    const std::uint32_t left = pole_to_first[n_v - j];
+    const std::uint32_t right = second_to_pole[j];
+    const Result<double> left_latitude = latitude(left);
+    if (!left_latitude.has_value()) return left_latitude.error();
+    const Result<double> right_latitude = latitude(right);
+    if (!right_latitude.has_value()) return right_latitude.error();
+    if (!(std::fabs(left_latitude.value() - right_latitude.value()) <= 1e-12)) {
+      return Error{Errc::numeric_failure, "tessellate: sphere patch meridians do not match",
+                   id.index(), 0u};
+    }
+    const double v = left_latitude.value();
+    std::vector<std::uint32_t> row;
+    row.reserve(columns + 1);
+    row.push_back(left);
+    for (std::size_t column = 1; column < columns; ++column) {
+      const double u =
+          u0 + (u1 - u0) * static_cast<double>(column) / static_cast<double>(columns);
+      const Result<std::uint32_t> appended = tessellate_append_point(state, sphere.eval(u, v));
+      if (!appended.has_value()) return appended.error();
+      row.push_back(appended.value());
+    }
+    row.push_back(right);
+    rows.push_back(std::move(row));
+  }
+  const std::uint32_t pole_index = chains[pole].front();
+  rows.push_back(std::vector<std::uint32_t>{pole_index});
+
+  const std::size_t first_triangle = state.mesh.triangles.size();
+  const bool reversed = face.reversed;
+  for (std::size_t j = 0; j + 1 < n_v; ++j) {
+    const std::vector<std::uint32_t>& lower = rows[j];
+    const std::vector<std::uint32_t>& upper = rows[j + 1];
+    for (std::size_t column = 0; column < columns; ++column) {
+      tessellate_push_triangle(state, id, reversed, lower[column], lower[column + 1],
+                               upper[column + 1]);
+      tessellate_push_triangle(state, id, reversed, lower[column], upper[column + 1],
+                               upper[column]);
+    }
+  }
+  const std::vector<std::uint32_t>& last_row = rows[n_v - 1];
+  for (std::size_t column = 0; column < columns; ++column) {
+    tessellate_push_triangle(state, id, reversed, last_row[column], last_row[column + 1],
+                             pole_index);
+  }
+
+  // The uv winding alone is not trusted: orient the patch outward from the sphere
+  // centre using its first non-degenerate triangle.
+  for (std::size_t triangle = first_triangle; triangle < state.mesh.triangles.size(); ++triangle) {
+    const std::array<std::uint32_t, 3>& indices = state.mesh.triangles[triangle];
+    const Point3d& p0 = state.mesh.positions[indices[0]];
+    const Point3d& p1 = state.mesh.positions[indices[1]];
+    const Point3d& p2 = state.mesh.positions[indices[2]];
+    const Vec3d normal = cross(p1 - p0, p2 - p0);
+    if (!(dot(normal, normal) > 0.0)) continue;
+    if (dot(normal, p0 - sphere.center) < 0.0) {
+      for (std::size_t flip = first_triangle; flip < state.mesh.triangles.size(); ++flip) {
+        std::swap(state.mesh.triangles[flip][1], state.mesh.triangles[flip][2]);
+      }
+    }
+    break;
+  }
+  return {};
+}
+
 // Sphere face: the meridian seam supplies the v grid; every u column is a full
 // turn at the same v, and both poles collapse to the seam endpoints so the mesh
 // has a single south and a single north vertex.
@@ -819,15 +1051,22 @@ inline Result<void> tessellate_sphere_face(TessellateState& state, const Brep& b
       tessellate_boundary_edges(state, brep, id, deflection);
   if (!collected.has_value()) return collected.error();
   const TessellateBoundaryEdge* seam = nullptr;
+  std::size_t seam_arcs = 0;
   for (const TessellateBoundaryEdge& boundary : collected.value()) {
     const Edge& edge = brep.edge(boundary.edge);
-    if (tessellate_circle_curve(brep, boundary.edge) != nullptr && !(edge.v0 == edge.v1)) {
-      if (seam != nullptr) {
-        return Error{Errc::invalid_topology, "tessellate: sphere face has too many seam arcs",
-                     id.index(), 0u};
-      }
-      seam = &boundary;
+    if (tessellate_circle_curve(brep, boundary.edge) == nullptr || edge.v0 == edge.v1) continue;
+    if (seam == nullptr) seam = &boundary;
+    ++seam_arcs;
+  }
+  // A spherical octant is a single loop bounded by three quarter arcs rather than
+  // by one meridian seam; it has its own row-from-the-boundary builder.
+  if (seam_arcs > 1) {
+    const LoopId first_loop = brep.face(id).first_loop;
+    if (seam_arcs == 3 && !first_loop.is_null() && brep.loop(first_loop).next.is_null()) {
+      return tessellate_sphere_patch(state, brep, id, sphere, deflection, collected.value());
     }
+    return Error{Errc::invalid_topology, "tessellate: sphere face has too many seam arcs",
+                 id.index(), 0u};
   }
   if (seam == nullptr || seam->positions.size() < 3) {
     return Error{Errc::invalid_topology, "tessellate: sphere face is missing its meridian",
@@ -977,11 +1216,6 @@ struct TessellateTrimmedRing {
   std::vector<std::uint32_t> positions;
   bool outer = false;
 };
-
-// Upper bound on the triangles a single tessellation may produce. The trimmed uv
-// path checks it after triangulating the (already bounded) boundary rings, before
-// appending anything to the mesh.
-constexpr std::size_t kTrimmedMaxTriangles = 2000000u;
 
 // Triangulates one trimmed polygon (outer ring first, then holes) and maps the
 // uv triangle indices back to the shared position pool.
