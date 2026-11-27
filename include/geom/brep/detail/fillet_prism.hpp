@@ -451,8 +451,9 @@ inline Result<Brep> fillet_prism_edges(const FilletPrism& prism,
         points.push_back(tangent_out);
         spans.push_back(std::nullopt);
       } else {
-        const Point3d base = prism.ring[index];
-        points.push_back(at_top ? fillet_prism_detail::point_offset(base, axis, height) : base);
+        const Point3d ring_point = prism.ring[index];
+        points.push_back(at_top ? fillet_prism_detail::point_offset(ring_point, axis, height)
+                                : ring_point);
         spans.push_back(std::nullopt);
       }
     }
