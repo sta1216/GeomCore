@@ -101,6 +101,24 @@ double volume_of(const geom::Brep& brep) {
   return geom::detail::curved_solid_volume(brep, brep.solid_ids().front(), 1e-9).value();
 }
 
+std::size_t boundary_edges(const geom::TriMesh& mesh) {
+  std::map<std::pair<std::uint32_t, std::uint32_t>, int> uses;
+  for (const std::array<std::uint32_t, 3>& triangle : mesh.triangles) {
+    for (int i = 0; i < 3; ++i) {
+      std::uint32_t a = triangle[static_cast<std::size_t>(i)];
+      std::uint32_t b = triangle[(i + 1) % 3];
+      if (a > b) std::swap(a, b);
+      ++uses[{a, b}];
+    }
+  }
+  std::size_t boundary = 0;
+  for (const auto& [key, count] : uses) {
+    (void)key;
+    if (count != 2) ++boundary;
+  }
+  return boundary;
+}
+
 // Same extrusion as make_prism, but in the orthonormal frame
 // (u, cross(axis, u), axis) rooted at origin.
 geom::Result<geom::Brep> make_prism_in_frame(std::span<const geom::Point2d> polygon,
@@ -473,4 +491,18 @@ TEST_CASE("fillet_edges leaves its input unchanged and is deterministic") {
   CHECK(solid.edge_count() == edge_count);
   CHECK(solid.face_count() == face_count);
   CHECK(volume_of(solid) == volume);
+}
+
+TEST_CASE("fillet prism tessellation is watertight") {
+  const geom::Result<geom::Brep> prism = make_prism(triangle(), 0.0, 3.0, kTolerance);
+  REQUIRE(prism.has_value());
+  const std::vector<geom::EdgeId> edges = vertical_edges(prism.value());
+  const geom::Result<geom::FilletResult> result =
+      geom::fillet_edges(prism.value(), edges, geom::FilletOptions{0.2, kTolerance});
+  REQUIRE(result.has_value());
+  const geom::Result<geom::TriMesh> mesh =
+      geom::tessellate(result.value().brep, geom::TessellationOptions{});
+  REQUIRE(mesh.has_value());
+  CHECK(mesh.value().triangles.size() > 0);
+  CHECK(boundary_edges(mesh.value()) == 0);
 }
