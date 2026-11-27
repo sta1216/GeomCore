@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <geom/brep/detail/fillet_box.hpp>
+#include <geom/brep/detail/fillet_box_rounded.hpp>
 #include <geom/brep/detail/fillet_prism.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/core/error.hpp>
@@ -140,7 +141,8 @@ inline Result<FilletResult> fillet_box_selection(const Brep& brep,
 
 // Rounds the selected edges of an axis-aligned box or of a convex prism with
 // exact cylinder patches. Box edges must belong to one parallel family; prism
-// edges must be vertical.
+// edges must be vertical. Selecting all twelve box edges rounds the whole box
+// and adds eight exact spherical corner octants.
 inline Result<FilletResult> fillet_edges(const Brep& brep, std::span<const EdgeId> edges,
                                          const FilletOptions& options = {}) {
   if (edges.empty()) {
@@ -161,8 +163,21 @@ inline Result<FilletResult> fillet_edges(const Brep& brep, std::span<const EdgeI
 
   const Result<detail::FilletBox> box_bounds = detail::fillet_box_bounds(brep, options.tolerance);
   if (box_bounds.has_value()) {
-    return detail::fillet_box_selection(brep, edges, box_bounds.value(), options.radius,
-                                        options.tolerance);
+    const detail::FilletBox& box = box_bounds.value();
+    // All twelve edges share vertices, so this case must be recognised before
+    // the shared-vertex rejection in fillet_box_selection.
+    if (detail::fillet_box_all_edges(brep, edges, box, options.tolerance)) {
+      const Result<Brep> rounded = detail::fillet_box_rounded(
+          detail::FilletBoxRounded{{box.lo[0], box.lo[1], box.lo[2]},
+                                   {box.hi[0], box.hi[1], box.hi[2]}},
+          options.radius, options.tolerance);
+      if (!rounded.has_value()) return rounded.error();
+      FilletResult result;
+      result.brep = std::move(rounded.value());
+      result.filleted_edges = 12u;
+      return result;
+    }
+    return detail::fillet_box_selection(brep, edges, box, options.radius, options.tolerance);
   }
 
   const Result<detail::FilletPrism> prism = detail::fillet_prism_bounds(brep, options.tolerance);

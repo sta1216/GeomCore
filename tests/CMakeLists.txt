@@ -100,6 +100,7 @@ set(GEOM_TEST_SOURCES
   unit/blend_qa_test.cpp
   unit/half_space_test.cpp
   unit/fillet_prism_test.cpp
+  unit/fillet_box_rounded_test.cpp
 )
 
 list(APPEND GEOM_TEST_SOURCES integration/m0_exit_test.cpp)
