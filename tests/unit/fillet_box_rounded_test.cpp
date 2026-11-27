@@ -236,10 +236,13 @@ TEST_CASE("rounded box rejects a radius at half the smallest dimension") {
   const auto at_limit = geom::fillet_edges(box, edges, geom::FilletOptions{1.0, 1e-9});
   REQUIRE_FALSE(at_limit.has_value());
   CHECK(at_limit.error().code == geom::Errc::unsupported);
-  CHECK(std::string_view{at_limit.error().message}.find("half the smallest box dimension") !=
-        std::string_view::npos);
+  CHECK(std::string_view{at_limit.error().message} ==
+        "fillet_edges: radius must be less than half the smallest box dimension");
   const auto near_limit = geom::fillet_edges(box, edges, geom::FilletOptions{1.0 - 1e-6, 1e-9});
-  CHECK(near_limit.has_value());
+  REQUIRE(near_limit.has_value());
+  CHECK(near_limit.value().filleted_edges == 12u);
+  CHECK(near_limit.value().brep.face_count() == 26u);
+  CHECK(geom::validate_topology(near_limit.value().brep).ok());
 }
 
 TEST_CASE("rounded box rejects an incomplete or dead selection") {
@@ -258,6 +261,8 @@ TEST_CASE("rounded box rejects an incomplete or dead selection") {
   const auto dead = geom::fillet_edges(box, edges, geom::FilletOptions{0.25, 1e-9});
   REQUIRE_FALSE(dead.has_value());
   CHECK(dead.error().code == geom::Errc::index_out_of_range);
+  CHECK(std::string_view{dead.error().message} == "fillet_edges: edge does not belong to the solid");
+  CHECK(dead.error().context_a == 999u);
   // A dead edge is the caller's mistake even when the rest of the selection is
   // incomplete: it must win over the family/parallel diagnostics.
   edges = all_edges(box);
@@ -266,6 +271,32 @@ TEST_CASE("rounded box rejects an incomplete or dead selection") {
   const auto incomplete_dead = geom::fillet_edges(box, edges, geom::FilletOptions{0.25, 1e-9});
   REQUIRE_FALSE(incomplete_dead.has_value());
   CHECK(incomplete_dead.error().code == geom::Errc::index_out_of_range);
+  CHECK(std::string_view{incomplete_dead.error().message} ==
+        "fillet_edges: edge does not belong to the solid");
+  CHECK(incomplete_dead.error().context_a == 999u);
+}
+
+TEST_CASE("sphere patch predicate matches only the eight corner faces") {
+  const Brep box = box_2x3x4();
+  const auto rounded = geom::fillet_edges(box, all_edges(box), geom::FilletOptions{0.25, 1e-9});
+  REQUIRE(rounded.has_value());
+  const Brep& solid = rounded.value().brep;
+  std::size_t patches = 0;
+  std::size_t others = 0;
+  for (const geom::FaceId id : solid.face_ids()) {
+    const geom::Face& face = solid.face(id);
+    const bool sphere = face.surface < solid.geometry().surfaces.size() &&
+                        std::holds_alternative<geom::Sphere3>(solid.geometry().surfaces[face.surface]);
+    if (sphere) {
+      CHECK(geom::detail::tessellate_face_is_sphere_patch(solid, id));
+      ++patches;
+    } else {
+      CHECK_FALSE(geom::detail::tessellate_face_is_sphere_patch(solid, id));
+      ++others;
+    }
+  }
+  CHECK(patches == 8u);
+  CHECK(others == 18u);
 }
 
 TEST_CASE("rounded box rejects a non-box shape") {
