@@ -1,4 +1,4 @@
-﻿# Convex Prism Vertical-Edge Fillet Implementation Plan
+# Convex Prism Vertical-Edge Fillet Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -385,7 +385,7 @@ TEST_CASE("fillet_edges rejects a horizontal prism edge") {
   CHECK(result.error().message == "fillet_edges: only vertical prism edges are supported");
 }
 
-TEST_CASE("fillet_edges rejects a radius above the prism cross-section") {
+TEST_CASE("fillet_edges rejects a radius that leaves a prism face too narrow") {
   const geom::Result<geom::Brep> prism = make_prism(triangle(), 0.0, 3.0, kTolerance);
   REQUIRE(prism.has_value());
   const std::vector<geom::EdgeId> edges = vertical_edges(prism.value());
@@ -393,7 +393,8 @@ TEST_CASE("fillet_edges rejects a radius above the prism cross-section") {
       geom::fillet_edges(prism.value(), edges, geom::FilletOptions{1.0, kTolerance});
   REQUIRE(!result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
-  CHECK(result.error().message == "fillet_edges: radius exceeds the prism cross-section");
+  CHECK(result.error().message ==
+        "fillet_edges: radius leaves a prism face narrower than the tolerance");
 }
 ```
 
@@ -405,7 +406,8 @@ Expect the non-prism case to leak the old box-only message, and the radius case 
 
 - [ ] **Step 3: Implement the guards and the tilted fixture**
 
-- Before geometry: reject a radius whose inward-offset polygon is empty (intersect adjacent offset lines and require every offset vertex to satisfy every half-space with clearance `> tolerance`); use `unsupported "fillet_edges: radius exceeds the prism cross-section"`.
+- Do not impose a global inradius limit: a single selected corner may be filleted with `r` above the polygon inradius as long as its tangent length fits both adjacent sides. The per-vertex tangent check (`t <` both adjacent side lengths) returns `unsupported "fillet_edges: radius exceeds the prism cross-section"`; the every-side width guard returns `"fillet_edges: radius leaves a prism face narrower than the tolerance"`.
+- Add a positive partial case: triangle prism `h=3`, only the edge at `(0,0)`, `r=0.6` (above the inradius 0.577), volume `4.45651090582474`, V/E/F 8/12/6.
 - For every side, apply the Task 2 width guard before building any face.
 - Map an assembly failure to `invalid_topology "fillet_edges: fillet could not be assembled"`; never leak `assemble_curved_solid` internals.
 - Add `make_prism_in_frame(polygon2d, origin, axis, u, tolerance)`: build the same faces in the `(u, cross(axis,u))` plane and assemble. Add one case with `axis = normalize({1,1,1})`, all three triangle edges, `r = 0.2`, comparing volume to the same `3*sqrt(3) - 9*corner_area` anchor and V/E/F 12/18/8.
