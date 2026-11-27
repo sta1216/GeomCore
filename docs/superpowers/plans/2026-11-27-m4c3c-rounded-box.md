@@ -192,91 +192,53 @@ git commit -m "feat(brep): round all twelve edges of a box with spherical corner
 
 ---
 
-### Task 2: Symmetry, watertightness, determinism and input immutability
+### Task 2: Tessellate the spherical corner patches, then prove symmetry and watertightness
 
 **Files:**
+- Modify: `include/geom/brep/tessellate.hpp`
+- Modify: `include/geom/brep/mass_properties.hpp`
 - Modify: `tests/unit/fillet_box_rounded_test.cpp`
 
 **Interfaces:**
-- Consumes: `fillet_edges`, `tessellate`, `validate_topology`, `curved_solid_volume`.
-- Produces: no new API.
+- Consumes: `fillet_edges`, `tessellate`, `mass_properties`, `TessellateState`, `TessellateBoundaryEdge`, `tessellate_boundary_edges`, `tessellate_append_point`, `tessellate_push_triangle`, `tessellate_circle_curve`, `face_uv_project_sphere`.
+- Produces: no new public API. New internal helper:
+  `inline Result<void> tessellate_sphere_patch(TessellateState&, const Brep&, FaceId, const Sphere3&, double deflection, const std::vector<TessellateBoundaryEdge>&);`
+
+**Why this task exists (review finding):**
+`tessellate_sphere_face` only supports a full 2*pi sphere with one meridian seam. A rounded-box corner is a spherical octant with three quarter-circle arcs, so tessellation currently fails with `tessellate: sphere face has too many seam arcs`. The generic trimmed-uv fallback is not a fix: its adaptive sag refinement diverges on the polar sliver (probe: >92k splits without converging). `mass_properties` works with the one-line gate below and gives volume 23.538071403307924 for the 2x3x4 r=.25 box.
 
 - [ ] **Step 1: Write the failing tests**
 
-Add three test cases:
+Append to `tests/unit/fillet_box_rounded_test.cpp`: a watertight tessellation test (boundary-edge count 0, no zero-area triangles), an exact-bounds/corner-patch test (bounds 0..2, 0..3, 0..4; `Plane3{{1,0,0},2}` exists; `Sphere3` center `(1.75, 2.75, 3.75)` exists), and a mass-properties test (volume `23.53807140332` relative `1e-9`, centroid `(1, 1.5, 2)`). Keep Task 1's existing case unchanged. The full test code is in `task-2-brief.md` and is copied into the test file verbatim.
 
-```cpp
-TEST_CASE("rounded box is symmetric at all eight corners") {
-  const Brep box = geom::make_box(Point3d{-2.0, -3.0, -4.0}, Point3d{0.0, 0.0, 0.0}, 1e-9).value();
-  const auto result = geom::fillet_edges(box, all_edges(box), geom::FilletOptions{0.25, 1e-9});
-  REQUIRE(result.has_value());
-  CHECK(volume_of(result.value().brep) ==
-        doctest::Approx(23.53807140332).epsilon(1e-12));
-  CHECK(result.value().brep.vertex_count() == 24u);
-  CHECK(result.value().brep.edge_count() == 48u);
-  CHECK(result.value().brep.face_count() == 26u);
-}
+- [ ] **Step 2: Run the new tests and capture RED**
 
-TEST_CASE("rounded box tessellates watertight") {
-  const Brep box = box_2x3x4();
-  const auto result = geom::fillet_edges(box, all_edges(box), geom::FilletOptions{0.25, 1e-9});
-  REQUIRE(result.has_value());
-  const auto mesh = geom::tessellate(result.value().brep, geom::TessellationOptions{});
-  REQUIRE(mesh.has_value());
-  CHECK(mesh.value().triangles.size() > 0u);
-  std::map<std::pair<std::uint32_t, std::uint32_t>, std::uint32_t> uses;
-  for (const auto& triangle : mesh.value().triangles) {
-    for (int e = 0; e < 3; ++e) {
-      std::uint32_t a = triangle[static_cast<std::size_t>(e)];
-      std::uint32_t b = triangle[static_cast<std::size_t>((e + 1) % 3)];
-      if (a > b) std::swap(a, b);
-      ++uses[{a, b}];
-    }
-  }
-  std::uint32_t boundary = 0;
-  for (const auto& [edge, count] : uses) {
-    if (count == 1) ++boundary;
-  }
-  CHECK(boundary == 0u);
-}
+Expected: watertight test fails with `tessellate: sphere face has too many seam arcs`; mass test fails with `mass_properties: curved face is not an untrimmed full rectangle`. The bounds/corner test passes and is the independent guard against an axis-permutation bug that volume-only tests cannot see.
 
-TEST_CASE("rounded box is deterministic and leaves its input unchanged") {
-  const Brep box = box_2x3x4();
-  const auto first = geom::fillet_edges(box, all_edges(box), geom::FilletOptions{0.25, 1e-9});
-  const auto second = geom::fillet_edges(box, all_edges(box), geom::FilletOptions{0.25, 1e-9});
-  REQUIRE(first.has_value());
-  REQUIRE(second.has_value());
-  CHECK(first.value().brep.vertex_count() == second.value().brep.vertex_count());
-  CHECK(volume_of(first.value().brep) == doctest::Approx(volume_of(second.value().brep)));
-  for (const geom::VertexId id : first.value().brep.vertex_ids()) {
-    CHECK(first.value().brep.vertex(id).point[0] == second.value().brep.vertex(id).point[0]);
-    CHECK(first.value().brep.vertex(id).point[1] == second.value().brep.vertex(id).point[1]);
-    CHECK(first.value().brep.vertex(id).point[2] == second.value().brep.vertex(id).point[2]);
-  }
-  CHECK(box.vertex_count() == 8u);
-  CHECK(box.edge_count() == 12u);
-  CHECK(box.face_count() == 6u);
-  CHECK(volume_of(box) == doctest::Approx(24.0));
-}
-```
+- [ ] **Step 3: Implement the sphere-patch tessellator**
 
-- [ ] **Step 2: Run the tests to verify they fail**
+In `tessellate_sphere_face`, before the `too many seam arcs` error, count boundary edges that are `CircleCurve3` with `v0 != v1`. If exactly three and the face has one loop, call `tessellate_sphere_patch` and return its result. Keep the full-sphere path unchanged for exactly one arc.
 
-Expected: the symmetry test fails if the construction is hard-coded to the positive corner; the watertight/determinism tests may pass once Task 1 is correct — keep them as regression guards. Do not weaken Task 1.
+`tessellate_sphere_patch` algorithm (details and code skeleton in `task-2-brief.md`):
+1. Require exactly three boundary edges with at least two positions; otherwise return the original `invalid_topology` error.
+2. Project the loop's boundary positions with `face_uv_project_sphere`, carrying `previous_u` across the loop; identify the pole (|v| closest to pi/2) and the two equator corners; order `u0 < u1`, `u1 - u0 <= pi/2 + tolerance`; otherwise `unsupported "tessellate: sphere patch is not a single octant"`.
+3. Build three ordered chains in loop traversal (reverse edge samples when the coedge is reversed): equator `E0 -> E1`, meridian `E1 -> pole`, meridian `pole -> E0`. Both meridians must have the same segment count `n_v`, else `numeric_failure "tessellate: sphere patch meridians do not match"`.
+4. Rows: row 0 is the welded equator chain (`K+1` indices); rows 1..n_v-1 use the meridian samples as endpoints, interior points `sphere.eval(u0 + (u1-u0)*i/K, v_j)` appended with `tessellate_append_point`; row n_v is the single pole vertex.
+5. Triangles: two per column between adjacent full rows; a fan from the last row to the pole. Always `tessellate_push_triangle(state, id, face.reversed, ...)`.
+6. Orientation: if the first non-degenerate triangle's normal dotted with `(p0 - sphere.center)` is negative, swap the second and third index of every patch triangle.
+7. Defensive triangle bound 2000000 -> `numeric_failure`.
 
-- [ ] **Step 3: Fix the construction**
+`mass_properties.hpp`: allow `Sphere3` through `mass_add_trimmed_face`'s rectilinear gate (`!tessellate_face_has_polyline_edge(brep, id) && !std::is_same_v<Surface, Sphere3>`), include `<type_traits>`; do not relax cylinder/cone/torus.
 
-Generalize the corner frame to all eight sign combinations; do not special-case the low-low-low corner. If `face_uv_project_sphere` returns an error for a loop, carry `previous_u` across the whole loop (as specified in Task 1 Step 3.5) rather than resetting it per point.
+- [ ] **Step 4: Run Debug and Release**
 
-- [ ] **Step 4: Run Debug and Release filtered tests**
-
-Run `--test-case="rounded box*"` in both configurations. Expected: 4 cases, all pass.
+`--test-case="rounded box*"` in Debug and Release with `GEOM_WERROR=ON`, plus Release lane `--test-case="*sphere*,*trim*,*tessellate*"` for regressions. Do not run the full Debug suite.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/unit/fillet_box_rounded_test.cpp
-git commit -m "test(brep): prove rounded-box symmetry, watertightness and determinism"
+git add include/geom/brep/tessellate.hpp include/geom/brep/mass_properties.hpp tests/unit/fillet_box_rounded_test.cpp
+git commit -m "feat(brep): tessellate trimmed sphere patches"
 ```
 
 ---
