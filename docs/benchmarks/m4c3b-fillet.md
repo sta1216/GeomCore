@@ -69,8 +69,9 @@ volume outside the `1e-9` relative band. It is built only with
 - `*fillet*`: 22 cases / 1,019 assertions in Debug and 22 / 1,019 in Release,
   0 failed (8 box cases / 887 assertions plus the 14 prism cases / 132
   assertions).
-- Full Release: 1,173 cases / 683,743 assertions, 0 failed; the 956 s figure was
-  measured at `7479356`, before the watertight test added one case / five
+- Full Release: 1,173 cases / 683,743 assertions, 0 failed at HEAD (about 920 s
+  in the final review's run); the 956 s figure was first measured at `7479356`
+  with 13 prism cases, before the watertight test added one case / five
   assertions.
 - Full Debug remains PENDING: the suite still contains the known >20-minute
   cases documented in earlier milestones, so the Debug `*prism*` lane is the

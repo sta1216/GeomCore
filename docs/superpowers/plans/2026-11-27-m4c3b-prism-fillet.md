@@ -492,7 +492,7 @@ git commit -m "docs(brep): record the M4c-3b prism fillet contract and benchmark
 | Hexagon adjacent pair | `5.18755218373202`, V/E/F 16/24/10 |
 | Tilted triangle all edges | same volume as the axis-aligned case, `12/18/8` |
 | Debug/Release `*prism*` cases/assertions | 12 cases / 103 assertions in both; `*fillet*` 22 / 1,019; the prism file itself adds 14 cases / 132 assertions |
-| Full Release cases/assertions | 1,173 cases / 683,743 assertions, 0 failed (956 s was measured at `7479356`, before the watertight test; baseline 1,159/683,611) |
+| Full Release cases/assertions | 1,173 cases / 683,743 assertions, 0 failed at HEAD (about 920 s in the final review's run; the 956 s figure was first measured at `7479356` with 13 prism cases; baseline 1,159/683,611) |
 | Bench volume / min-median-max | `125.461876478546259` vs analytic `125.461876478546088` (rel. 1.4e-15); 11.683 / 14.477 / 15.385 ms |
 | Commit range | `7a40ade..5ef5257` covers implementation, Task 4 docs and the watertight test; the evidence-alignment docs commit follows |
 

@@ -37,7 +37,10 @@ vertex (a side face split along the height is rejected):
   convex polygon cross-section (checked with exact predicates, not a tolerance
   sweep). The candidate must also pass the existing planar-convex-solid
   recognition. All filletable edges are the ring-to-ring edges parallel to the
-  prism axis.
+  prism axis. Matching the two cap rings uses an alignment slack of
+  `64 * tolerance`, the same convention as the box path; the accepted rings are
+  then rebuilt exactly at `base + axis * height`, so the slack only bounds the
+  comparison, not the constructed geometry.
 - **Direct fragments, not a boolean.** Each selected vertical edge gets an
   exact `Cylinder3` patch of radius `r`, with its axis parallel to the prism
   axis, its center on the interior angle bisector, and its surface tangent to
