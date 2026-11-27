@@ -487,14 +487,21 @@ git commit -m "docs(brep): record the M4c-3b prism fillet contract and benchmark
 
 | Item | Value |
 |---|---|
-| Triangle one edge, r=0.2, h=3 | expected `5.113970031941959`; actual PENDING |
-| Triangle all edges | expected `4.949605250412612`; actual PENDING |
-| Hexagon adjacent pair | expected `5.187552183732021`; actual PENDING |
-| Tilted triangle all edges | expected same as axis-aligned triangle; actual PENDING |
-| Debug/Release `*prism*` cases/assertions | PENDING |
-| Full Release cases/assertions | PENDING |
-| Bench volume / min-median-max | PENDING |
-| Commit range | PENDING |
+| Triangle one edge, r=0.2, h=3 | expected `5.113970031941959`; actual `5.1139700319419079` (relative `1.0e-14`) |
+| Triangle all edges | expected `4.949605250412612`; actual `4.9496052504125752` (relative `7.4e-15`) |
+| Hexagon adjacent pair | expected `5.187552183732021`; actual `5.18755218373202` |
+| Tilted triangle all edges | expected same as axis-aligned triangle; actual `4.9496052504125903` (same anchor, relative `4.3e-15`) |
+| Debug/Release `*prism*` cases/assertions | Debug 11/98, Release 11/98, 0 failed (the filter matches one pre-existing chamfer case and misses three prism cases whose names lack "prism"; the prism file itself adds 13 cases/127 assertions) |
+| Full Release cases/assertions | 1,172 cases / 683,738 assertions, 0 failed, 956 s (baseline before M4c-3b: 1,159/683,611; the prism file adds 13/127) |
+| Bench volume / min-median-max | `125.461876478546259` vs analytic `125.461876478546088`; `11.683 / 14.477 / 15.385 ms` (five timed runs, timed region is `fillet_edges` only) |
+| Commit range | code under test `2f5a258..b77cd88` on `sdd/m4c3b`; the Task 4 benchmark, docs and CI commit sits on top |
+
+Deviations recorded during execution:
+
+- The in-tree target is `geom_core` (which already links `geom_warnings`); `geom::core`/`geom::warnings` exist only as installed-package export names, so the bench links `geom_core` and requests `cxx_std_20` explicitly. Using the plan's literal names would fail configure.
+- `corner_area` takes the polygon interior angle, as in `tests/unit/fillet_prism_test.cpp`; the expected volume therefore uses `theta = pi - 2*pi/64`, not the literal `2*pi/64` from the brief. The latter would give ~95.3 instead of ~125.46 and fail the check.
+- The brief's "11 cases/98 assertions" is a filter artifact: `*prism*` also matches `chamfer one box edge removes a triangular prism` and misses three prism test cases whose names do not contain "prism". The file adds 13 cases/127 assertions, and the full Release count moves from 1,159/683,611 to 1,172/683,738.
+- Debug full suite was not run (not a gate); the Debug `*prism*` and `*fillet*` lanes were run and passed.
 
 ## Self-Review Notes
 
