@@ -1062,8 +1062,9 @@ inline Result<void> tessellate_sphere_patch(TessellateState& state, const Brep& 
                              pole_index);
   }
 
-  // The uv winding alone is not trusted: orient the patch outward from the sphere
-  // centre using its first non-degenerate triangle.
+  // The uv winding alone is not trusted: use the first non-degenerate triangle
+  // to make the mesh agree with the face sense (outward for a forward octant,
+  // inward for a reversed one).
   for (std::size_t triangle = first_triangle; triangle < state.mesh.triangles.size(); ++triangle) {
     const std::array<std::uint32_t, 3>& indices = state.mesh.triangles[triangle];
     const Point3d& p0 = state.mesh.positions[indices[0]];
@@ -1071,7 +1072,7 @@ inline Result<void> tessellate_sphere_patch(TessellateState& state, const Brep& 
     const Point3d& p2 = state.mesh.positions[indices[2]];
     const Vec3d normal = cross(p1 - p0, p2 - p0);
     if (!(dot(normal, normal) > 0.0)) continue;
-    if (dot(normal, p0 - sphere.center) < 0.0) {
+    if ((dot(normal, p0 - sphere.center) < 0.0) != reversed) {
       for (std::size_t flip = first_triangle; flip < state.mesh.triangles.size(); ++flip) {
         std::swap(state.mesh.triangles[flip][1], state.mesh.triangles[flip][2]);
       }

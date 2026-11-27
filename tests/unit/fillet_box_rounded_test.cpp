@@ -393,9 +393,10 @@ TEST_CASE("sphere patch rejects a non-octant trim") {
   CHECK(std::string_view{mesh.error().message} == "tessellate: sphere patch is not a single octant");
 }
 
-// A reversed octant winds inward if the patch builder trusts the uv order alone,
-// so this case fails if the outward-orientation guard is removed.
-TEST_CASE("sphere patch orients a reversed octant outward") {
+// A reversed octant must tessellate with inward triangles so the mesh follows
+// the face sense; a builder that always points away from the sphere centre
+// would flip this face outward.
+TEST_CASE("sphere patch honours a reversed octant's face sense") {
   const geom::Sphere3 sphere{
       Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, geom::Vec3d{1.0, 0.0, 0.0}, 0.25};
   const Brep face = sphere_face_from_corners(sphere, Point3d{0.25, 0.0, 0.0},
@@ -404,13 +405,13 @@ TEST_CASE("sphere patch orients a reversed octant outward") {
   const auto mesh = geom::tessellate(face, geom::TessellationOptions{});
   REQUIRE(mesh.has_value());
   REQUIRE_FALSE(mesh.value().triangles.empty());
-  std::size_t inward = 0;
+  std::size_t outward = 0;
   for (const auto& triangle : mesh.value().triangles) {
     const geom::Point3d& a = mesh.value().positions[triangle[0]];
     const geom::Point3d& b = mesh.value().positions[triangle[1]];
     const geom::Point3d& c = mesh.value().positions[triangle[2]];
-    if (geom::dot(geom::cross(b - a, c - a), a - sphere.center) <= 0.0) ++inward;
+    if (geom::dot(geom::cross(b - a, c - a), a - sphere.center) > 0.0) ++outward;
   }
-  CHECK(inward == 0u);
+  CHECK(outward == 0u);
   CHECK(mesh.value().triangles.size() == 153u);
 }
