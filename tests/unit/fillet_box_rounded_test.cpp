@@ -124,6 +124,32 @@ TEST_CASE("rounded box rounds all twelve edges with exact corner patches") {
   CHECK(planes == 6u);
   CHECK(cylinders == 12u);
   CHECK(spheres == 8u);
+
+  // Determinism and input immutability on the rounded path itself: a second call
+  // must reproduce the same topology, volume and vertex coordinates, and neither
+  // call may touch the input box.
+  const auto mass_before = geom::mass_properties(box);
+  REQUIRE(mass_before.has_value());
+  const auto again = geom::fillet_edges(box, edges, geom::FilletOptions{0.25, 1e-9});
+  REQUIRE(again.has_value());
+  const Brep& second = again.value().brep;
+  CHECK(second.vertex_count() == rounded.vertex_count());
+  CHECK(second.edge_count() == rounded.edge_count());
+  CHECK(second.face_count() == rounded.face_count());
+  CHECK(volume_of(second) == volume_of(rounded));
+  for (const geom::VertexId id : rounded.vertex_ids()) {
+    const Point3d& first_point = rounded.vertex(id).point;
+    const Point3d& second_point = second.vertex(id).point;
+    CHECK(second_point[0] == first_point[0]);
+    CHECK(second_point[1] == first_point[1]);
+    CHECK(second_point[2] == first_point[2]);
+  }
+  CHECK(box.vertex_count() == 8u);
+  CHECK(box.edge_count() == 12u);
+  CHECK(box.face_count() == 6u);
+  const auto mass_after = geom::mass_properties(box);
+  REQUIRE(mass_after.has_value());
+  CHECK(mass_after.value().volume == mass_before.value().volume);
 }
 
 TEST_CASE("rounded box tessellates watertight") {
@@ -203,19 +229,31 @@ TEST_CASE("rounded box has exact bounds and corner patches") {
   CHECK(hi[1] == 3.0);
   CHECK(hi[2] == 4.0);
   bool saw_hi_plane = false;
-  bool saw_corner_sphere = false;
   for (const geom::SurfaceGeometry& surface : solid.geometry().surfaces) {
     if (const geom::Plane3* plane = std::get_if<geom::Plane3>(&surface)) {
       if (plane->normal[0] == 1.0 && plane->offset == 2.0) saw_hi_plane = true;
     }
-    if (const geom::Sphere3* sphere = std::get_if<geom::Sphere3>(&surface)) {
-      if (sphere->center[0] == 1.75 && sphere->center[1] == 2.75 && sphere->center[2] == 3.75) {
-        saw_corner_sphere = true;
+  }
+  CHECK(saw_hi_plane);
+  // Every one of the eight corners must own a sphere centred one radius inside
+  // it: x in {0.25, 1.75}, y in {0.25, 2.75}, z in {0.25, 3.75}.
+  const std::array<Point3d, 8> expected_centres{
+      Point3d{0.25, 0.25, 0.25}, Point3d{1.75, 0.25, 0.25}, Point3d{0.25, 2.75, 0.25},
+      Point3d{1.75, 2.75, 0.25}, Point3d{0.25, 0.25, 3.75}, Point3d{1.75, 0.25, 3.75},
+      Point3d{0.25, 2.75, 3.75}, Point3d{1.75, 2.75, 3.75}};
+  std::array<bool, 8> seen_centre{};
+  for (const geom::SurfaceGeometry& surface : solid.geometry().surfaces) {
+    const geom::Sphere3* sphere = std::get_if<geom::Sphere3>(&surface);
+    if (sphere == nullptr) continue;
+    for (std::size_t i = 0; i < expected_centres.size(); ++i) {
+      if (sphere->center[0] == expected_centres[i][0] &&
+          sphere->center[1] == expected_centres[i][1] &&
+          sphere->center[2] == expected_centres[i][2]) {
+        seen_centre[i] = true;
       }
     }
   }
-  CHECK(saw_hi_plane);
-  CHECK(saw_corner_sphere);
+  for (const bool seen : seen_centre) CHECK(seen);
 }
 
 TEST_CASE("rounded box mass properties match the Steiner volume") {
@@ -237,6 +275,12 @@ TEST_CASE("rounded box rejects a radius at half the smallest dimension") {
   REQUIRE_FALSE(at_limit.has_value());
   CHECK(at_limit.error().code == geom::Errc::unsupported);
   CHECK(std::string_view{at_limit.error().message} ==
+        "fillet_edges: radius must be less than half the smallest box dimension");
+  const auto above_limit =
+      geom::fillet_edges(box, edges, geom::FilletOptions{1.0 + 1e-9, 1e-9});
+  REQUIRE_FALSE(above_limit.has_value());
+  CHECK(above_limit.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view{above_limit.error().message} ==
         "fillet_edges: radius must be less than half the smallest box dimension");
   const auto near_limit = geom::fillet_edges(box, edges, geom::FilletOptions{1.0 - 1e-6, 1e-9});
   REQUIRE(near_limit.has_value());
