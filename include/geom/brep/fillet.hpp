@@ -183,11 +183,10 @@ inline Result<FilletResult> fillet_edges(const Brep& brep, std::span<const EdgeI
       return Error{Errc::unsupported, "fillet_edges: only vertical prism edges are supported",
                    id.index()};
     }
-    const std::uint32_t index = static_cast<std::uint32_t>(match - shape.vertical.begin());
-    if (std::find(selected.begin(), selected.end(), index) == selected.end()) {
-      selected.push_back(index);
-    }
+    selected.push_back(static_cast<std::uint32_t>(match - shape.vertical.begin()));
   }
+  std::sort(selected.begin(), selected.end());
+  selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
 
   Result<Brep> filleted =
       detail::fillet_prism_edges(shape, selected, options.radius, options.tolerance);

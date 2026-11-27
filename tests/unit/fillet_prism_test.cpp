@@ -120,7 +120,81 @@ TEST_CASE("fillet_edges rounds one vertical edge of a triangular prism") {
   const double expected =
       3.0 * std::sqrt(3.0) - 3.0 * corner_area(0.2, kPi / 3.0);
   CHECK(volume_of(rounded) == doctest::Approx(expected).epsilon(1e-9));
+  CHECK(volume_of(rounded) == doctest::Approx(5.113970031941959).epsilon(1e-9));
   CHECK(rounded.vertex_count() == 8u);
   CHECK(rounded.edge_count() == 12u);
   CHECK(rounded.face_count() == 6u);
+}
+
+std::vector<geom::Point2d> regular_polygon(int n, double radius) {
+  std::vector<geom::Point2d> polygon;
+  for (int i = 0; i < n; ++i) {
+    const double angle = 2.0 * kPi * static_cast<double>(i) / static_cast<double>(n);
+    polygon.push_back(geom::Point2d{radius * std::cos(angle), radius * std::sin(angle)});
+  }
+  return polygon;
+}
+
+TEST_CASE("fillet_edges rounds every vertical edge of a triangular prism") {
+  const geom::Result<geom::Brep> prism = make_prism(triangle(), 0.0, 3.0, kTolerance);
+  REQUIRE(prism.has_value());
+  const std::vector<geom::EdgeId> edges = vertical_edges(prism.value());
+  REQUIRE(edges.size() == 3u);
+  const geom::Result<geom::FilletResult> result =
+      geom::fillet_edges(prism.value(), edges, geom::FilletOptions{0.2, kTolerance});
+  REQUIRE(result.has_value());
+  CHECK(result.value().filleted_edges == 3u);
+  CHECK(volume_of(result.value().brep) ==
+        doctest::Approx(3.0 * std::sqrt(3.0) - 9.0 * corner_area(0.2, kPi / 3.0))
+            .epsilon(1e-9));
+  CHECK(result.value().brep.vertex_count() == 12u);
+  CHECK(result.value().brep.edge_count() == 18u);
+  CHECK(result.value().brep.face_count() == 8u);
+}
+
+TEST_CASE("fillet_edges rounds an adjacent pair on a hexagonal prism") {
+  const std::vector<geom::Point2d> polygon = regular_polygon(6, 1.0);
+  const geom::Result<geom::Brep> prism = make_prism(polygon, 0.0, 2.0, kTolerance);
+  REQUIRE(prism.has_value());
+  std::vector<geom::EdgeId> edges = vertical_edges(prism.value());
+  REQUIRE(edges.size() == 6u);
+  const std::vector<geom::EdgeId> selected{edges[0], edges[1]};
+  const geom::Result<geom::FilletResult> result =
+      geom::fillet_edges(prism.value(), selected, geom::FilletOptions{0.2, kTolerance});
+  REQUIRE(result.has_value());
+  const double area = std::abs(geom::signed_area2(polygon));
+  const double expected =
+      area * 2.0 - 2.0 * 2.0 * corner_area(0.2, 2.0 * kPi / 3.0);
+  CHECK(volume_of(result.value().brep) == doctest::Approx(expected).epsilon(1e-9));
+  CHECK(result.value().brep.vertex_count() == 16u);
+  CHECK(result.value().brep.edge_count() == 24u);
+  CHECK(result.value().brep.face_count() == 10u);
+}
+
+TEST_CASE("fillet_edges deduplicates and reorders vertical edge selections") {
+  const geom::Result<geom::Brep> prism = make_prism(triangle(), 0.0, 3.0, kTolerance);
+  REQUIRE(prism.has_value());
+  const std::vector<geom::EdgeId> edges = vertical_edges(prism.value());
+  REQUIRE(edges.size() == 3u);
+
+  const std::vector<geom::EdgeId> duplicated{edges[2], edges[0], edges[2]};
+  const std::vector<geom::EdgeId> unique{edges[0], edges[2]};
+  const geom::Result<geom::FilletResult> from_duplicated =
+      geom::fillet_edges(prism.value(), duplicated, geom::FilletOptions{0.2, kTolerance});
+  const geom::Result<geom::FilletResult> from_unique =
+      geom::fillet_edges(prism.value(), unique, geom::FilletOptions{0.2, kTolerance});
+  REQUIRE(from_duplicated.has_value());
+  REQUIRE(from_unique.has_value());
+
+  CHECK(from_duplicated.value().filleted_edges == 2u);
+  CHECK(from_unique.value().filleted_edges == 2u);
+  CHECK(volume_of(from_duplicated.value().brep) ==
+        doctest::Approx(volume_of(from_unique.value().brep)).epsilon(1e-12));
+  const double expected =
+      3.0 * std::sqrt(3.0) - 6.0 * corner_area(0.2, kPi / 3.0);
+  CHECK(volume_of(from_unique.value().brep) == doctest::Approx(expected).epsilon(1e-9));
+  CHECK(from_duplicated.value().brep.vertex_count() == 10u);
+  CHECK(from_duplicated.value().brep.edge_count() == 15u);
+  CHECK(from_duplicated.value().brep.face_count() == 7u);
+  CHECK(geom::validate_topology(from_duplicated.value().brep).ok());
 }

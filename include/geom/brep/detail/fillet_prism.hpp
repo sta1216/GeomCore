@@ -408,14 +408,16 @@ inline Result<Brep> fillet_prism_edges(const FilletPrism& prism,
     corner.circle = CircleCurve3{center, radial, tangent_axis, radius};
   }
 
-  // Adjacent fillets must not overrun the side edge between them.
+  // Every side face keeps a positive strip between its trimmed ends.
   for (std::size_t index = 0; index < n; ++index) {
     const std::size_t next = (index + 1u) % n;
-    if (!selected[index] || !selected[next]) continue;
     const double edge_length = fillet_prism_detail::point_distance(prism.ring[index],
                                                                    prism.ring[next]);
-    if (!(corners[index].trim + corners[next].trim < edge_length)) {
-      return Error{Errc::unsupported, "fillet_edges: radius exceeds the prism cross-section"};
+    const double left_trim = selected[index] ? corners[index].trim : 0.0;
+    const double right_trim = selected[next] ? corners[next].trim : 0.0;
+    if (!(edge_length - left_trim - right_trim > tolerance)) {
+      return Error{Errc::unsupported,
+                   "fillet_edges: radius leaves a prism face narrower than the tolerance"};
     }
   }
 
