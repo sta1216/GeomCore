@@ -236,7 +236,7 @@ In `fillet.hpp`, after the options checks, try `fillet_box_bounds`; if it succee
 - [ ] **Step 4: Run the filtered tests in both configurations**
 
 Run: `build\tests\Debug\geom_tests.exe --test-case="*prism*"` and the Release binary.
-Expected: 1 case, 8 assertions, 0 failed; the existing `--test-case="*fillet*"` suite still passes 8/887.
+Expected: 2 cases, 22 assertions, 0 failed; the existing `--test-case="*fillet*"` suite passes 9/898.
 
 - [ ] **Step 5: Commit**
 
@@ -500,6 +500,7 @@ git commit -m "docs(brep): record the M4c-3b prism fillet contract and benchmark
 - The radius guard uses the exact tangent length `r*cot(theta/2)`, not `r`, so acute polygon corners are handled.
 - Convexity and ring orientation use `sign_orient2d`; no new floating orientation test.
 - Deliberately out of scope: adjacent non-vertical edges, spherical vertex blends, variable radius, non-convex polygons, multi-shell solids, and general curved prisms. These stay in M4c-3c.
+
 
 
 

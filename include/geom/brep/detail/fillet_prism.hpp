@@ -33,8 +33,8 @@ inline namespace v1 {
 namespace detail {
 
 // A convex prism recognised in a Brep, in the frame of its extrusion axis.
-// `ring` is the bottom cap CCW about `axis`; `vertical[i]` is the edge from
-// ring[i] to ring[i] + axis * height.
+// `ring` is the bottom cap CCW about `axis`; `vertical[i]` is the edge joining
+// ring[i] to its top counterpart. Its stored direction is not guaranteed.
 struct FilletPrism {
   Point3d bottom{};
   Vec3d axis{0.0, 0.0, 1.0};
@@ -559,3 +559,4 @@ inline Result<Brep> fillet_prism_edges(const FilletPrism& prism,
 }  // namespace detail
 }  // namespace v1
 }  // namespace geom
+
