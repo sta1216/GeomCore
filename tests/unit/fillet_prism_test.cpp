@@ -343,7 +343,7 @@ TEST_CASE("fillet_edges rejects a horizontal prism edge") {
         "fillet_edges: only vertical prism edges are supported");
 }
 
-TEST_CASE("fillet_edges rejects a radius above the prism cross-section") {
+TEST_CASE("fillet_edges rejects a radius that leaves a prism face too narrow") {
   const geom::Result<geom::Brep> prism = make_prism(triangle(), 0.0, 3.0, kTolerance);
   REQUIRE(prism.has_value());
   const std::vector<geom::EdgeId> edges = vertical_edges(prism.value());
@@ -353,7 +353,39 @@ TEST_CASE("fillet_edges rejects a radius above the prism cross-section") {
   REQUIRE(!result.has_value());
   CHECK(result.error().code == geom::Errc::unsupported);
   CHECK(std::string(result.error().message) ==
+        "fillet_edges: radius leaves a prism face narrower than the tolerance");
+}
+
+TEST_CASE("fillet_edges rejects a radius above the prism cross-section") {
+  const geom::Result<geom::Brep> prism = make_prism(triangle(), 0.0, 3.0, kTolerance);
+  REQUIRE(prism.has_value());
+  const std::vector<geom::EdgeId> edges = vertical_edges(prism.value());
+  REQUIRE(edges.size() == 3u);
+  const geom::Result<geom::FilletResult> result =
+      geom::fillet_edges(prism.value(), edges, geom::FilletOptions{1.2, kTolerance});
+  REQUIRE(!result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(std::string(result.error().message) ==
         "fillet_edges: radius exceeds the prism cross-section");
+}
+
+TEST_CASE("fillet_edges rounds one prism corner beyond the polygon inradius") {
+  const geom::Result<geom::Brep> prism = make_prism(triangle(), 0.0, 3.0, kTolerance);
+  REQUIRE(prism.has_value());
+  const std::array<geom::EdgeId, 1> edges{
+      vertical_edge_at(prism.value(), geom::Point2d{0.0, 0.0})};
+  const geom::Result<geom::FilletResult> result =
+      geom::fillet_edges(prism.value(), edges, geom::FilletOptions{0.6, kTolerance});
+  REQUIRE(result.has_value());
+  CHECK(result.value().filleted_edges == 1u);
+  CHECK(volume_of(result.value().brep) ==
+        doctest::Approx(4.45651090582474).epsilon(1e-9));
+  CHECK(result.value().brep.vertex_count() == 8u);
+  CHECK(result.value().brep.edge_count() == 12u);
+  CHECK(result.value().brep.face_count() == 6u);
+  CHECK(geom::validate_topology(result.value().brep).ok());
+  CHECK(result.value().brep.solid_ids().size() == 1u);
+  CHECK(result.value().brep.shell_count() == 1u);
 }
 
 TEST_CASE("fillet_edges rejects a dead edge and an empty selection") {

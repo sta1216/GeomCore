@@ -408,32 +408,6 @@ inline Result<Brep> fillet_prism_edges(const FilletPrism& prism,
     corner.circle = CircleCurve3{center, radial, tangent_axis, radius};
   }
 
-  // The inward-offset polygon must be non-empty: every fillet centre must lie
-  // inside every side's half-space with clearance at least `radius`. This
-  // rejects radii whose offset lines still intersect pairwise but whose
-  // intersection region is empty, before any face is built.
-  for (std::size_t index = 0; index < n; ++index) {
-    const std::size_t next = (index + 1u) % n;
-    const Vec3d side = fillet_prism_detail::unit_vector(prism.ring[next] - prism.ring[index]);
-    if (!(norm2(side) > 0.0)) {
-      return Error{Errc::unsupported, "fillet_edges: only a box or a convex prism is supported"};
-    }
-    Vec3d inward = cross(axis, side);
-    if (dot(inward, centroid - prism.ring[index]) < 0.0) inward = inward * -1.0;
-    inward = fillet_prism_detail::unit_vector(inward);
-    if (!(norm2(inward) > 0.0)) {
-      return Error{Errc::unsupported, "fillet_edges: only a box or a convex prism is supported"};
-    }
-    for (std::size_t corner_index = 0; corner_index < n; ++corner_index) {
-      if (!selected[corner_index]) continue;
-      const double clearance =
-          dot(inward, corners[corner_index].circle.center - prism.ring[index]);
-      if (!(clearance >= radius - tolerance)) {
-        return Error{Errc::unsupported, "fillet_edges: radius exceeds the prism cross-section"};
-      }
-    }
-  }
-
   // Every side face keeps a positive strip between its trimmed ends.
   for (std::size_t index = 0; index < n; ++index) {
     const std::size_t next = (index + 1u) % n;
