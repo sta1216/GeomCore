@@ -433,10 +433,12 @@ template <class Surface>
 inline Result<void> mass_add_trimmed_face(const Brep& brep, FaceId id, const Surface& surface,
                                           const MassPropertiesOptions& options,
                                           const Vec3d& reference, MassIntegrals& acc) {
-  // Sphere3 is relaxed through this gate: a spherical octant is bounded by three
-  // arcs that are not polylines, yet the trimmed integrator below handles its
-  // projectable uv loop. Cylinders, cones and tori stay strict.
-  if (!tessellate_face_has_polyline_edge(brep, id) && !std::is_same_v<Surface, Sphere3>) {
+  // Sphere3 is relaxed through this gate only for a genuine octant patch:
+  // three non-closed circle arcs in one loop. A sphere face with straight or
+  // missing edges must keep the generic full-rectangle rejection below.
+  const bool sphere_patch =
+      std::is_same_v<Surface, Sphere3> && tessellate_face_is_sphere_patch(brep, id);
+  if (!tessellate_face_has_polyline_edge(brep, id) && !sphere_patch) {
     return mass_unsupported_rectangle(id);
   }
   const Result<FaceUvProjection> projection =

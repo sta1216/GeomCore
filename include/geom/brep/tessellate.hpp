@@ -667,6 +667,28 @@ inline const CircleCurve3* tessellate_circle_curve(const Brep& brep, EdgeId id) 
   return std::get_if<CircleCurve3>(&brep.geometry().curves[edge.curve]);
 }
 
+// True when the face is a single loop of exactly three non-closed circle arcs --
+// the spherical octant shape handled by tessellate_sphere_face. A sphere face
+// with straight or missing edges is not a patch and must keep the generic
+// "untrimmed full rectangle" rejection in mass_properties.
+inline bool tessellate_face_is_sphere_patch(const Brep& brep, FaceId id) {
+  const Face& face = brep.face(id);
+  if (face.first_loop.is_null() || !brep.loop(face.first_loop).next.is_null()) return false;
+  const Loop& loop = brep.loop(face.first_loop);
+  if (loop.start.is_null()) return false;
+  std::size_t count = 0;
+  CoedgeId coedge = loop.start;
+  do {
+    const EdgeId edge_id = brep.coedge(coedge).edge;
+    const Edge& edge = brep.edge(edge_id);
+    if (edge.v0 == edge.v1) return false;
+    if (tessellate_circle_curve(brep, edge_id) == nullptr) return false;
+    if (++count > 3u) return false;
+    coedge = brep.coedge(coedge).next;
+  } while (!coedge.is_null() && coedge != loop.start);
+  return count == 3u && coedge == loop.start;
+}
+
 inline void tessellate_push_triangle(TessellateState& state, FaceId id, bool reversed,
                                      std::uint32_t a, std::uint32_t b, std::uint32_t c) {
   std::array<std::uint32_t, 3> triangle{a, b, c};
