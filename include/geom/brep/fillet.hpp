@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -28,6 +29,21 @@ struct FilletResult {
 };
 
 namespace detail {
+
+// A dead handle anywhere in the input is the caller's mistake, so it must be
+// reported as index_out_of_range before any shape-specific selection logic can
+// return a different diagnostic. The shape must already be known to be a
+// supported solid; a non-box, non-prism brep keeps its box-or-prism rejection.
+inline std::optional<Error> fillet_require_live_edges(const Brep& brep,
+                                                      std::span<const EdgeId> edges) {
+  for (const EdgeId id : edges) {
+    if (!brep.edge_alive(id)) {
+      return Error{Errc::index_out_of_range, "fillet_edges: edge does not belong to the solid",
+                   id.index()};
+    }
+  }
+  return std::nullopt;
+}
 
 // Box body of fillet_edges(), kept in one place so the box behaviour and its
 // messages stay exactly as they were before prism support was added.
@@ -164,6 +180,10 @@ inline Result<FilletResult> fillet_edges(const Brep& brep, std::span<const EdgeI
   const Result<detail::FilletBox> box_bounds = detail::fillet_box_bounds(brep, options.tolerance);
   if (box_bounds.has_value()) {
     const detail::FilletBox& box = box_bounds.value();
+    if (const std::optional<Error> dead = detail::fillet_require_live_edges(brep, edges);
+        dead.has_value()) {
+      return dead.value();
+    }
     // All twelve edges share vertices, so this case must be recognised before
     // the shared-vertex rejection in fillet_box_selection.
     if (detail::fillet_box_all_edges(brep, edges, box, options.tolerance)) {
@@ -185,14 +205,14 @@ inline Result<FilletResult> fillet_edges(const Brep& brep, std::span<const EdgeI
     return Error{Errc::unsupported, "fillet_edges: only a box or a convex prism is supported"};
   }
   const detail::FilletPrism& shape = prism.value();
+  if (const std::optional<Error> dead = detail::fillet_require_live_edges(brep, edges);
+      dead.has_value()) {
+    return dead.value();
+  }
 
   std::vector<std::uint32_t> selected;
   selected.reserve(edges.size());
   for (const EdgeId id : edges) {
-    if (!brep.edge_alive(id)) {
-      return Error{Errc::index_out_of_range, "fillet_edges: edge does not belong to the solid",
-                   id.index()};
-    }
     const auto match = std::find(shape.vertical.begin(), shape.vertical.end(), id);
     if (match == shape.vertical.end()) {
       return Error{Errc::unsupported, "fillet_edges: only vertical prism edges are supported",

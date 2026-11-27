@@ -230,6 +230,86 @@ TEST_CASE("rounded box mass properties match the Steiner volume") {
   CHECK(mass.value().centroid[2] == doctest::Approx(2.0).epsilon(1e-9));
 }
 
+TEST_CASE("rounded box rejects a radius at half the smallest dimension") {
+  const Brep box = box_2x3x4();
+  const auto edges = all_edges(box);
+  const auto at_limit = geom::fillet_edges(box, edges, geom::FilletOptions{1.0, 1e-9});
+  REQUIRE_FALSE(at_limit.has_value());
+  CHECK(at_limit.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view{at_limit.error().message}.find("half the smallest box dimension") !=
+        std::string_view::npos);
+  const auto near_limit = geom::fillet_edges(box, edges, geom::FilletOptions{1.0 - 1e-6, 1e-9});
+  CHECK(near_limit.has_value());
+}
+
+TEST_CASE("rounded box rejects an incomplete or dead selection") {
+  const Brep box = box_2x3x4();
+  auto edges = all_edges(box);
+  edges.pop_back();
+  const auto eleven = geom::fillet_edges(box, edges, geom::FilletOptions{0.25, 1e-9});
+  CHECK_FALSE(eleven.has_value());
+  edges = all_edges(box);
+  edges.push_back(edges.front());
+  const auto duplicated = geom::fillet_edges(box, edges, geom::FilletOptions{0.25, 1e-9});
+  REQUIRE(duplicated.has_value());
+  CHECK(duplicated.value().filleted_edges == 12u);
+  edges = all_edges(box);
+  edges.push_back(geom::EdgeId::make(999u, 0u));
+  const auto dead = geom::fillet_edges(box, edges, geom::FilletOptions{0.25, 1e-9});
+  REQUIRE_FALSE(dead.has_value());
+  CHECK(dead.error().code == geom::Errc::index_out_of_range);
+  // A dead edge is the caller's mistake even when the rest of the selection is
+  // incomplete: it must win over the family/parallel diagnostics.
+  edges = all_edges(box);
+  edges.pop_back();
+  edges.push_back(geom::EdgeId::make(999u, 0u));
+  const auto incomplete_dead = geom::fillet_edges(box, edges, geom::FilletOptions{0.25, 1e-9});
+  REQUIRE_FALSE(incomplete_dead.has_value());
+  CHECK(incomplete_dead.error().code == geom::Errc::index_out_of_range);
+}
+
+TEST_CASE("rounded box rejects a non-box shape") {
+  const Brep cylinder =
+      geom::make_cylinder(Point3d{0.0, 0.0, 0.0}, geom::Vec3d{0.0, 0.0, 1.0}, 1.0, 2.0, 1e-9)
+          .value();
+  const auto edges = all_edges(cylinder);
+  const auto result = geom::fillet_edges(cylinder, edges, geom::FilletOptions{0.25, 1e-9});
+  REQUIRE_FALSE(result.has_value());
+  CHECK(result.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view{result.error().message} ==
+        "fillet_edges: only a box or a convex prism is supported");
+  // The strict box recogniser owns the box-only diagnostic; the public entry
+  // point folds it into the box-or-prism rejection above.
+  const auto bounds = geom::detail::fillet_box_bounds(cylinder, 1e-9);
+  REQUIRE_FALSE(bounds.has_value());
+  CHECK(bounds.error().code == geom::Errc::unsupported);
+  CHECK(std::string_view{bounds.error().message} ==
+        "fillet_edges: only an axis-aligned box is supported");
+}
+
+TEST_CASE("rounded box keeps the long axis of a non-cubic box") {
+  const Brep box = box_2x3x4();
+  const auto rounded = geom::fillet_edges(box, all_edges(box), geom::FilletOptions{0.25, 1e-9});
+  REQUIRE(rounded.has_value());
+  const Brep& solid = rounded.value().brep;
+  CHECK(volume_of(solid) == doctest::Approx(23.53807140332).epsilon(1e-9));
+  double lo[3] = {1e300, 1e300, 1e300};
+  double hi[3] = {-1e300, -1e300, -1e300};
+  for (const geom::VertexId id : solid.vertex_ids()) {
+    const geom::Point3d& p = solid.vertex(id).point;
+    for (int axis = 0; axis < 3; ++axis) {
+      lo[axis] = std::min(lo[axis], p[axis]);
+      hi[axis] = std::max(hi[axis], p[axis]);
+    }
+  }
+  CHECK(lo[0] == 0.0);
+  CHECK(lo[1] == 0.0);
+  CHECK(lo[2] == 0.0);
+  CHECK(hi[0] == 2.0);
+  CHECK(hi[1] == 3.0);
+  CHECK(hi[2] == 4.0);
+}
+
 TEST_CASE("sphere patch rejects a non-octant trim") {
   const Brep face = non_octant_sphere_face();
   const auto mesh = geom::tessellate(face, geom::TessellationOptions{});

@@ -213,6 +213,15 @@ inline bool fillet_box_all_edges(const Brep& brep, std::span<const EdgeId> edges
 // cylinders and eight spherical corner octants.
 inline Result<Brep> fillet_box_rounded(const FilletBoxRounded& box, double radius,
                                        double tolerance) {
+  // At half the smallest dimension the inset planes and the cylinder heights
+  // collapse to zero, so the twenty-six patches can no longer be assembled.
+  const double smallest = std::min({box.hi[0] - box.lo[0], box.hi[1] - box.lo[1],
+                                    box.hi[2] - box.lo[2]});
+  if (!(radius < 0.5 * smallest)) {
+    return Error{Errc::unsupported,
+                 "fillet_edges: radius must be less than half the smallest box dimension", 0u, 0u};
+  }
+
   std::vector<CurvedAssembledFace> faces;
   faces.reserve(26);
 
@@ -257,7 +266,12 @@ inline Result<Brep> fillet_box_rounded(const FilletBoxRounded& box, double radiu
     }
   }
 
-  return assemble_curved_solid(faces, tolerance);
+  Result<Brep> assembled = assemble_curved_solid(faces, tolerance);
+  if (!assembled.has_value()) {
+    // The public API must not leak the assembler's internal diagnostic.
+    return Error{Errc::invalid_topology, "fillet_edges: fillet could not be assembled"};
+  }
+  return assembled;
 }
 
 }  // namespace detail
