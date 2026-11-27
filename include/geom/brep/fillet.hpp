@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <geom/brep/detail/fillet_box.hpp>
+#include <geom/brep/detail/fillet_prism.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/core/error.hpp>
 #include <geom/core/result.hpp>
@@ -25,36 +26,20 @@ struct FilletResult {
   std::uint32_t filleted_edges = 0;
 };
 
-// Rounds the selected edges of an axis-aligned box with exact quarter-cylinder
-// patches. Only edges of one parallel family are supported.
-inline Result<FilletResult> fillet_edges(const Brep& brep, std::span<const EdgeId> edges,
-                                         const FilletOptions& options = {}) {
-  if (edges.empty()) {
-    return Error{Errc::unsupported, "fillet_edges: at least one edge is required"};
-  }
-  if (!std::isfinite(options.radius)) {
-    return Error{Errc::non_finite, "fillet_edges: radius must be finite"};
-  }
-  if (!(options.radius > 0.0)) {
-    return Error{Errc::degenerate, "fillet_edges: radius must be positive"};
-  }
-  if (!std::isfinite(options.tolerance)) {
-    return Error{Errc::non_finite, "fillet_edges: tolerance must be finite"};
-  }
-  if (!(options.tolerance > 0.0)) {
-    return Error{Errc::tolerance_violation, "fillet_edges: tolerance must be positive"};
-  }
+namespace detail {
 
-  const Result<detail::FilletBox> bounds = detail::fillet_box_bounds(brep, options.tolerance);
-  if (!bounds.has_value()) return bounds.error();
-  const detail::FilletBox& box = bounds.value();
-
+// Box body of fillet_edges(), kept in one place so the box behaviour and its
+// messages stay exactly as they were before prism support was added.
+inline Result<FilletResult> fillet_box_selection(const Brep& brep,
+                                                 std::span<const EdgeId> edges,
+                                                 const FilletBox& box, double radius,
+                                                 double tolerance) {
   double scale = 1.0;
   for (int axis = 0; axis < 3; ++axis) {
     scale = std::max(scale, std::abs(box.lo[axis]));
     scale = std::max(scale, std::abs(box.hi[axis]));
   }
-  const double slack = std::max(64.0 * options.tolerance, 1e-12 * scale);
+  const double slack = std::max(64.0 * tolerance, 1e-12 * scale);
 
   std::vector<EdgeId> unique;
   unique.reserve(edges.size());
@@ -142,13 +127,75 @@ inline Result<FilletResult> fillet_edges(const Brep& brep, std::span<const EdgeI
     }
   }
 
-  Result<Brep> filleted = detail::fillet_box_edges(box, corners, family_axis, options.radius,
-                                                   options.tolerance);
+  Result<Brep> filleted = fillet_box_edges(box, corners, family_axis, radius, tolerance);
   if (!filleted.has_value()) return filleted.error();
 
   FilletResult result;
   result.brep = std::move(filleted.value());
   result.filleted_edges = static_cast<std::uint32_t>(corners.size());
+  return result;
+}
+
+}  // namespace detail
+
+// Rounds the selected edges of an axis-aligned box or of a convex prism with
+// exact cylinder patches. Box edges must belong to one parallel family; prism
+// edges must be vertical.
+inline Result<FilletResult> fillet_edges(const Brep& brep, std::span<const EdgeId> edges,
+                                         const FilletOptions& options = {}) {
+  if (edges.empty()) {
+    return Error{Errc::unsupported, "fillet_edges: at least one edge is required"};
+  }
+  if (!std::isfinite(options.radius)) {
+    return Error{Errc::non_finite, "fillet_edges: radius must be finite"};
+  }
+  if (!(options.radius > 0.0)) {
+    return Error{Errc::degenerate, "fillet_edges: radius must be positive"};
+  }
+  if (!std::isfinite(options.tolerance)) {
+    return Error{Errc::non_finite, "fillet_edges: tolerance must be finite"};
+  }
+  if (!(options.tolerance > 0.0)) {
+    return Error{Errc::tolerance_violation, "fillet_edges: tolerance must be positive"};
+  }
+
+  const Result<detail::FilletBox> box_bounds = detail::fillet_box_bounds(brep, options.tolerance);
+  if (box_bounds.has_value()) {
+    return detail::fillet_box_selection(brep, edges, box_bounds.value(), options.radius,
+                                        options.tolerance);
+  }
+
+  const Result<detail::FilletPrism> prism = detail::fillet_prism_bounds(brep, options.tolerance);
+  if (!prism.has_value()) {
+    return Error{Errc::unsupported, "fillet_edges: only a box or a convex prism is supported"};
+  }
+  const detail::FilletPrism& shape = prism.value();
+
+  std::vector<std::uint32_t> selected;
+  selected.reserve(edges.size());
+  for (const EdgeId id : edges) {
+    if (!brep.edge_alive(id)) {
+      return Error{Errc::index_out_of_range, "fillet_edges: edge does not belong to the solid",
+                   id.index()};
+    }
+    const auto match = std::find(shape.vertical.begin(), shape.vertical.end(), id);
+    if (match == shape.vertical.end()) {
+      return Error{Errc::unsupported, "fillet_edges: only vertical prism edges are supported",
+                   id.index()};
+    }
+    const std::uint32_t index = static_cast<std::uint32_t>(match - shape.vertical.begin());
+    if (std::find(selected.begin(), selected.end(), index) == selected.end()) {
+      selected.push_back(index);
+    }
+  }
+
+  Result<Brep> filleted =
+      detail::fillet_prism_edges(shape, selected, options.radius, options.tolerance);
+  if (!filleted.has_value()) return filleted.error();
+
+  FilletResult result;
+  result.brep = std::move(filleted.value());
+  result.filleted_edges = static_cast<std::uint32_t>(selected.size());
   return result;
 }
 
