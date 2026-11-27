@@ -51,9 +51,10 @@ fragments directly and assemble them once.
   through both adjacent sphere centres, so the sphere/cylinder intersection is
   exactly a great circle and needs no SSI solve.
 - **Eight spherical octants.** Each box corner becomes an exact `Sphere3` of
-  radius `r` centred at the corner's inset point `(lo|hi)_i ± r`; its polar axis
-  points from the centre to the box corner, and the patch is the octant facing
-  that corner. The three boundary curves are great-circle quarter arcs lying in
+  radius `r` centred at the corner's inset point `(lo|hi)_i ± r`; its chart polar
+  axis is one of the box axes (`axis = axis_direction(0) * sign[0]`, i.e. `±e_x`),
+  chosen so the x-direction tangency point is exactly the pole, and the patch is
+  the octant facing the box corner. The three boundary curves are great-circle quarter arcs lying in
   the planes through the sphere centre at the three inset coordinates; each arc
   is a `CircleCurve3` with `t0 = 0, t1 = pi/2`. In the corner frame with
   coordinates `(u, v, w)` measured from the centre toward the corner, the
@@ -116,8 +117,9 @@ Every input or geometry rejection happens before assembly and leaves the input u
   rectangles collapse to lines and the solid would be degenerate.
 - A dead edge anywhere in the selection, complete or not:
   `index_out_of_range "fillet_edges: edge does not belong to the solid"`,
-  raised before the rounded/box/prism dispatch so the diagnostic does not depend
-  on which path would have matched.
+  raised after shape recognition and before the selection diagnostics so the
+  diagnostic does not depend on which selection path would have matched (a
+  non-box operand still fails shape recognition first).
 - Non-box input: the existing shape recognition rejects it (`unsupported
   "fillet_edges: only a box or a convex prism is supported"`); a prism-shaped
   selection that is not a box never enters this path.
@@ -167,20 +169,26 @@ Every input or geometry rejection happens before assembly and leaves the input u
   vertices and pass `validate_topology`, with the Steiner volume matching the
   integrated volume. The guard rejects equality only, so this is accepted as a
   geometrically thin (not topologically degenerate) solid; no sliver face is
-  silently dropped.
+  silently dropped. The same radius is below the tessellator's planar sliver
+  budget: `tessellate` reports `degenerate "tessellate: planar face triangulation
+  failed"` on the `2e-9`-wide inset strips at `r = 0.5*min - 1e-9`, even though
+  the B-rep validates and `mass_properties` succeeds.
 - **Partial corners, mixed families and variable radius** are M4c-3d, together
   with non-box operands and general rolling-ball blends. Selecting fewer than
   twelve edges is the existing ADR-0042/0043 behaviour, unchanged.
-- **`mass_properties` gate.** The spherical octants are not full rectangles, so
+- **`mass_properties` gate (octant-shaped trims).** The spherical octants are not full rectangles, so
   `mass_properties` admits a `Sphere3` face only when
   `detail::tessellate_face_is_sphere_patch` proves it is a single-loop patch
-  with exactly three non-closed `CircleCurve3` arcs. The first Task-2 version
+  with exactly three non-closed `CircleCurve3` arcs. This predicate is structural,
+  not a proof of octantness: a slanted three-arc lune also satisfies it. The first Task-2 version
   exempted every `Sphere3` face, which broke the pre-existing rejection of an
   untrimmed curved face; the gate was narrowed to the patch predicate
   (`7f9df10`). Cylinder, cone and torus faces keep their original gate.
 - **Tessellation is separate evidence.** The corner octants are tessellated by
   the dedicated sphere-patch tessellator; watertightness (`boundary_edges == 0`)
   is asserted by unit tests, not by this benchmark, which does not tessellate.
+  Triangle winding follows the face sense: a forward octant is outward and a
+  reversed octant is inward (`dc7c82e`).
 - **Benchmark scope.** The benchmark measures recognition plus the
   twenty-six-fragment construction and assembly for a `100` cube at `r = 1`; it
   is not a general performance claim and is not part of ctest.

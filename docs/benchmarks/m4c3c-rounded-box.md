@@ -1,9 +1,9 @@
 # M4c-3c rounded-box fillet benchmark
 
 - Date: 2026-11-28
-- Commit: `sdd/m4c3c` (rounded-box code under test `0b854c1..07cb196`: Task 1
+- Commit: `sdd/m4c3c` (rounded-box code under test `0b854c1..dc7c82e`: Task 1
   `2cb37df`, Task 2 `c536f32` plus fix `f5d40c9`, Task 3 `78c3726`, controller
-  mass-gate fix `7f9df10`, controller test pinning `07cb196`; the benchmark and
+  mass-gate fix `7f9df10`, controller test pinning `07cb196`, reversed-octant fix `dc7c82e`; the benchmark and
   docs are added by the Task 4 commit)
 - Compiler: MSVC 19.44.35217, `/std:c++20 /O2`, `GEOM_WERROR=ON`
 - Machine: Windows 10 Enterprise 22H2 (build 19045), Intel Core i7-8550U
