@@ -70,7 +70,9 @@ built only with `-DGEOM_BUILD_BENCH=ON` and is not part of ctest.
   on.
 - Full Release (the gate): `.\build-rel\tests\Release\geom_tests.exe` —
   1,184 cases / 685,605 assertions, 0 failed, 0 skipped, exit 0.
-- ctest Release: 1/1 test passed (`geom_tests`), 865.52 s, exit 0.
+- ctest Release: 1/1 test passed (`geom_tests`, 865.52 s, earlier run at `47e27ad`).
+  After the test strengthening the full Release binary was rerun directly at
+  `90d4e57` with the counts above; ctest itself was not rerun.
 - ctest Debug: **not a gate and not completed**. The run was stopped by the
   controller after 3,014 s because it was already inside the known
   >20-minute boolean cases; it was not rerun. The Debug

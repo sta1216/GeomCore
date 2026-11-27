@@ -385,5 +385,5 @@ git commit -m "docs(brep): record the rounded-box contract and benchmark"
 | Volume | 999743.8170303602 (analytic); relative error of the measured volume about `1.2e-15` |
 | V / E / F | 24 / 48 / 26 |
 | Debug filtered (`--test-case="rounded box*,sphere patch*"`) | 11 cases / 1,862 assertions, 0 failed, 1,173 skipped (exit 0); Release 同（11 / 1,862）。ctest Debug 非本任务门禁：跑到 3,014 s 时仍在已知 >20 分钟布尔用例内，由控制器停止且未重跑 |
-| Release full suite | 1,184 cases / 685,605 assertions, 0 failed (exit 0)；ctest Release 1/1 passed（`geom_tests`，865.52 s） |
+| Release full suite | 1,184 cases / 685,605 assertions, 0 failed (exit 0, `90d4e57`)；ctest Release 1/1 passed（`geom_tests`，865.52 s，早于测试补强的运行；补强后直接复跑全量二进制） |
 | Commit range | `0b854c1..07cb196` (rounded-box code under test: Task 1 `2cb37df`, Task 2 `c536f32` + fix `f5d40c9`, Task 3 `78c3726`, controller mass-gate fix `7f9df10`, controller test pinning `07cb196`; the Task 4 documentation commit follows on `sdd/m4c3c`) |

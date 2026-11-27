@@ -71,7 +71,7 @@ fragments directly and assemble them once.
   `FilletResult{brep, 12u}`.
 - **Topology is closed-form.** The twenty-four straight tangent lines (two per
   cylinder, one shared with each adjacent plane) and the twenty-four
-  great-circle arcs (two per cylinder end, three per octant, each shared) give
+  great-circle arcs (one per cylinder end, three per octant, each shared) give
   `V = 24`, `E = 48`, `F = 26` — six planes, twelve cylinders, eight spheres —
   `chi = 2`, one solid and one closed shell.
 
