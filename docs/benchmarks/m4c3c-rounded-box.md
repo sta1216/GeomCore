@@ -63,13 +63,13 @@ built only with `-DGEOM_BUILD_BENCH=ON` and is not part of ctest.
 
 ## Test evidence
 
-- Debug `rounded box*,sphere patch*`: 11 cases / 1,769 assertions, 0 failed,
+- Debug `rounded box*,sphere patch*`: 11 cases / 1,862 assertions, 0 failed,
   1,173 skipped (`.\build-debug\tests\Debug\geom_tests.exe
   --test-case="rounded box*,sphere patch*"`, exit 0). This lane covers the
   rounded-box suite and the trimmed-sphere tessellation cases the octants rely
   on.
 - Full Release (the gate): `.\build-rel\tests\Release\geom_tests.exe` —
-  1,184 cases / 685,512 assertions, 0 failed, 0 skipped, exit 0.
+  1,184 cases / 685,605 assertions, 0 failed, 0 skipped, exit 0.
 - ctest Release: 1/1 test passed (`geom_tests`), 865.52 s, exit 0.
 - ctest Debug: **not a gate and not completed**. The run was stopped by the
   controller after 3,014 s because it was already inside the known

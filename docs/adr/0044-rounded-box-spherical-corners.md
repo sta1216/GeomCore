@@ -64,14 +64,16 @@ fragments directly and assemble them once.
   chart patch and `face_loops_uv`/`mass_properties` accept it.
 - **Assembly.** The twenty-six `CurvedAssembledFace` fragments go through
   `assemble_curved_solid` once and are returned only after topology validation
-  is clean. Every boundary segment is an exact analytic curve; there is no
-  Boolean, no SSI, no faceted cylinder or sphere, and no sampled fit. The result
-  is `FilletResult{brep, 12u}`.
-- **Topology is closed-form.** The twelve straight tangent lines (one per
-  cylinder per adjacent plane, shared between a plane and a cylinder) and the
-  twenty-four great-circle arcs (two per cylinder end, three per octant, each
-  shared) give `V = 24`, `E = 48`, `F = 26` — six planes, twelve cylinders,
-  eight spheres — `chi = 2`, one solid and one closed shell.
+  is clean. Every boundary is exact geometry: twenty-four straight degree-1
+  polyline edges (each an exact line, represented as a degree-1 NURBS) and
+  twenty-four `CircleCurve3` great-circle arcs. There is no Boolean, no SSI, no
+  faceted cylinder or sphere, and no sampled fit. The result is
+  `FilletResult{brep, 12u}`.
+- **Topology is closed-form.** The twenty-four straight tangent lines (two per
+  cylinder, one shared with each adjacent plane) and the twenty-four
+  great-circle arcs (two per cylinder end, three per octant, each shared) give
+  `V = 24`, `E = 48`, `F = 26` — six planes, twelve cylinders, eight spheres —
+  `chi = 2`, one solid and one closed shell.
 
 ## Volume
 
@@ -101,7 +103,7 @@ the unit tests pin the same formula for `2 x 3 x 4` at `r = 0.25`
 
 ## Rejection contract
 
-Every rejection happens before assembly and leaves the input unchanged:
+Every input or geometry rejection happens before assembly and leaves the input unchanged:
 
 - Empty selection: `unsupported "fillet_edges: at least one edge is required"`
   (checked before the options, so an empty selection with default options is not
@@ -125,9 +127,10 @@ Every rejection happens before assembly and leaves the input unchanged:
   diagnostics rather than producing a partially rounded box. Dead edges are the
   exception that is pulled forward to `index_out_of_range`.
 - An assembly failure that the guards did not predict:
-  `invalid_topology "fillet_edges: fillet could not be assembled"` or
-  `"fillet_edges: fillet produced an invalid solid"`, never an anonymous
-  assembler message.
+  `invalid_topology "fillet_edges: fillet could not be assembled"`, never an
+  anonymous assembler message. The rounded path has this single tail; the
+  box-family and prism paths may additionally emit `"fillet_edges: fillet
+  produced an invalid solid"` for their own validation step.
 
 ## Alternatives rejected
 
@@ -190,12 +193,12 @@ Every rejection happens before assembly and leaves the input unchanged:
   `29.784 / 31.382 / 33.426 ms` (min/median/max, one representative five-run
   batch) and volume `999743.817030359060` against the analytic
   `999743.8170303602` (relative error about `1.2e-15`).
-- Unit tests pin construction, all eight corner signs, exact bounds and surface
-  inventory, the `2 x 3 x 4 / r = 0.25` volume and centroid, watertight
-  tessellation, radius rejection at and above `0.5 * min`, the near-limit
-  success, duplicate and dead selections, exact messages, input immutability and
-  determinism. The Debug `rounded box*, sphere patch*` lane is
-  `11 cases / 1,769 assertions`.
+- Unit tests pin construction, all eight sphere centres (one per corner sign),
+  exact bounds and surface inventory, the `2 x 3 x 4 / r = 0.25` volume and
+  centroid, watertight tessellation, radius rejection at and above `0.5 * min`,
+  the near-limit success, duplicate and dead selections, exact messages, and
+  rounded-path determinism and input immutability. The Debug
+  `rounded box*, sphere patch*` lane is `11 cases / 1,862 assertions`.
 - The path is additive: the box-family and prism fillet paths and their messages
   are unchanged, and a selection that is not exactly the twelve edges is still
   handled by them.
