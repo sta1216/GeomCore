@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -40,6 +41,38 @@ inline Vec3d extrude_side_normal(const Point3d& a, const Point3d& b,
   const double z = raw[2] / scale;
   const double length = std::sqrt(x * x + y * y + z * z);
   return Vec3d{x / length, y / length, z / length};
+}
+
+// Triangulation of the bottom cap from the top cap's triangulation. The bottom
+// cap is built from every ring reversed, so the vertex at position i of a ring
+// moves to position n - 1 - i. Reading the top triangulation through that
+// mapping keeps every triangle's cyclic order unchanged, i.e. still
+// counter-clockwise about the top normal and therefore clockwise about the
+// bottom normal, so the last two indices of each triangle are swapped.
+inline Triangulation2 extrude_reverse_triangulation(
+    const Triangulation2& source,
+    std::span<const std::uint32_t> ring_sizes) noexcept {
+  Triangulation2 reversed;
+  reversed.ok = source.ok;
+  std::vector<std::uint32_t> starts(ring_sizes.size() + 1u, 0u);
+  for (std::size_t r = 0; r < ring_sizes.size(); ++r) {
+    starts[r + 1u] = starts[r] + ring_sizes[r];
+  }
+  const auto map_vertex = [&](std::uint32_t index) noexcept -> std::uint32_t {
+    for (std::size_t r = 0; r < ring_sizes.size(); ++r) {
+      if (index < starts[r + 1u]) {
+        return starts[r] + (starts[r + 1u] - 1u - index);
+      }
+    }
+    return index;
+  };
+  reversed.triangles.reserve(source.triangles.size());
+  for (const std::array<std::uint32_t, 3>& triangle : source.triangles) {
+    reversed.triangles.push_back({map_vertex(triangle[0]),
+                                  map_vertex(triangle[2]),
+                                  map_vertex(triangle[1])});
+  }
+  return reversed;
 }
 
 }  // namespace detail
@@ -134,9 +167,21 @@ inline Result<Brep> extrude_profile(const Plane3& plane,
 
   // Certify that the profile is a simple polygon with holes before any face is
   // built. Triangulation is the existing check that sees self-intersections and
-  // holes that lie outside the outer ring; the caps below keep the
-  // polygon-with-holes rings, the triangulation is only a certificate.
-  if (!triangulate_polygon2(profile).ok) {
+  // holes that lie outside the outer ring. It runs on the normalized rings
+  // because their order is also the cap order, so the caps reuse this
+  // triangulation instead of triangulating the same polygon twice more; the
+  // caps still keep the polygon-with-holes rings.
+  Polygon2d certificate_profile;
+  certificate_profile.ring_starts.reserve(rings.size() + 1u);
+  certificate_profile.ring_starts.push_back(0u);
+  for (const std::vector<Point2d>& ring : rings) {
+    certificate_profile.vertices.insert(certificate_profile.vertices.end(),
+                                        ring.begin(), ring.end());
+    certificate_profile.ring_starts.push_back(
+        static_cast<std::uint32_t>(certificate_profile.vertices.size()));
+  }
+  const Triangulation2 certificate = triangulate_polygon2(certificate_profile);
+  if (!certificate.ok) {
     return Error{Errc::degenerate,
                  "extrude_profile: profile is not a simple polygon with holes"};
   }
@@ -163,10 +208,17 @@ inline Result<Brep> extrude_profile(const Plane3& plane,
   // The top cap keeps the normalized order: outer counter-clockwise, holes
   // clockwise about +normal. The bottom cap reverses every ring, so it winds
   // the same way about -normal.
+  std::vector<std::uint32_t> ring_sizes(rings.size(), 0u);
+  for (std::size_t r = 0; r < rings.size(); ++r) {
+    ring_sizes[r] = static_cast<std::uint32_t>(rings[r].size());
+  }
   AssembledFace bottom_cap;
   AssembledFace top_cap;
   bottom_cap.normal = Vec3d{-normal[0], -normal[1], -normal[2]};
   top_cap.normal = normal;
+  top_cap.triangulation = certificate;
+  bottom_cap.triangulation =
+      detail::extrude_reverse_triangulation(certificate, ring_sizes);
   for (std::size_t r = 0; r < rings.size(); ++r) {
     std::vector<Point3d> reversed(bottom_rings[r].rbegin(),
                                   bottom_rings[r].rend());

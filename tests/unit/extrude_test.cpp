@@ -312,3 +312,21 @@ TEST_CASE("extrude keeps a small height on a large profile") {
   CHECK(volume_of(solid.value()) == doctest::Approx(1e6).epsilon(1e-9));
   REQUIRE(validate_topology(solid.value()).ok());
 }
+
+TEST_CASE("extrude keeps the volume of a holed profile on a tilted plane") {
+  // Both rings are wound counter-clockwise here, so extrusion has to normalize
+  // the hole; the certificate triangulation and the cap faces then have to
+  // agree on the same normalized ring order.
+  Polygon2d profile;
+  profile.vertices = {Point2d{0.0, 0.0},   Point2d{10.0, 0.0},
+                      Point2d{10.0, 10.0}, Point2d{0.0, 10.0},
+                      Point2d{4.0, 4.0},   Point2d{6.0, 4.0},
+                      Point2d{6.0, 6.0},   Point2d{4.0, 6.0}};
+  profile.ring_starts = {0u, 4u, 8u};
+  const Plane3 plane{Vec3d{1.0, 2.0, 3.0}, 7.0};
+  const Result<Brep> solid = extrude_profile(plane, profile, 2.0, 1e-9);
+  REQUIRE(solid.has_value());
+  // 10 x 10 outer ring minus a 2 x 2 hole, height 2.
+  CHECK(volume_of(solid.value()) == doctest::Approx(192.0).epsilon(1e-9));
+  REQUIRE(validate_topology(solid.value()).ok());
+}

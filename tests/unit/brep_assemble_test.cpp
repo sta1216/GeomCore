@@ -186,6 +186,49 @@ TEST_CASE("assemble: a reversed hole ring is reoriented") {
   CHECK(validate_solid(brep.value()));
 }
 
+TEST_CASE("assemble: a supplied face triangulation is reused") {
+  auto faces = box_faces({0, 0, 0}, {2, 3, 4});
+  // Two triangles per quad, counter-clockwise about the face normal.
+  faces[0].triangulation = Triangulation2{{{0u, 1u, 2u}, {0u, 2u, 3u}}, true};
+  const auto brep = assemble_solid(faces, 1e-9);
+  REQUIRE(brep.has_value());
+  CHECK(mass_properties(brep.value()).value().volume ==
+        doctest::Approx(24.0).epsilon(1e-12));
+  CHECK(validate_solid(brep.value()));
+}
+
+TEST_CASE("assemble: a supplied face triangulation with a bad index is rejected") {
+  auto faces = box_faces({0, 0, 0}, {1, 1, 1});
+  faces[0].triangulation = Triangulation2{{{0u, 1u, 9u}, {0u, 2u, 3u}}, true};
+  const auto brep = assemble_solid(faces, 1e-9);
+  REQUIRE_FALSE(brep.has_value());
+  CHECK(brep.error().code == Errc::degenerate);
+  CHECK(std::string_view(brep.error().message) ==
+        "assemble_solid: provided face triangulation is invalid");
+}
+
+TEST_CASE("assemble: a supplied face triangulation must cover the face") {
+  auto faces = box_faces({0, 0, 0}, {1, 1, 1});
+  // One triangle covers half of the square unit face.
+  faces[0].triangulation = Triangulation2{{{0u, 1u, 2u}}, true};
+  const auto brep = assemble_solid(faces, 1e-9);
+  REQUIRE_FALSE(brep.has_value());
+  CHECK(brep.error().code == Errc::degenerate);
+  CHECK(std::string_view(brep.error().message) ==
+        "assemble_solid: provided face triangulation is invalid");
+}
+
+TEST_CASE("assemble: a supplied face triangulation must wind counter-clockwise") {
+  auto faces = box_faces({0, 0, 0}, {1, 1, 1});
+  // Clockwise about the top face normal.
+  faces[0].triangulation = Triangulation2{{{0u, 2u, 1u}, {0u, 3u, 2u}}, true};
+  const auto brep = assemble_solid(faces, 1e-9);
+  REQUIRE_FALSE(brep.has_value());
+  CHECK(brep.error().code == Errc::degenerate);
+  CHECK(std::string_view(brep.error().message) ==
+        "assemble_solid: provided face triangulation is invalid");
+}
+
 TEST_CASE("assemble: a missing face is a diagnosed not_closed failure") {
   auto faces = box_faces({0, 0, 0}, {1, 1, 1});
   faces.pop_back();

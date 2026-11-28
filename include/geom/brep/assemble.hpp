@@ -8,6 +8,7 @@
 #include <map>
 #include <numbers>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <utility>
@@ -45,6 +46,15 @@ struct AssembledFace {
   std::vector<Point3d> outer;
   std::vector<std::vector<Point3d>> holes;
   Vec3d normal;
+  // Optional performance hint: a triangulation of this face whose triangle
+  // indices refer to `outer` followed by the rings of `holes`, in the order and
+  // winding stored here. The assembler reuses it instead of triangulating the
+  // face a second time; a reused triangulation is still checked (index range,
+  // counter-clockwise winding about `normal`, covered area) and a triangulation
+  // that fails those checks is rejected with `Errc::degenerate`. The hint is
+  // ignored, and the face is triangulated as usual, when welding or winding
+  // normalization would change the vertex order it refers to.
+  std::optional<Triangulation2> triangulation;
 };
 
 namespace detail {
@@ -181,6 +191,35 @@ struct assemble_face_data {
   std::vector<std::array<std::uint32_t, 3>> triangles;
 };
 
+// A supplied face triangulation is trusted only after this check: every index
+// must select a face vertex, every triangle must wind counter-clockwise about
+// the face normal, and the triangles must add up to the face area within the
+// triangulation self-check tolerance. The check is linear in the triangle count,
+// so it still replaces the quadratic ear clipping it avoids.
+inline bool assemble_check_triangulation(const Triangulation2& triangulation,
+                                         const Polygon2d& polygon,
+                                         double face_area) noexcept {
+  if (!triangulation.ok || triangulation.triangles.empty()) return false;
+  const std::size_t vertex_count = polygon.vertices.size();
+  long double covered = 0.0L;
+  for (const std::array<std::uint32_t, 3>& triangle :
+       triangulation.triangles) {
+    if (triangle[0] >= vertex_count || triangle[1] >= vertex_count ||
+        triangle[2] >= vertex_count) {
+      return false;
+    }
+    const Point2d& a = polygon.vertices[triangle[0]];
+    const Point2d& b = polygon.vertices[triangle[1]];
+    const Point2d& c = polygon.vertices[triangle[2]];
+    if (sign_orient2d(a[0], a[1], b[0], b[1], c[0], c[1]) <= 0) return false;
+    covered += static_cast<long double>(
+        0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])));
+  }
+  const long double target = static_cast<long double>(face_area);
+  return std::fabs(covered - target) <=
+         static_cast<long double>(kTriangulateAreaRelTol) * target;
+}
+
 inline Result<assemble_face_data> assemble_make_face(const AssembledFace& face,
                                                      assemble_welder& welder) {
   if (!assemble_vec_finite(face.normal)) {
@@ -237,6 +276,14 @@ inline Result<assemble_face_data> assemble_make_face(const AssembledFace& face,
   if (!frame_result) return frame_result.error();
   const PlaneFrame frame = frame_result.value();
 
+  // The supplied-triangulation hint refers to the caller's ring order, which the
+  // winding normalization below may change.
+  std::size_t caller_vertex_count = face.outer.size();
+  for (const std::vector<Point3d>& hole : face.holes) {
+    caller_vertex_count += hole.size();
+  }
+  bool rings_reordered = false;
+
   // Make the loop winding agree with the supplied outward normal: outer rings
   // are counter-clockwise and holes clockwise in the face frame. This keeps
   // the signed-volume and mass-property integration consistent even when a
@@ -254,6 +301,7 @@ inline Result<assemble_face_data> assemble_make_face(const AssembledFace& face,
     const bool want_positive = ring_index == 0u;
     if ((area > 0.0) != want_positive) {
       std::reverse(rings[ring_index].begin(), rings[ring_index].end());
+      rings_reordered = true;
     }
   }
 
@@ -276,10 +324,21 @@ inline Result<assemble_face_data> assemble_make_face(const AssembledFace& face,
   if (!std::isfinite(face_area) || !(face_area > 0.0)) {
     return Error{Errc::degenerate, "assemble_solid: face has zero area"};
   }
-  const Triangulation2 triangulation = triangulate_polygon2(polygon);
-  if (!triangulation.ok || triangulation.triangles.empty()) {
-    return Error{Errc::degenerate,
-                 "assemble_solid: face triangulation failed"};
+  Triangulation2 triangulation;
+  if (face.triangulation.has_value() && !rings_reordered &&
+      caller_vertex_count == polygon.vertices.size()) {
+    if (!assemble_check_triangulation(*face.triangulation, polygon,
+                                      face_area)) {
+      return Error{Errc::degenerate,
+                   "assemble_solid: provided face triangulation is invalid"};
+    }
+    triangulation = *face.triangulation;
+  } else {
+    triangulation = triangulate_polygon2(polygon);
+    if (!triangulation.ok || triangulation.triangles.empty()) {
+      return Error{Errc::degenerate,
+                   "assemble_solid: face triangulation failed"};
+    }
   }
 
   assemble_face_data data;
