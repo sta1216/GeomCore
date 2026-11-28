@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <vector>
 
@@ -20,8 +21,9 @@ inline namespace v1 {
 namespace detail {
 
 // Outward unit normal of one extrusion side wall. `a` and `b` are consecutive
-// points of the (counter-clockwise) bottom ring and `axis` is the extrusion
-// direction; cross(b - a, axis) points away from the enclosed material.
+// points of a normalized bottom ring and `axis` is the extrusion direction; the
+// outer ring is counter-clockwise and holes are clockwise, so cross(b - a, axis)
+// points away from the material in both cases.
 // The largest component is scaled out first so the length stays in
 // [1, sqrt(3)] for extreme coordinates. A zero or non-finite cross product
 // returns a zero vector, which assemble_solid rejects as a degenerate face.
@@ -41,22 +43,23 @@ inline Vec3d extrude_side_normal(const Point3d& a, const Point3d& b,
 
 }  // namespace detail
 
-// Extrudes the outer ring of a planar polygon into a closed B-rep solid.
+// Extrudes a planar polygon, with optional holes, into a closed B-rep solid.
 //
-// The ring is mapped through the plane's frame, normalized to counter-clockwise
-// (a clockwise input is accepted and reversed), and swept along the plane normal
-// by `height`. The result has one bottom cap, one top cap and one planar quad
-// per ring edge; every face normal points out of the solid. Task 1 accepts only
-// a profile without holes.
+// Every ring is mapped through the plane's frame and normalized: the outer ring
+// (ring 0) ends counter-clockwise and every hole ends clockwise, so the material
+// lies to the left of each ring; an input ring wound the other way is reversed.
+// The normalized rings are swept along the plane normal by `height`. The result
+// has one bottom cap, one top cap and one planar quad per edge of every ring;
+// every face normal points out of the solid.
 //
 // Errors, in check order:
 //   - non-finite or non-positive tolerance -> Errc::tolerance_violation;
 //   - make_plane_frame failure -> that error unchanged;
 //   - non-finite height -> Errc::non_finite; height <= 0 -> Errc::degenerate;
 //   - validate_polygon2 failure -> its Errc::non_finite or Errc::degenerate;
-//   - more than one ring -> Errc::unsupported (holes are a later task);
-//   - undefined ring orientation -> Errc::degenerate;
-//   - consecutive equal ring points, including last == first -> degenerate;
+//   - undefined orientation of any ring -> Errc::degenerate;
+//   - consecutive equal points in any normalized ring, including last == first
+//     -> Errc::degenerate;
 //   - assemble_solid failure -> Errc::invalid_topology (the assembler's
 //     internal message is not exposed).
 inline Result<Brep> extrude_profile(const Plane3& plane,
@@ -87,74 +90,101 @@ inline Result<Brep> extrude_profile(const Plane3& plane,
     return Error{Errc::degenerate, "extrude_profile: profile is degenerate"};
   }
 
-  if (profile.ring_count() != 1u) {
-    return Error{Errc::unsupported,
-                 "extrude_profile: hole rings are not supported yet"};
-  }
-
-  const std::span<const Point2d> source = profile.ring(0u);
-  std::vector<Point2d> ring;
-  ring.reserve(source.size());
-  const int orientation = ring_orientation2(source);
-  if (orientation == 0) {
-    return Error{Errc::degenerate,
-                 "extrude_profile: profile ring is degenerate"};
-  }
-  if (orientation > 0) {
-    ring.assign(source.begin(), source.end());
-  } else {
-    ring.assign(source.rbegin(), source.rend());
+  std::vector<std::vector<Point2d>> rings;
+  rings.reserve(profile.ring_count());
+  for (std::uint32_t r = 0; r < profile.ring_count(); ++r) {
+    const std::span<const Point2d> source = profile.ring(r);
+    const int orientation = ring_orientation2(source);
+    if (orientation == 0) {
+      return Error{Errc::degenerate,
+                   "extrude_profile: profile ring is degenerate"};
+    }
+    // Outer rings must end counter-clockwise and holes clockwise, so the
+    // material is on the left of each ring; reverse an input wound the other
+    // way. A clockwise outer ring is therefore accepted.
+    const bool wants_ccw = r == 0u;
+    std::vector<Point2d> ring;
+    ring.reserve(source.size());
+    if ((orientation > 0) == wants_ccw) {
+      ring.assign(source.begin(), source.end());
+    } else {
+      ring.assign(source.rbegin(), source.rend());
+    }
+    rings.push_back(std::move(ring));
   }
 
   // Repeated points (including a duplicated closing vertex) are not rejected
   // by ring_orientation2, which skips them when it picks the extreme vertex.
+  // Check them after normalization because reversing a ring preserves them.
   const auto same_point = [](const Point2d& first,
                              const Point2d& second) noexcept {
     return first[0] == second[0] && first[1] == second[1];
   };
-  for (std::size_t i = 0; i < ring.size(); ++i) {
-    if (same_point(ring[i], ring[(i + 1u) % ring.size()])) {
-      return Error{Errc::degenerate,
-                   "extrude_profile: profile ring has a repeated vertex"};
+  for (const std::vector<Point2d>& ring : rings) {
+    for (std::size_t i = 0; i < ring.size(); ++i) {
+      if (same_point(ring[i], ring[(i + 1u) % ring.size()])) {
+        return Error{Errc::degenerate,
+                     "extrude_profile: profile ring has a repeated vertex"};
+      }
     }
   }
 
-  std::vector<Point3d> bottom;
-  std::vector<Point3d> top;
-  bottom.reserve(ring.size());
-  top.reserve(ring.size());
-  for (const Point2d& point : ring) {
-    const Point3d base = plane_frame_to_3d(frame, point);
-    bottom.push_back(base);
-    top.push_back(base + frame.normal * height);
+  std::size_t point_count = 0;
+  for (const std::vector<Point2d>& ring : rings) point_count += ring.size();
+
+  std::vector<std::vector<Point3d>> bottom_rings(rings.size());
+  std::vector<std::vector<Point3d>> top_rings(rings.size());
+  for (std::size_t r = 0; r < rings.size(); ++r) {
+    bottom_rings[r].reserve(rings[r].size());
+    top_rings[r].reserve(rings[r].size());
+    for (const Point2d& point : rings[r]) {
+      const Point3d base = plane_frame_to_3d(frame, point);
+      bottom_rings[r].push_back(base);
+      top_rings[r].push_back(base + frame.normal * height);
+    }
   }
 
   const Vec3d& normal = frame.normal;
   std::vector<AssembledFace> faces;
-  faces.reserve(2u + ring.size());
+  faces.reserve(2u + point_count);
 
-  // The top cap keeps the normalized counter-clockwise ring; the bottom cap is
-  // the same ring reversed so it winds counter-clockwise about -normal.
+  // The top cap keeps the normalized order: outer counter-clockwise, holes
+  // clockwise about +normal. The bottom cap reverses every ring, so it winds
+  // the same way about -normal.
   AssembledFace bottom_cap;
-  bottom_cap.outer.resize(bottom.size());
-  std::reverse_copy(bottom.begin(), bottom.end(), bottom_cap.outer.begin());
-  bottom_cap.normal = Vec3d{-normal[0], -normal[1], -normal[2]};
-  faces.push_back(std::move(bottom_cap));
-
   AssembledFace top_cap;
-  top_cap.outer = top;
+  bottom_cap.normal = Vec3d{-normal[0], -normal[1], -normal[2]};
   top_cap.normal = normal;
+  for (std::size_t r = 0; r < rings.size(); ++r) {
+    std::vector<Point3d> reversed(bottom_rings[r].rbegin(),
+                                  bottom_rings[r].rend());
+    if (r == 0u) {
+      bottom_cap.outer = std::move(reversed);
+      top_cap.outer = top_rings[r];
+    } else {
+      bottom_cap.holes.push_back(std::move(reversed));
+      top_cap.holes.push_back(top_rings[r]);
+    }
+  }
+  faces.push_back(std::move(bottom_cap));
   faces.push_back(std::move(top_cap));
 
-  for (std::size_t i = 0; i < ring.size(); ++i) {
-    const std::size_t next = (i + 1u) % ring.size();
-    AssembledFace side;
-    side.outer = {bottom[i], bottom[next], top[next], top[i]};
-    side.normal = detail::extrude_side_normal(bottom[i], bottom[next], normal);
-    faces.push_back(std::move(side));
+  // One side quad per edge of every ring. For a hole the ring is clockwise and
+  // cross(b - a, normal) points into the hole, i.e. out of the material.
+  for (std::size_t r = 0; r < rings.size(); ++r) {
+    const std::vector<Point3d>& bottom = bottom_rings[r];
+    const std::vector<Point3d>& top = top_rings[r];
+    for (std::size_t i = 0; i < rings[r].size(); ++i) {
+      const std::size_t next = (i + 1u) % rings[r].size();
+      AssembledFace side;
+      side.outer = {bottom[i], bottom[next], top[next], top[i]};
+      side.normal =
+          detail::extrude_side_normal(bottom[i], bottom[next], normal);
+      faces.push_back(std::move(side));
+    }
   }
 
-  const Result<Brep> assembled = assemble_solid(faces, tolerance);
+  Result<Brep> assembled = assemble_solid(faces, tolerance);
   if (!assembled) {
     return Error{Errc::invalid_topology,
                  "extrude_profile: solid could not be assembled"};

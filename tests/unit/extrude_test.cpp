@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -79,27 +80,139 @@ TEST_CASE("extrude rejects invalid options and height") {
   const Polygon2d square = square_profile();
   const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
 
-  CHECK(extrude_profile(plane, square, 1.0, 0.0).error().code ==
-        Errc::tolerance_violation);
-  CHECK(extrude_profile(plane, square, 1.0, -1e-9).error().code ==
-        Errc::tolerance_violation);
-  CHECK(extrude_profile(plane, square, 1.0, std::numeric_limits<double>::quiet_NaN())
-            .error().code == Errc::tolerance_violation);
-  CHECK(extrude_profile(plane, square, 0.0, 1e-9).error().code == Errc::degenerate);
-  CHECK(extrude_profile(plane, square, -1.0, 1e-9).error().code == Errc::degenerate);
-  CHECK(extrude_profile(plane, square, std::numeric_limits<double>::infinity(), 1e-9)
-            .error().code == Errc::non_finite);
+  const Result<Brep> zero_tolerance =
+      extrude_profile(plane, square, 1.0, 0.0);
+  REQUIRE(!zero_tolerance);
+  CHECK(zero_tolerance.error().code == Errc::tolerance_violation);
+  CHECK(zero_tolerance.error().message ==
+        std::string_view(
+            "extrude_profile: tolerance must be finite and positive"));
+
+  const Result<Brep> negative_tolerance =
+      extrude_profile(plane, square, 1.0, -1e-9);
+  REQUIRE(!negative_tolerance);
+  CHECK(negative_tolerance.error().code == Errc::tolerance_violation);
+  CHECK(negative_tolerance.error().message ==
+        std::string_view(
+            "extrude_profile: tolerance must be finite and positive"));
+
+  const Result<Brep> nan_tolerance = extrude_profile(
+      plane, square, 1.0, std::numeric_limits<double>::quiet_NaN());
+  REQUIRE(!nan_tolerance);
+  CHECK(nan_tolerance.error().code == Errc::tolerance_violation);
+  CHECK(nan_tolerance.error().message ==
+        std::string_view(
+            "extrude_profile: tolerance must be finite and positive"));
+
+  const Result<Brep> zero_height = extrude_profile(plane, square, 0.0, 1e-9);
+  REQUIRE(!zero_height);
+  CHECK(zero_height.error().code == Errc::degenerate);
+  CHECK(zero_height.error().message ==
+        std::string_view("extrude_profile: height must be positive"));
+
+  const Result<Brep> negative_height =
+      extrude_profile(plane, square, -1.0, 1e-9);
+  REQUIRE(!negative_height);
+  CHECK(negative_height.error().code == Errc::degenerate);
+  CHECK(negative_height.error().message ==
+        std::string_view("extrude_profile: height must be positive"));
+
+  const Result<Brep> infinite_height = extrude_profile(
+      plane, square, std::numeric_limits<double>::infinity(), 1e-9);
+  REQUIRE(!infinite_height);
+  CHECK(infinite_height.error().code == Errc::non_finite);
+  CHECK(infinite_height.error().message ==
+        std::string_view("extrude_profile: height is not finite"));
 }
 
 TEST_CASE("extrude rejects a structurally invalid profile") {
   const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
   const Polygon2d empty;
-  CHECK(extrude_profile(plane, empty, 1.0, 1e-9).error().code ==
-        Errc::degenerate);
+  const Result<Brep> empty_result = extrude_profile(plane, empty, 1.0, 1e-9);
+  REQUIRE(!empty_result);
+  CHECK(empty_result.error().code == Errc::degenerate);
+  CHECK(empty_result.error().message ==
+        std::string_view("extrude_profile: profile is degenerate"));
+
+  Polygon2d collinear;
+  collinear.vertices = {Point2d{0.0, 0.0}, Point2d{1.0, 0.0},
+                        Point2d{2.0, 0.0}};
+  collinear.ring_starts = {0u, 3u};
+  const Result<Brep> collinear_result =
+      extrude_profile(plane, collinear, 1.0, 1e-9);
+  REQUIRE(!collinear_result);
+  CHECK(collinear_result.error().code == Errc::degenerate);
+  CHECK(collinear_result.error().message ==
+        std::string_view("extrude_profile: profile ring is degenerate"));
 
   Polygon2d duplicate = square_profile();
   duplicate.vertices.insert(duplicate.vertices.begin(), Point2d{0.0, 0.0});
   duplicate.ring_starts = {0u, 5u};
-  CHECK(extrude_profile(plane, duplicate, 1.0, 1e-9).error().code ==
-        Errc::degenerate);
+  const Result<Brep> duplicate_result =
+      extrude_profile(plane, duplicate, 1.0, 1e-9);
+  REQUIRE(!duplicate_result);
+  CHECK(duplicate_result.error().code == Errc::degenerate);
+  CHECK(duplicate_result.error().message ==
+        std::string_view(
+            "extrude_profile: profile ring has a repeated vertex"));
+}
+
+TEST_CASE("extrude a profile with a hole") {
+  Polygon2d profile;
+  profile.vertices = {
+      Point2d{0.0, 0.0}, Point2d{4.0, 0.0}, Point2d{4.0, 4.0}, Point2d{0.0, 4.0},
+      Point2d{1.0, 1.0}, Point2d{1.0, 3.0}, Point2d{3.0, 3.0}, Point2d{3.0, 1.0}};
+  profile.ring_starts = {0u, 4u, 8u};
+  const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
+
+  const Result<Brep> solid = extrude_profile(plane, profile, 2.0, 1e-9);
+  REQUIRE(solid.has_value());
+  CHECK(solid.value().vertex_count() == 16u);
+  CHECK(solid.value().edge_count() == 24u);
+  CHECK(solid.value().face_count() == 10u);
+  CHECK(volume_of(solid.value()) == doctest::Approx(24.0).epsilon(1e-12));
+  REQUIRE(validate_topology(solid.value()).ok());
+}
+
+TEST_CASE("extrude ignores the input ring orientations") {
+  Polygon2d profile;
+  profile.vertices = {
+      Point2d{0.0, 4.0}, Point2d{4.0, 4.0}, Point2d{4.0, 0.0}, Point2d{0.0, 0.0},
+      Point2d{1.0, 1.0}, Point2d{3.0, 1.0}, Point2d{3.0, 3.0}, Point2d{1.0, 3.0}};
+  profile.ring_starts = {0u, 4u, 8u};
+  const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
+
+  const Result<Brep> solid = extrude_profile(plane, profile, 2.0, 1e-9);
+  REQUIRE(solid.has_value());
+  CHECK(volume_of(solid.value()) == doctest::Approx(24.0).epsilon(1e-12));
+  REQUIRE(validate_topology(solid.value()).ok());
+}
+
+TEST_CASE("extrude an L-shaped profile") {
+  Polygon2d profile;
+  profile.vertices = {Point2d{0.0, 0.0}, Point2d{3.0, 0.0}, Point2d{3.0, 1.0},
+                      Point2d{1.0, 1.0}, Point2d{1.0, 2.0}, Point2d{0.0, 2.0}};
+  profile.ring_starts = {0u, 6u};
+  const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
+
+  const Result<Brep> solid = extrude_profile(plane, profile, 2.0, 1e-9);
+  REQUIRE(solid.has_value());
+  CHECK(solid.value().vertex_count() == 12u);
+  CHECK(solid.value().edge_count() == 18u);
+  CHECK(solid.value().face_count() == 8u);
+  CHECK(volume_of(solid.value()) == doctest::Approx(8.0).epsilon(1e-12));
+  REQUIRE(validate_topology(solid.value()).ok());
+}
+
+TEST_CASE("extrude on a tilted, offset plane") {
+  Polygon2d profile;
+  profile.vertices = {Point2d{0.0, 0.0}, Point2d{2.0, 0.0}, Point2d{2.0, 2.0},
+                      Point2d{0.0, 2.0}};
+  profile.ring_starts = {0u, 4u};
+  const Plane3 plane{geom::Vec3d{1.0, 1.0, 1.0}, 0.5};
+
+  const Result<Brep> solid = extrude_profile(plane, profile, 2.0, 1e-9);
+  REQUIRE(solid.has_value());
+  CHECK(volume_of(solid.value()) == doctest::Approx(8.0).epsilon(1e-12));
+  REQUIRE(validate_topology(solid.value()).ok());
 }
