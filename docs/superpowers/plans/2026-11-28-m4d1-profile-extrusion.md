@@ -622,11 +622,18 @@ git commit -m "docs(brep): record the profile extrusion contract and benchmark"
 | T3 | `c536cca` (+ `63e5cfe`) | 14 / 99 (`*extrude*`), 11 / 9,808 (`*triangulate2*`), 47 / 10,455 (filtered lane) | simplicity certificate, diagnostics, robustness, 1e6 scale; `63e5cfe` reuses the certificate triangulation (2.49x) |
 | T4 | this commit | full Release 1,206 cases / 685,738 assertions, 0 failed, 906 s | benchmark (`bench/bench_m4d1.cpp`), ADR-0045, both docs, architecture §8.7/§16.4, CI bench wiring |
 
-Every numbers row above was rerun on the committed tree: Debug and Release
-`*extrude*` are 14 cases / 99 assertions, the filtered lane
-`*extrude*,assemble:*,*triangulate2*` is 47 cases / 10,455 assertions, and the
-full Release suite is 1,206 cases / 685,738 assertions (906 s). Full Debug is
-PENDING and is never reported as a pass.
+Every numbers row above was rerun on the Task 4 tree (that is the tree the T4 row
+names): Debug and Release `*extrude*` are 14 cases / 99 assertions, the filtered
+lane `*extrude*,assemble:*,*triangulate2*` is 47 cases / 10,455 assertions, and
+the full Release suite is 1,206 cases / 685,738 assertions (906 s). Full Debug
+is PENDING and is never reported as a pass.
+
+A follow-up commit (`test(brep): pin the assembler hint fallback`, tests and docs
+only) pins the two hints that the assembler must drop rather than validate
+(reoriented ring, welded vertex); after it the filtered lane is 49 cases /
+10,461 assertions and the full Release suite is 1,208 cases / 685,744
+assertions, and those are the counts the ADR, the benchmark doc and the
+architecture sections cite.
 
 ## Self-Check
 

@@ -68,12 +68,12 @@ part of ctest.
 - Debug `*extrude*`: 14 cases / 99 assertions, 0 failed, exit 0
   (`.\build\tests\Debug\geom_tests.exe --test-case="*extrude*"`).
 - Debug filtered extrusion lane `*extrude*,assemble:*,*triangulate2*`:
-  47 cases / 10455 assertions, 0 failed, exit 0. Release rerun of the same lane:
-  47 / 10455, 0 failed.
+  49 cases / 10461 assertions, 0 failed, exit 0. Release rerun of the same lane:
+  49 / 10461, 0 failed.
 - Full Release (the gate): `.\build\tests\Release\geom_tests.exe` —
-  1,206 cases / 685,738 assertions, 0 failed, exit 0, 906 s, run on the tree of
-  `63e5cfe` (the Task 4 commit adds only the benchmark and docs, no library
-  code).
+  1,208 cases / 685,744 assertions, 0 failed, exit 0, run on the tree of the
+  fallback-pin commit (Task 4 and the pin commit add only the benchmark, tests
+  and docs, no library code).
 - Full Debug was **not** run and is never reported: the suite still contains the
   pre-existing >20-minute boolean cases documented in earlier milestones.
 

@@ -173,10 +173,12 @@ straddling the boundary fails the covered-area invariant.
 - Tests pin: square, L-shape, hole, reversed outer ring, tilted plane, holed
   profile on a tilted plane, determinism and input immutability, the 1e6 square
   with height 1e-6, every rejection message above, bowtie and outside-hole
-  rejection, and the assembler-side hint reuse and its three invalid forms.
+  rejection, the assembler-side hint reuse and its three invalid forms, and the
+  two structurally incompatible hints (reoriented ring, welded vertex) that must
+  be dropped rather than validated.
   Debug and Release `*extrude*` are 14 cases / 99 assertions; the filtered
-  extrusion lane (`*extrude*,assemble:*,*triangulate2*`) is 47 / 10455, and the
-  full Release suite is 1206 cases / 685738 assertions, 0 failed.
+  extrusion lane (`*extrude*,assemble:*,*triangulate2*`) is 49 / 10461, and the
+  full Release suite is 1208 cases / 685744 assertions, 0 failed.
 - Deferred to M4d-2: oblique/shear extrusion, revolve, loft and sweep, plus any
   profile repair or self-intersection healing. No document claims general sweep
   support.

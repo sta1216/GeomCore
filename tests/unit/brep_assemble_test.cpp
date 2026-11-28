@@ -229,6 +229,33 @@ TEST_CASE("assemble: a supplied face triangulation must wind counter-clockwise")
         "assemble_solid: provided face triangulation is invalid");
 }
 
+TEST_CASE("assemble: a triangulation is ignored when the ring is reoriented") {
+  auto faces = box_faces({0, 0, 0}, {2, 3, 4});
+  // Reversing the outer ring makes the assembler reorient it, so the hint's
+  // indices no longer address the same vertices. It must be dropped, not
+  // validated: the out-of-range index would be rejected if it were used.
+  std::reverse(faces[0].outer.begin(), faces[0].outer.end());
+  faces[0].triangulation = Triangulation2{{{0u, 1u, 9u}, {0u, 2u, 3u}}, true};
+  const auto brep = assemble_solid(faces, 1e-9);
+  REQUIRE(brep.has_value());
+  CHECK(mass_properties(brep.value()).value().volume ==
+        doctest::Approx(24.0).epsilon(1e-12));
+  CHECK(validate_solid(brep.value()));
+}
+
+TEST_CASE("assemble: a triangulation is ignored when welding merges a vertex") {
+  auto faces = box_faces({0, 0, 0}, {2, 3, 4});
+  // The duplicate is welded away, so the caller's five indices no longer match
+  // the polygon's four vertices; the hint must be dropped, not validated.
+  faces[0].outer.insert(faces[0].outer.begin() + 1, faces[0].outer.front());
+  faces[0].triangulation = Triangulation2{{{0u, 1u, 9u}, {0u, 2u, 3u}}, true};
+  const auto brep = assemble_solid(faces, 1e-9);
+  REQUIRE(brep.has_value());
+  CHECK(mass_properties(brep.value()).value().volume ==
+        doctest::Approx(24.0).epsilon(1e-12));
+  CHECK(validate_solid(brep.value()));
+}
+
 TEST_CASE("assemble: a missing face is a diagnosed not_closed failure") {
   auto faces = box_faces({0, 0, 0}, {1, 1, 1});
   faces.pop_back();
