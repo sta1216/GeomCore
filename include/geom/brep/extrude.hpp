@@ -11,6 +11,7 @@
 #include <geom/brep/plane_frame.hpp>
 #include <geom/brep/topology.hpp>
 #include <geom/cgeom/polygon2.hpp>
+#include <geom/cgeom/triangulate2.hpp>
 #include <geom/core/error.hpp>
 #include <geom/core/result.hpp>
 #include <geom/surfaces/plane.hpp>
@@ -60,6 +61,8 @@ inline Vec3d extrude_side_normal(const Point3d& a, const Point3d& b,
 //   - undefined orientation of any ring -> Errc::degenerate;
 //   - consecutive equal points in any normalized ring, including last == first
 //     -> Errc::degenerate;
+//   - a profile that triangulate_polygon2 cannot triangulate, i.e. is not a
+//     simple polygon with holes, -> Errc::degenerate;
 //   - assemble_solid failure -> Errc::invalid_topology (the assembler's
 //     internal message is not exposed).
 inline Result<Brep> extrude_profile(const Plane3& plane,
@@ -127,6 +130,15 @@ inline Result<Brep> extrude_profile(const Plane3& plane,
                      "extrude_profile: profile ring has a repeated vertex"};
       }
     }
+  }
+
+  // Certify that the profile is a simple polygon with holes before any face is
+  // built. Triangulation is the existing check that sees self-intersections and
+  // holes that lie outside the outer ring; the caps below keep the
+  // polygon-with-holes rings, the triangulation is only a certificate.
+  if (!triangulate_polygon2(profile).ok) {
+    return Error{Errc::degenerate,
+                 "extrude_profile: profile is not a simple polygon with holes"};
   }
 
   std::size_t point_count = 0;

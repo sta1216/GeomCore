@@ -118,6 +118,16 @@ Polygon2d two_unit_holes(double ax, double ay, double bx, double by) {
   return p;
 }
 
+// 10x10 square with one axis-aligned unit-square hole whose lower-left corner is
+// (x, y). The hole may be placed outside the square.
+Polygon2d square_with_hole(double x, double y) {
+  Polygon2d p;
+  p.vertices = {{0, 0}, {10, 0}, {10, 10}, {0, 10},
+                {x, y}, {x + 1, y}, {x + 1, y + 1}, {x, y + 1}};
+  p.ring_starts = {0, 4, 8};
+  return p;
+}
+
 }  // namespace
 
 TEST_CASE("triangulate2: square") {
@@ -206,6 +216,90 @@ TEST_CASE("triangulate2: randomized disjoint unit-square hole pairs") {
   CHECK(generated == 300);
 }
 
+TEST_CASE("triangulate2: rejects a hole outside the outer ring") {
+  // Every placement is rejected, an enclosing hole included. Bridging a hole that
+  // lies outside the outer ring folds the hole ring into the outer ring across a
+  // zero-width slit; the merged ring then has a degenerate ear that ear clipping
+  // cannot clip (it requires strictly positive turns), so the covered area never
+  // matches the expected area and the triangulation fails. A hole that straddles
+  // the boundary fails the same area invariant. These cases pin the certificate
+  // extrude_profile relies on; no separate point-in-polygon check is needed.
+  struct Placement {
+    const char* name;
+    double x;
+    double y;
+    bool enclosing;
+  };
+  const Placement placements[] = {
+      {"left of the outer ring", -3.0, 5.0, false},
+      {"right of the outer ring", 12.0, 5.0, false},
+      {"above the outer ring", 5.0, 12.0, false},
+      {"below the outer ring", 5.0, -3.0, false},
+      {"enclosing the outer ring", -3.0, -3.0, true},
+      {"straddling the right edge", 9.5, 5.0, false},
+      {"straddling the lower-left corner", -0.5, -0.5, false},
+  };
+  for (const Placement& placement : placements) {
+    Polygon2d p;
+    if (placement.enclosing) {
+      // The enclosing case needs a hole larger than the square; every other case
+      // uses a unit square built around the placement.
+      p.vertices = {{0, 0}, {10, 0}, {10, 10}, {0, 10},
+                    {-3, -3}, {13, -3}, {13, 13}, {-3, 13}};
+      p.ring_starts = {0, 4, 8};
+    } else {
+      p = square_with_hole(placement.x, placement.y);
+    }
+    INFO("hole " << placement.name);
+    const Triangulation2 tri = triangulate_polygon2(p);
+    CHECK(tri.ok == false);
+    CHECK(tri.triangles.empty());
+  }
+}
+
+TEST_CASE("triangulate2: rejects nested holes") {
+  // Hole B lies strictly inside hole A. Both are inside the outer square, so a
+  // containment test against the outer ring alone accepts them.
+  Polygon2d p;
+  p.vertices = {{0, 0},   {10, 0},  {10, 10}, {0, 10},
+                {1, 1},   {9, 1},   {9, 9},   {1, 9},
+                {3, 3},   {5, 3},   {5, 5},   {3, 5}};
+  p.ring_starts = {0, 4, 8, 12};
+  const Triangulation2 tri = triangulate_polygon2(p);
+  CHECK(tri.ok == false);
+  CHECK(tri.triangles.empty());
+}
+
+TEST_CASE("triangulate2: rejects a self-intersecting outer ring") {
+  // The two lobes of the bowtie cancel exactly, so the shoelace area is zero and
+  // the area precondition rejects the ring. This is the certificate
+  // extrude_profile relies on for a self-intersecting profile.
+  const Polygon2d bowtie = single({{0, 0}, {2, 2}, {0, 2}, {2, 0}});
+  const Triangulation2 tri = triangulate_polygon2(bowtie);
+  CHECK(tri.ok == false);
+  CHECK(tri.triangles.empty());
+}
+
+TEST_CASE("triangulate2: rejects a ring that touches itself at a repeated vertex") {
+  // Two CCW lobes joined at (2,2): the shoelace area is 8, so the area
+  // precondition alone would accept it, and the same ring without the duplicated
+  // pinch vertex (the pentagon below) triangulates into 3 triangles. With the
+  // duplicate the ear clipping clips the two lobes and then gets stuck: the three
+  // vertices that remain are collinear and no strictly positive turn is left, so
+  // ear_clip returns false even though the two emitted triangles already cover
+  // the expected area. extrude_profile inherits this rejection through its
+  // certificate.
+  const Polygon2d pinched = single({{0, 0}, {4, 0}, {2, 2}, {4, 4}, {0, 4}, {2, 2}});
+  const Triangulation2 tri = triangulate_polygon2(pinched);
+  CHECK(tri.ok == false);
+  CHECK(tri.triangles.empty());
+
+  const Polygon2d pentagon = single({{0, 0}, {4, 0}, {2, 2}, {4, 4}, {0, 4}});
+  const Triangulation2 pentagon_tri = triangulate_polygon2(pentagon);
+  REQUIRE(pentagon_tri.ok);
+  CHECK(pentagon_tri.triangles.size() == 3);
+}
+
 TEST_CASE("triangulate2: rejects malformed input") {
   Polygon2d p;
   p.ring_starts = {0, 2};
@@ -220,3 +314,4 @@ TEST_CASE("triangulate2: rejects malformed input") {
   CHECK(non_finite.ok == false);
   CHECK(non_finite.triangles.empty());
 }
+

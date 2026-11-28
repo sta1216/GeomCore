@@ -246,3 +246,69 @@ TEST_CASE("extrude on a tilted, offset plane") {
   CHECK(volume_of(solid.value()) == doctest::Approx(8.0).epsilon(1e-12));
   REQUIRE(validate_topology(solid.value()).ok());
 }
+
+TEST_CASE("extrude rejects a self-intersecting profile") {
+  Polygon2d bowtie;
+  bowtie.vertices = {Point2d{0.0, 0.0}, Point2d{2.0, 2.0}, Point2d{0.0, 2.0},
+                     Point2d{2.0, 0.0}};
+  bowtie.ring_starts = {0u, 4u};
+  const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
+
+  const Result<Brep> result = extrude_profile(plane, bowtie, 1.0, 1e-9);
+  REQUIRE(!result);
+  CHECK(result.error().code == Errc::degenerate);
+  CHECK(std::string_view(result.error().message) ==
+        "extrude_profile: profile is not a simple polygon with holes");
+}
+
+TEST_CASE("extrude rejects a hole outside the outer ring") {
+  Polygon2d profile;
+  profile.vertices = {Point2d{0.0, 0.0}, Point2d{2.0, 0.0}, Point2d{2.0, 2.0},
+                      Point2d{0.0, 2.0}, Point2d{3.0, 3.0}, Point2d{4.0, 3.0},
+                      Point2d{4.0, 4.0}, Point2d{3.0, 4.0}};
+  profile.ring_starts = {0u, 4u, 8u};
+  const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
+
+  const Result<Brep> result = extrude_profile(plane, profile, 1.0, 1e-9);
+  REQUIRE(!result);
+  CHECK(result.error().code == Errc::degenerate);
+  CHECK(std::string_view(result.error().message) ==
+        "extrude_profile: profile is not a simple polygon with holes");
+}
+
+TEST_CASE("extrude is deterministic and leaves its inputs unchanged") {
+  const Polygon2d square = square_profile();
+  const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
+  const std::vector<Point2d> before_vertices = square.vertices;
+  const std::vector<std::uint32_t> before_starts = square.ring_starts;
+
+  const Result<Brep> first = extrude_profile(plane, square, 2.5, 1e-9);
+  const Result<Brep> second = extrude_profile(plane, square, 2.5, 1e-9);
+  REQUIRE(first.has_value());
+  REQUIRE(second.has_value());
+  CHECK(first.value().vertex_count() == second.value().vertex_count());
+  CHECK(first.value().edge_count() == second.value().edge_count());
+  CHECK(first.value().face_count() == second.value().face_count());
+  CHECK(volume_of(first.value()) == volume_of(second.value()));
+  CHECK(square.vertices.size() == before_vertices.size());
+  CHECK(square.ring_starts == before_starts);
+  for (std::size_t i = 0; i < before_vertices.size(); ++i) {
+    CHECK(square.vertices[i][0] == before_vertices[i][0]);
+    CHECK(square.vertices[i][1] == before_vertices[i][1]);
+  }
+}
+
+TEST_CASE("extrude keeps a small height on a large profile") {
+  Polygon2d square;
+  square.vertices = {Point2d{0.0, 0.0}, Point2d{1e6, 0.0}, Point2d{1e6, 1e6},
+                     Point2d{0.0, 1e6}};
+  square.ring_starts = {0u, 4u};
+  const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
+
+  const Result<Brep> solid = extrude_profile(plane, square, 1e-6, 1e-12);
+  REQUIRE(solid.has_value());
+  // 1e6 x 1e6 x 1e-6 = 1e6. The brief's snippet expected 1.0, which is the
+  // volume of a 1e3-sized profile; the vertices it specifies give 1e6.
+  CHECK(volume_of(solid.value()) == doctest::Approx(1e6).epsilon(1e-9));
+  REQUIRE(validate_topology(solid.value()).ok());
+}
