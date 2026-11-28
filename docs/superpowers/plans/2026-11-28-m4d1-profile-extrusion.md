@@ -112,7 +112,7 @@ Polygon2d square_profile() {
 double volume_of(const Brep& brep) {
   const Result<MassProperties> props = mass_properties(brep);
   REQUIRE(props.has_value());
-  return props->volume;
+  return (*props).volume;
 }
 
 std::size_t boundary_edges(const TriMesh& mesh) {
@@ -139,11 +139,11 @@ TEST_CASE("extrude a square profile") {
   const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
   const Result<Brep> solid = extrude_profile(plane, square, 3.0, 1e-9);
   REQUIRE(solid.has_value());
-  CHECK(solid->solid_count() == 1u);
-  CHECK(solid->shell_count() == 1u);
-  CHECK(solid->vertex_count() == 8u);
-  CHECK(solid->edge_count() == 12u);
-  CHECK(solid->face_count() == 6u);
+  CHECK((*solid).solid_count() == 1u);
+  CHECK((*solid).shell_count() == 1u);
+  CHECK((*solid).vertex_count() == 8u);
+  CHECK((*solid).edge_count() == 12u);
+  CHECK((*solid).face_count() == 6u);
   CHECK(volume_of(solid.value()) == doctest::Approx(12.0).epsilon(1e-12));
   REQUIRE(validate_topology(solid.value()).ok());
 
@@ -244,9 +244,9 @@ TEST_CASE("extrude a profile with a hole") {
 
   const Result<Brep> solid = extrude_profile(plane, profile, 2.0, 1e-9);
   REQUIRE(solid.has_value());
-  CHECK(solid->vertex_count() == 16u);
-  CHECK(solid->edge_count() == 24u);
-  CHECK(solid->face_count() == 10u);
+  CHECK((*solid).vertex_count() == 16u);
+  CHECK((*solid).edge_count() == 24u);
+  CHECK((*solid).face_count() == 10u);
   CHECK(volume_of(solid.value()) == doctest::Approx(24.0).epsilon(1e-12));
   REQUIRE(validate_topology(solid.value()).ok());
 }
@@ -274,9 +274,9 @@ TEST_CASE("extrude an L-shaped profile") {
 
   const Result<Brep> solid = extrude_profile(plane, profile, 2.0, 1e-9);
   REQUIRE(solid.has_value());
-  CHECK(solid->vertex_count() == 12u);
-  CHECK(solid->edge_count() == 18u);
-  CHECK(solid->face_count() == 8u);
+  CHECK((*solid).vertex_count() == 12u);
+  CHECK((*solid).edge_count() == 18u);
+  CHECK((*solid).face_count() == 8u);
   CHECK(volume_of(solid.value()) == doctest::Approx(8.0).epsilon(1e-12));
   REQUIRE(validate_topology(solid.value()).ok());
 }
@@ -402,7 +402,8 @@ TEST_CASE("extrude keeps a small height on a large profile") {
   const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
   const Result<Brep> solid = extrude_profile(plane, square, 1e-6, 1e-12);
   REQUIRE(solid.has_value());
-  CHECK(volume_of(solid.value()) == doctest::Approx(1.0).epsilon(1e-9));
+  // 1e6 x 1e6 x 1e-6 = 1e6, not 1; the brief originally carried Approx(1.0).
+  CHECK(volume_of(solid.value()) == doctest::Approx(1e6).epsilon(1e-9));
   REQUIRE(validate_topology(solid.value()).ok());
 }
 ```
@@ -522,8 +523,8 @@ int main() {
         std::fprintf(stderr, "extrude failed: %s\n", solid.error().message);
         std::exit(2);
       }
-      if (solid->vertex_count() != 2048u || solid->edge_count() != 3072u ||
-          solid->face_count() != 1026u) {
+      if ((*solid).vertex_count() != 2048u || (*solid).edge_count() != 3072u ||
+          (*solid).face_count() != 1026u) {
         std::fprintf(stderr, "topology mismatch\n");
         std::exit(2);
       }
@@ -532,13 +533,13 @@ int main() {
         std::exit(2);
       }
       const Result<MassProperties> props = mass_properties(solid.value());
-      if (!props || std::fabs(props->volume - expected) > 1e-9 * expected) {
+      if (!props || std::fabs((*props).volume - expected) > 1e-9 * expected) {
         std::fprintf(stderr, "volume mismatch: %.17g expected %.17g\n",
-                     props ? props->volume : 0.0, expected);
+                     props ? (*props).volume : 0.0, expected);
         std::exit(2);
       }
       const Result<TriMesh> mesh = tessellate(solid.value(), TessellationOptions{});
-      if (!mesh || mesh->triangles.empty()) {
+      if (!mesh || (*mesh).triangles.empty()) {
         std::fprintf(stderr, "tessellation failed\n");
         std::exit(2);
       }
@@ -616,10 +617,16 @@ git commit -m "docs(brep): record the profile extrusion contract and benchmark"
 
 | Task | Commit | Tests | Notes |
 | --- | --- | --- | --- |
-| T1 | PENDING | PENDING | outer-ring square extrusion |
-| T2 | PENDING | PENDING | holes, reversed input, L-shape, tilted plane |
-| T3 | PENDING | PENDING | simplicity/diagnostics/robustness |
-| T4 | PENDING | PENDING | benchmark, ADR-0045, docs, CI |
+| T1 | `ad11c24` | Debug `*extrude*` 1 case / 4 assertions at the time | outer-ring square extrusion; the four rectified in Task 3 |
+| T2 | `c223ef2` + `9ab7000` | 9 cases / 67 assertions (`*extrude*`) | holes, reversed input, L-shape, tilted plane; `9ab7000` pins the hole-ring rejections |
+| T3 | `c536cca` (+ `63e5cfe`) | 14 / 99 (`*extrude*`), 11 / 9,808 (`*triangulate2*`), 47 / 10,455 (filtered lane) | simplicity certificate, diagnostics, robustness, 1e6 scale; `63e5cfe` reuses the certificate triangulation (2.49x) |
+| T4 | this commit | full Release 1,206 cases / 685,738 assertions, 0 failed, 906 s | benchmark (`bench/bench_m4d1.cpp`), ADR-0045, both docs, architecture §8.7/§16.4, CI bench wiring |
+
+Every numbers row above was rerun on the committed tree: Debug and Release
+`*extrude*` are 14 cases / 99 assertions, the filtered lane
+`*extrude*,assemble:*,*triangulate2*` is 47 cases / 10,455 assertions, and the
+full Release suite is 1,206 cases / 685,738 assertions (906 s). Full Debug is
+PENDING and is never reported as a pass.
 
 ## Self-Check
 
