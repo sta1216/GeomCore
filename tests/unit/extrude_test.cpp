@@ -157,6 +157,36 @@ TEST_CASE("extrude rejects a structurally invalid profile") {
             "extrude_profile: profile ring has a repeated vertex"));
 }
 
+TEST_CASE("extrude rejects a hole ring with a repeated vertex") {
+  Polygon2d profile;
+  profile.vertices = {Point2d{0.0, 0.0}, Point2d{4.0, 0.0}, Point2d{4.0, 4.0},
+                      Point2d{0.0, 4.0}, Point2d{1.0, 1.0}, Point2d{1.0, 1.0},
+                      Point2d{3.0, 3.0}, Point2d{3.0, 1.0}};
+  profile.ring_starts = {0u, 4u, 8u};
+  const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
+
+  const Result<Brep> result = extrude_profile(plane, profile, 1.0, 1e-9);
+  REQUIRE(!result);
+  CHECK(result.error().code == Errc::degenerate);
+  CHECK(std::string_view(result.error().message) ==
+        "extrude_profile: profile ring has a repeated vertex");
+}
+
+TEST_CASE("extrude rejects a hole ring with no orientation") {
+  Polygon2d profile;
+  profile.vertices = {Point2d{0.0, 0.0}, Point2d{4.0, 0.0}, Point2d{4.0, 4.0},
+                      Point2d{0.0, 4.0}, Point2d{2.0, 2.0}, Point2d{2.0, 2.0},
+                      Point2d{2.0, 2.0}, Point2d{2.0, 2.0}};
+  profile.ring_starts = {0u, 4u, 8u};
+  const Plane3 plane{geom::Vec3d{0.0, 0.0, 1.0}, 0.0};
+
+  const Result<Brep> result = extrude_profile(plane, profile, 1.0, 1e-9);
+  REQUIRE(!result);
+  CHECK(result.error().code == Errc::degenerate);
+  CHECK(std::string_view(result.error().message) ==
+        "extrude_profile: profile ring is degenerate");
+}
+
 TEST_CASE("extrude a profile with a hole") {
   Polygon2d profile;
   profile.vertices = {
